@@ -49,8 +49,9 @@ static const Kind g_kinds[] = {
     // 0x59: 12 = hidden until his room's event (AreaEventBox - not copied: intro, music) drops him in; 13 shows him
     {GA_FIELD(MASTER_STALFOS_VTABLE), GA_FIELD(MASTER_STALFOS_CHANGE_STATE), 0x1230, 0x260, 12, 13, "Master Stalfos", 0xff, 1, 1},
     // bosses (enemy randomizer "Include bosses"): started by their own event (arm)
-    {GA_FIELD(MOLDORM_VTABLE), GA_FIELD(MOLDORM_CHANGE_STATE), 0xff0, 0x260, 6, 1, "Moldorm", 0xff, 0, 0, 0, NULL, 1},  // 0x63: 6 = waits for
-    // its start box (armed), 1 starts it (-> 2 -> 0, crawling); 17 = paused while Link is screens away
+    {GA_FIELD(MOLDORM_VTABLE), GA_FIELD(MOLDORM_CHANGE_STATE), 0xff0, 0x260, 6, 4, "Moldorm", 0xff, 0, 0, 0, NULL, 1},  // 0x63: 6 = waits for
+    // its start box (armed); 4 = what the box's callback (main+0x2a1200) does: its Start event (an overworld copy's
+    // only shows it - tools/rando/boss_guard.py), then it crawls (0). 17 = paused while Link is screens away
     {GA_FIELD(GENIE_VTABLE), 0, 0x1340, 0x260, 0, 0, "Genie", 0xff, 0, 0, 0, NULL, 1},        // 0x64
     {GA_FIELD(FACADE_VTABLE), 0, 0xff0, 0x260, 0, 0, "Facade", 0xff, 0, 0, 0, NULL, 1},       // 0x68
     {GA_FIELD(HOT_HEAD_VTABLE), 0, 0xff0, 0x260, 0, 0, "Hot Head", 0xff, 0, 0, 0, NULL, 1},   // 0x6a
