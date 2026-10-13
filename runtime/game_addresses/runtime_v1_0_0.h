@@ -78,6 +78,7 @@ GA_ADDR(ENEMY_LIFE_VTABLE,               0x7001b5be00)
 
 // Boss classes (enemy randomizer "Include bosses")
 GA_ADDR(MOLDORM_VTABLE,                   0x7001b71f38)
+GA_ADDR(MOLDORM_CHANGE_STATE,             0x70002a0840)
 GA_ADDR(GENIE_VTABLE,                     0x7001b9fe60)
 GA_ADDR(FACADE_VTABLE,                    0x7001b91228)
 GA_ADDR(HOT_HEAD_VTABLE,                  0x7001b70940)

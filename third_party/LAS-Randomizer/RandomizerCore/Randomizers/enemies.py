@@ -35,7 +35,8 @@ ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree /
 # where it isn't cramped: at most NEEDS_ROOM[type] of the 5 x 5 tiles around it blocked (the screen's grid, original
 # room; bushes and trees count; near the screen's edge, the same share of the tiles on it). Typical spots have 5 - 8,
 # cramped ones 10 - 17.
-NEEDS_ROOM = {0x60: 8, 0x59: 8, 0x52: 6}  # (most blocked of 25: Avalaunch, Master Stalfos, Moblin Chief - he charges)
+NEEDS_ROOM = {0x60: 8, 0x59: 8, 0x52: 6, 0x63: 3}  # (most blocked of 25: Avalaunch, Master Stalfos, Moblin Chief - he
+#                                                    charges, Moldorm - he crawls all over)
 # The other big ones (and Cue Ball, whose loop needs free tiles) skip the tightest land spots (over BIG_ROOM blocked,
 # about 1 in 10). The small ones - Shadow Link, the Ball-and-chain Soldier and Blaino (the boxer), Link-sized - fit any
 # land spot, even those (user 2026-10-18: not water, shallow water or holes - those keep Cue Ball only). Several
@@ -368,9 +369,13 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 new_enemy = mini
             elif (enemy_settings.get('bosses') and folder == 'Field' and enemy_type == 'land' and not room_has_miniboss
                     and (_ONLY_BOSS or random.random() < BOSS_CHANCE)):
-                mini = int(_ONLY_BOSS, 16) if _ONLY_BOSS else random.choice(sorted(FIELD_BOSSES))  # (one per room)
-                room_has_miniboss = room_has_boss = True
-                new_enemy = mini
+                pick = int(_ONLY_BOSS, 16) if _ONLY_BOSS else random.choice(sorted(FIELD_BOSSES))  # (one per room)
+                if pick in NEEDS_ROOM and enemy_settings.get('arena') and not grid_room:
+                    grid_room.append(enemy_settings['arena'](file[:-4]))
+                if pick not in NEEDS_ROOM or not enemy_settings.get('arena') or roomy(grid_room[0], act, NEEDS_ROOM[pick]):
+                    mini = pick
+                    room_has_miniboss = room_has_boss = True
+                    new_enemy = mini
 
             if mini is None and enemy_type == 'land' and _FORCE.get(file[:-4], -1) not in restr:
                 new_enemy = _FORCE[file[:-4]]

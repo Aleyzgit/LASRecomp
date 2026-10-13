@@ -674,9 +674,10 @@ def main():
           flush=True)
     import keysanity_text  # (after every flow edit, digs / underwater too) a dungeon item outside its dungeon names it
     keysanity_text.apply(out_dir, romfs, result['placements'])
-    if settings.get('enemy-minibosses'):  # the Field's walls for roaming mini-bosses (tools/rando/roam.py)
-        import roam
+    if settings.get('enemy-minibosses') or settings.get('enemy-bosses'):  # the Field's walls for roaming mini-bosses
+        import roam                                                        # and bosses (tools/rando/roam.py)
         print('roam:', roam.write(out_dir, _uw_leb, romfs), flush=True)
+    if settings.get('enemy-minibosses'):
         import miniboss_guard  # (copies of a mini-boss whose flow gives a check don't give it again)
         print('miniboss guard:', miniboss_guard.apply(out_dir, romfs, _uw_leb, _uw_ev, _ot, settings), flush=True)
     if settings.get('enemy-bosses'):  # overworld bosses don't give their dungeon boss's item (tools/rando/boss_guard.py)
