@@ -28,10 +28,11 @@ uint64_t doorjump_player(uint64_t frame);  // PlayerCollision component: positio
 // called with the actor instead of the state change (Lanmola: what his screen's event runs - up out of the sand), own
 // (NULL: the Field only) - also a plain enemy in dungeons, caves and houses (enemies.yml, Include mini-bosses): copies
 // there are woken too; the original (its level name starts with `own`; a copy keeps the replaced enemy's) is left to
-// its arena
+// its arena, arm (bosses): instead, the start of its dungeon room - the zone manager's room-entry call
+// (f_7000029520) once it's there; Link walking into its AreaEventBox then starts its fight
 typedef struct {  // (vt, chg, start: GA_FIELD - the address is GA_AT(...))
     uint16_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; uint8_t rest, then, at_once; uint16_t start;
-    const char *own;
+    const char *own; uint8_t arm;
 } Kind;
 static const Kind g_kinds[] = {
     {GA_FIELD(HINOX_VTABLE), GA_FIELD(HINOX_CHANGE_STATE), 0xff0, 0x260, 0, 1, "Hinox", 0xff},                          // 0x53: 10 = request HinoxStart
@@ -46,6 +47,11 @@ static const Kind g_kinds[] = {
     {GA_FIELD(LANMOLA_VTABLE), GA_FIELD(LANMOLA_CHANGE_STATE), 0xff0, 0x260, 0, 1, "Lanmola", 0, 0, 0, GA_FIELD(LANMOLA_START)},
     // 0x59: 12 = hidden until his room's event (AreaEventBox - not copied: intro, music) drops him in; 13 shows him
     {GA_FIELD(MASTER_STALFOS_VTABLE), GA_FIELD(MASTER_STALFOS_CHANGE_STATE), 0x1230, 0x260, 12, 13, "Master Stalfos", 0xff, 1, 1},
+    // bosses (enemy randomizer "Include bosses"): started by their own event (arm)
+    {GA_FIELD(MOLDORM_VTABLE), 0, 0xff0, 0x260, 0, 0, "Moldorm", 0xff, 0, 0, 0, NULL, 1},     // 0x63
+    {GA_FIELD(GENIE_VTABLE), 0, 0x1340, 0x260, 0, 0, "Genie", 0xff, 0, 0, 0, NULL, 1},        // 0x64
+    {GA_FIELD(FACADE_VTABLE), 0, 0xff0, 0x260, 0, 0, "Facade", 0xff, 0, 0, 0, NULL, 1},       // 0x68
+    {GA_FIELD(HOT_HEAD_VTABLE), 0, 0xff0, 0x260, 0, 0, "Hot Head", 0xff, 0, 0, 0, NULL, 1},   // 0x6a
 };
 #define NKINDS (int)(sizeof g_kinds / sizeof g_kinds[0])
 _Static_assert(GA_FIELD(LANMOLA_START) != 0, "start 0: none");
@@ -345,13 +351,16 @@ static void kill_tick(Cpu *c, uint64_t frame) {
 // OverworldMinibossMarker flag (settings.json "miniboss-marker-flag", tools/rando/miniboss_guard.py) - is set: set
 // every frame in a seed (an Armos Knight copy fights on its own, nothing wakes it). Copies also take a short death
 // path on it (no camera, HUD, music or doors: Link keeps control) and a Giant Buzz Blob copy skips its sword hint. The originals have no switch 2
-// set: they give it as before. Written through the flag object (main+0x1CC1388, its byte capacity +0x1CC1390): the
-// flag may be past the game's 2048 (runtime/hle/flags_ext.c).
-static int g_marker = -2;
-RT_ON_RESET(miniboss_marker_reset) { g_marker = -2; }
-static void miniboss_marker_set(void) {
-    if (g_marker == -2) {
-        g_marker = -1;
+// set: they give it as before. An overworld boss's end event skips its dungeon's boss item the same way: its switch 2
+// is the seed's OverworldBossMarker flag ("boss-marker-flag", tools/rando/boss_guard.py), set whenever one is armed.
+// Written through the flag object (main+0x1CC1388, its byte capacity +0x1CC1390): the flag may be past the game's
+// 2048 (runtime/hle/flags_ext.c).
+static int g_markers[2] = {-2, -2};  // (mini-boss, boss)
+RT_ON_RESET(miniboss_marker_reset) { g_markers[0] = g_markers[1] = -2; }
+static void marker_set(int boss) {
+    int *g = &g_markers[boss];
+    if (*g == -2) {
+        *g = -1;
         extern const char *rando_seed_dir(void);
         const char *dir = rando_seed_dir();
         char p[512];
@@ -361,10 +370,11 @@ static void miniboss_marker_set(void) {
             size_t n = fread(buf, 1, sizeof buf - 1, f);
             buf[n] = 0;
             fclose(f);
-            const char *k = strstr(buf, "\"miniboss-marker-flag\":");
-            if (k) g_marker = atoi(k + strlen("\"miniboss-marker-flag\":"));
+            const char *key = boss ? "\"boss-marker-flag\":" : "\"miniboss-marker-flag\":", *k = strstr(buf, key);
+            if (k) *g = atoi(k + strlen(key));
         }
     }
+    int g_marker = *g;
     if (g_marker < 0) return;
     uint8_t *fl = (uint8_t *)(uintptr_t)LD64(GA(FLAG_PTR));
     if (!fl || (uint32_t)(g_marker >> 3) >= LD32(GA(FLAG_CAP))) return;
@@ -617,7 +627,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
     extern const char *rando_seed_dir(void);
     if (!rando_seed_dir()) return;  // (only seeds put mini-bosses on the Field)
     shadow_link_tick(c, frame);  // (any level: Shadow Link is a plain enemy in dungeons too)
-    miniboss_marker_set();       // (any level: his copies there have the marker on switch 2 too)
+    marker_set(0);               // (any level: his copies there have the marker on switch 2 too)
     uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     if (!ps || !strncmp((const char *)(uintptr_t)ps, "Panel", 5)) return;  // (Dampe's chamber: as is)
     bool field = !strcmp((const char *)(uintptr_t)ps, "Field");  // (elsewhere: only copies of kinds with `own`)
@@ -627,9 +637,25 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
     memcpy(g_link, lp, sizeof g_link), g_have_link = true;
     for (int i = 0; i < MAX_SEEN; i++) {
         Seen *s = &g_seen[i];
-        if (!s->obj || frame - s->last > 2 || frame - s->first < 30 || LD64(s->obj) != GA_AT(g_kinds[s->kind].vt)) continue;
+        if (!s->obj || frame - s->last > 2 || LD64(s->obj) != GA_AT(g_kinds[s->kind].vt)) continue;
         const Kind *k = &g_kinds[s->kind];
         if (!field && (!k->own || !is_copy(s->obj, k))) continue;  // (dungeon arenas start their own)
+        // (a boss is armed as soon as it exists - the game loads the next screen's enemies before Link walks onto it,
+        // so he enters its screen-wide box after that and it starts at once; others wait half a second)
+        if (!k->arm && frame - s->first < 30) continue;
+        if (k->arm) {
+            if (s->woken) continue;
+            s->woken = 1;
+            uint64_t saved[31], sp = c->sp;
+            memcpy(saved, c->x, sizeof saved);
+            c->x[0] = s->obj;
+            guest_call(c, GA(AREA_EVENT_TRIGGER));  // (the zone manager's room-entry call: f_7000029520 -> vfunc +0x100)
+            memcpy(c->x, saved, sizeof saved);
+            c->sp = sp;
+            LOG("[miniboss] f%llu %s armed (its start event plays when Link enters its box)\n", (unsigned long long)frame, k->name);
+            marker_set(1);
+            continue;
+        }
         if (!strcmp(k->name, "Gohma")) gohma_walls(s->obj);
         if (!strcmp(k->name, "Cue Ball")) cueball_tick(c, s, k, frame);
         if (!strcmp(k->name, "Avalaunch")) avalaunch_tick(c, s, k, frame);

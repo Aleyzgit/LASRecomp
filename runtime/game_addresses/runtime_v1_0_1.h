@@ -76,6 +76,12 @@ GA_ADDR(STRING_OTHER,                    0x70016dc7b9)
 GA_ADDR(STRING_SIGN,                     0x70016e6ef9)
 GA_ADDR(ENEMY_LIFE_VTABLE,               0x7001b5be00)
 
+// Boss classes (enemy randomizer "Include bosses")
+GA_ADDR(MOLDORM_VTABLE,                   0x7001b71f38)
+GA_ADDR(GENIE_VTABLE,                     0x7001b9fe60)
+GA_ADDR(FACADE_VTABLE,                    0x7001b91228)
+GA_ADDR(HOT_HEAD_VTABLE,                  0x7001b70940)
+
 GA_ADDR(MAIN_CODE_SIZE,                  0x16a0000)
 GA_ADDR(DELEGATE_JOB_VTABLE_LIVE,         0x7001c51308)
 GA_ADDR(DELEGATE_JOB_VTABLE_BASE,         0x7001c51358)

@@ -1871,6 +1871,7 @@ class ModsProcess(QtCore.QThread):
             'sizes':self.settings['randomize-enemy-sizes'],
             'minibosses': self.settings.get('enemy-minibosses', False),  # LARecomp
             'miniboss-frequency': int(self.settings.get('miniboss-frequency', 0)),  # LARecomp: 0 normal, 1 2x, 2 3x, 3 all
+            'bosses': self.settings.get('enemy-bosses', False),  # LARecomp
             # (LARecomp: a mini-boss's dungeon room, for what stands with it there - enemies.MINIBOSS_KITS)
             'arena': lambda name: leb.Room(open(f'{self.rom_path}/region_common/level/{name.rsplit("_", 1)[0]}/{name}.leb', 'rb').read(), edit_grid=True),
             # (LARecomp: enemy-mode random - room -> its re-rolled actors, for tools/rando/enemy_random.py)

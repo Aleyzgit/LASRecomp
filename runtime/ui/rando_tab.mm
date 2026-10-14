@@ -117,6 +117,7 @@ struct GenOpts {
     bool environments = false, pets_in_dungeons = false;  // randomize-environments / bad-pets
     bool skip_story = true;   // skip-story-events (kids after the Cello, remaining Owl talk): always on
     bool enemy_minibosses = false;  // enemy-minibosses (needs Randomize enemies)
+    bool enemy_bosses = false;      // enemy-bosses (needs Randomize enemies)
     int tunic = 0;            // retired tunic-color (always 0 = default): the tunic is a live cosmetic now
     bool inc_fishing = false, inc_rapids = false, inc_dampe = false, inc_trade = false, inc_blue = false;
     int traps = 1;            // none few several many trapsanity
@@ -202,7 +203,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
                  &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
                  &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina,
-                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics};
+                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.enemy_bosses};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -441,6 +442,7 @@ static void start_generation(void) {
             g_opts.randomize_enemies && g_opts.enemy_minibosses ? "true" : "false");
     fprintf(f, " \"miniboss-frequency\": %d,\n", g_opts.randomize_enemies && g_opts.enemy_minibosses ? g_opts.miniboss_freq : 0);
     fprintf(f, " \"enemy-mode\": \"%s\",\n", g_opts.randomize_enemies && g_opts.enemy_mode ? "random" : "seeded");
+    fprintf(f, " \"enemy-bosses\": %s,\n", g_opts.randomize_enemies && g_opts.enemy_bosses ? "true" : "false");
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
     static const char *rs[] = {"off", "coupled", "coupled", "decoupled"};  // (1: retired Coherent, never written)
@@ -935,6 +937,10 @@ extern "C" void rando_tab_draw(float scale) {
                    "How often overworld enemies become mini-bosses. All: every one with room for one.");
         opt_indent(-1);
     }
+    if (!g_opts.randomize_enemies) opt_disable_next();
+    opt_toggle("Include bosses", &g_opts.enemy_bosses, false,
+               "Now and then an overworld enemy becomes a dungeon boss (Moldorm or Facade), with its own intro when you "
+               "walk up to it.");
     opt_indent(-1);
     opt_toggle("Boss souls", &g_opts.boss_souls, false,
                "Each dungeon boss (and the Color Dungeon's) has a soul hidden among the items. Until you find it the boss "

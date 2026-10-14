@@ -83,12 +83,22 @@ def roomy(room, act, most_blocked):
 # the one-per-screen limit gave only 1.9x / 2.7x, as many screens have 2 - 6 enemies). All: every enemy whose spot
 # fits one (no limit per screen; user 2026-10-18: no performance cap either).
 MINIBOSS_CHANCES = (0.08, 0.17, 0.28, 1.0)
+# LARecomp: dungeon bosses that fight on the overworld (setting 'enemy-bosses'): the runtime arms them with their
+# dungeon room's start (runtime/hle/miniboss.c), and Link walking into their AreaEventBox plays their own intro.
+# Left out (2026-10-12): Hot Head (lives in lava), Angler Fish / Slime Eel (water / walls), Evil Eagle (the tower),
+# Genie (intro plays, then his bottle idles), Hardhit Beetle / Slime Eye (don't spawn on the Field yet).
+FIELD_BOSSES = {
+    0x63: ['DeguTailStart'],  # Moldorm
+    0x68: [],                 # Facade (with its floor area: tiles and pots fly at Link)
+}
+BOSS_CHANCE = 0.04
 import os as _os
 _ALL = bool(_os.environ.get('LARECOMP_ALL_MINIBOSSES'))  # (test: as frequency All)
 _ONLY_PARAM = _os.environ.get('LARECOMP_ONLY_MINIBOSS_PARAM')  # (test: its first parameter, an int)
 _ONLY = _os.environ.get('LARECOMP_ONLY_MINIBOSS')  # (test: hex type - every randomized Field enemy becomes it, any terrain)
 # (test, dev seeds: <room>=<hex type>,... - the first randomized land enemy there that may be it becomes it)
 _FORCE = {k: int(v, 16) for k, v in (x.split('=') for x in _os.environ.get('LARECOMP_FORCE_ENEMY', '').split(',') if x)}
+_ONLY_BOSS = _os.environ.get('LARECOMP_ONLY_BOSS')  # (test: hex type - every Field room with a land enemy gets this boss)
 # Mini-bosses that need what stands with them in their dungeon room (2026-10-12): the arena room and the actor types
 # copied from it next to the mini-boss (same offsets, linked both ways as there): Smasher's iron ball (without it the
 # game crashes spawning him), Rolling Bones' spike bar, Cue Ball's rail. The runtime wakes them
@@ -98,6 +108,8 @@ MINIBOSS_KITS = {  # (no AreaEventBox: it plays the arena intro - camera, music 
     0x51: ('Lv01TailCave_06G', (0x11A,)),    # Rolling Bones' spike bar
     0x58: ('Lv04AnglersTunnel_03E', ()),     # Cue Ball (its rail)
     0x57: ('Field_13O', ()),                 # Lanmola (his rail)
+    0x63: ('Lv01TailCave_04G', (0x191,)),        # Moldorm (+ the rail it circles; its start box)
+    0x68: ('Lv06FaceShrine_04E', (0x191, 0x219)),  # Facade (+ AreaMatFaceBattle: without it the fight crashes)
 }
 
 
@@ -106,7 +118,7 @@ KIT_KEY_TAG = 0x6B  # (copied kit actors get their own keys: the game keeps one 
 
 
 def add_miniboss_kit(room_data, mi, arena, room_name=''):
-    """Appends the kit actors of room_data.actors[mi]'s mini-boss (copied from its arena room, same offsets) and links
+    """Appends the kit actors of room_data.actors[mi]'s mini-boss / boss (copied from its arena room, same offsets) and links
     them as in the arena; rails (section 2: params, rail, point - a global point index too) of every kit actor are
     copied with their points (a rail-riding mini-boss's rail is then fitted to the room: fit_rail)."""
     import copy
@@ -124,6 +136,17 @@ def add_miniboss_kit(room_data, mi, arena, room_name=''):
         a.name = a.name.split(b'-')[0] + b'-%016X' % a.key
         a.posX, a.posY, a.posZ = act.posX + (a.posX - src.posX), act.posY + (a.posY - src.posY), act.posZ + (a.posZ - src.posZ)
         a.roomID = act.roomID
+        if act.type in FIELD_BOSSES and a.type == 0x191:  # (a boss's start box: the whole screen - it starts when Link
+            a.posX, a.posY, a.posZ = act.posX, act.posY, act.posZ  # arrives, intro skipped: tools/rando/boss_guard.py)
+            from RandomizerCore.Tools import leb
+            ge = next((e for e in room_data.fixed_hash.entries if e.name == b'grid'), None)
+            try:
+                gi = leb.Grid(ge).info if ge else None
+            except ValueError:
+                gi = None
+            if gi:
+                a.posX, a.posZ = gi.x_coord + gi.room_width * gi.tile_size / 2, gi.z_coord + gi.room_height * gi.tile_size / 2
+            a.scaleX, a.scaleY, a.scaleZ = 15.0, 6.0, 12.0
         room_data.actors.append(a)
         newidx[i] = len(room_data.actors) - 1
     sec = lambda room, name: next(e for e in room.fixed_hash.entries if e.name == name)
@@ -308,6 +331,7 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
     restr_start = list(restr)
     
     room_has_miniboss = False
+    room_has_boss = False  # (a boss stands alone: no mini-boss joins it, frequency All included)
     placed = []  # (LARecomp: this room's mini-boss spots, x z)
     grid_room = []  # (the original room, for its grid: read once)
 
@@ -337,10 +361,15 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 fits = [m for m in fits if room_needed(m) >= 25 or roomy(grid_room[0], act, room_needed(m))]
             if not _ONLY and any((act.posX - x) ** 2 + (act.posZ - z) ** 2 < MB_GAP ** 2 for x, z in placed):
                 fits = [m for m in fits if m in SMALL_MINIBOSSES]  # (next to another mini-boss: only the small ones)
-            if (enemy_settings.get('minibosses') and fits and folder == 'Field'
+            if (enemy_settings.get('minibosses') and fits and folder == 'Field' and not _ONLY_BOSS and not room_has_boss
                     and (_ONLY or (not (one_per_room and room_has_miniboss) and random.random() < miniboss_chance))):
                 mini = random.choice(fits)
                 room_has_miniboss = True
+                new_enemy = mini
+            elif (enemy_settings.get('bosses') and folder == 'Field' and enemy_type == 'land' and not room_has_miniboss
+                    and (_ONLY_BOSS or random.random() < BOSS_CHANCE)):
+                mini = int(_ONLY_BOSS, 16) if _ONLY_BOSS else random.choice(sorted(FIELD_BOSSES))  # (one per room)
+                room_has_miniboss = room_has_boss = True
                 new_enemy = mini
 
             if mini is None and enemy_type == 'land' and _FORCE.get(file[:-4], -1) not in restr:
@@ -375,7 +404,8 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 restr.extend(ONE_PER_ROOM)
             
             if mini is not None:
-                params = random.choice(MINIBOSS_VARIANTS[mini]) if mini in MINIBOSS_VARIANTS else FIELD_MINIBOSSES[mini]
+                params = random.choice(MINIBOSS_VARIANTS[mini]) if mini in MINIBOSS_VARIANTS else \
+                    {**FIELD_MINIBOSSES, **FIELD_BOSSES}.get(mini, [])
                 params = [bytes(p, 'utf-8') if isinstance(p, str) else p for p in params]
                 if _ONLY_PARAM:
                     params = [int(_ONLY_PARAM)]

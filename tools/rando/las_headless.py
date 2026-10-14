@@ -97,7 +97,7 @@ def default_settings(seed):
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
         'stealing': 'always',  # never / normal (needs the sword, vanilla) / always: the Randomizer tab's Stealing rows
         'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
-        'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'miniboss-frequency': 0, 'no-buff-drops': False,
+        'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'miniboss-frequency': 0, 'enemy-bosses': False, 'no-buff-drops': False,
         'enemy-mode': 'seeded',  # seeded (fixed in the level files) / random (re-rolled at every load: enemy_random.py)
         'bushes': False, 'boss-souls': False, 'miniboss-souls': False,
         'digs': False,  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
@@ -679,6 +679,9 @@ def main():
         print('roam:', roam.write(out_dir, _uw_leb, romfs), flush=True)
         import miniboss_guard  # (copies of a mini-boss whose flow gives a check don't give it again)
         print('miniboss guard:', miniboss_guard.apply(out_dir, romfs, _uw_leb, _uw_ev, _ot, settings), flush=True)
+    if settings.get('enemy-bosses'):  # overworld bosses don't give their dungeon boss's item (tools/rando/boss_guard.py)
+        import boss_guard
+        print('boss guard:', boss_guard.apply(out_dir, romfs, _uw_leb, _uw_ev, _ot, settings), flush=True)
     if mods.enemy_random is not None:  # enemy mode Random: last room edit is done - where each re-rolled actor is
         import enemy_random
         from RandomizerCore.randomizer_data import ENEMY_DATA as _ed
