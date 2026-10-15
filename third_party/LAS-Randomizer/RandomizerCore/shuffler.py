@@ -681,7 +681,8 @@ class ItemShuffler(QtCore.QThread):
         # Place the traps and master stalfos note. These HAVE to go in chests so we need to do them first
         to_place = [s for s in items if s in self.force_chests]
         chests = [s for s in locations if self.logic_defs[s]['subtype'] == 'chest'
-                  and s not in self.settings.get('absent-locations', ())]  # (LAS Recomp: not in the game)
+                  and s not in self.settings.get('absent-locations', ())  # (LAS Recomp: not in the game)
+                  and s not in self.settings.get('junk-locations', ())]  # (LAS Recomp: Link may lose the way there)
         for item in to_place:
             if not self.thread_active:
                 break
@@ -769,8 +770,10 @@ class ItemShuffler(QtCore.QThread):
                 # special case where if the actual check on the 5 chests room is a zol-trap, nothing happens with the 5th chest
                 elif item == 'zol-trap' and locations[0] == 'taltal-5-chest-puzzle':
                     valid_placement = False
-                # LAS Recomp: rooms the dungeon room shuffle left out aren't in the game - only junk may be lost there
-                elif locations[0] in self.settings.get('absent-locations', ()) and \
+                # LAS Recomp: rooms the dungeon room shuffle left out aren't in the game, and rooms Link may lose the
+                # way to (junk-locations: Eagle's Tower's 3rd floor before / after the collapse) - only junk there
+                elif (locations[0] in self.settings.get('absent-locations', ()) or
+                      locations[0] in self.settings.get('junk-locations', ())) and \
                         self.item_defs[item]['type'] != 'junk':
                     valid_placement = False
                 elif self.item_defs[item]['type'] in ('important', 'trade', 'seashell'):

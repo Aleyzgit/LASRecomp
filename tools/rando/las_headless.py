@@ -237,6 +237,10 @@ def main():
                                                   settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-pots"))
         print('pots:', len(pot_locs), 'locations', ('(no logic for: ' + ', '.join(sorted(skipped)) + ')') if skipped else '',
               flush=True)
+        for name, p in pot_locs.items():  # (pots Link may lose the way to: junk only)
+            if p['room'] in pots_mod.MISSABLE_ROOMS:
+                settings.setdefault('junk-locations', set()).add(name)
+                settings['excluded-locations'].add(name)
 
     bush_locs = {}
     if settings.get('bushes'):  # bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
@@ -622,6 +626,7 @@ def main():
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
         s['absent-locations'] = sorted(s.get('absent-locations', ()))
+        s['junk-locations'] = sorted(s.get('junk-locations', ()))
         s['escape-bottle'] = True  # (runtime/hle/escape.c: older seeds keep three plain bottles)
         s['ghost-item'] = 'ghost' in pets  # (runtime/hle/pets.c: older seeds' Ghost follows Link)
         s['underwater-items'] = True  # (runtime: the sunken heart-piece actors don't hide for an owned heart piece)

@@ -63,6 +63,10 @@ FILLER_DEFS = {
                    'npc-key': 'ItemMagicPowder'},
 }
 REFILLS = ('pot-arrows', 'pot-bombs', 'pot-powder')
+# rooms Link may never (again) reach: Eagle's Tower's 3rd floor exists twice - before the ceiling collapse (the ball
+# breaking the 4 pillars) and after it; each version's pots are their own (its chests share their flags: safe).
+# Their pots get junk only (settings 'junk-locations', LAS shuffler)
+MISSABLE_ROOMS = ('Lv07EagleTower_02E', 'Lv07EagleTower_06E')
 REFILL_INDEX = 80
 QUICK = ('pot-heart',) + REFILLS  # picked up like rupees: no item-get animation
 # traps among the pot filler, by LAS's trap setting (fraction of the pot count; never the Zol trap - it needs a chest)
