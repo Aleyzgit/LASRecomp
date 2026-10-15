@@ -266,6 +266,7 @@ static std::atomic<unsigned long long> g_done, g_total;
 static unsigned long long g_phase_base;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
+static bool g_auto_update;                   // started by itself: game files there, game code from an older version
 static void setup_progress(uint64_t done, uint64_t) { g_done = g_phase_base + done; }
 static void build_progress(double f, const char *step) {
     g_build_frac = (float)f;
@@ -938,6 +939,19 @@ extern "C" void launcher_run(const char *root) {
         pthread_create(&th, NULL, extract_thread, NULL);
         pthread_detach(th);
     }
+    // An update: the game files are there and only the game code is out of date - rebuilt at once, by itself (only
+    // the pieces that changed: runtime/gamebuild.c), with the progress bar; then the start screen as usual. A failure
+    // stays on the setup page with what went wrong.
+    if (!status.empty() && check_copied_files(g_root).empty() && gamebuild_available() &&
+        !getenv("LARECOMP_LAUNCHER_DELETE")) {
+        fprintf(stderr, "[launcher] game code out of date: updating it\n");
+        g_src.clear();
+        g_busy = true, g_auto_update = true;
+        page = SETUP;
+        pthread_t th;
+        pthread_create(&th, NULL, extract_thread, NULL);
+        pthread_detach(th);
+    }
     if (getenv("LARECOMP_LAUNCHER_DELETE")) {  // (test) what DELETE GAME FILES does, logged; then the start screen
         double gb = rt_game_files_size(g_root.c_str()) / 1e9;
         bool ok = rt_remove_game_files(g_root.c_str());
@@ -981,6 +995,7 @@ extern "C" void launcher_run(const char *root) {
         if (was_busy && !busy) {
             status = check_game_files(g_root);
             if (status.empty()) { load_background(dev); page = MAIN; }
+            g_auto_update = false;
         }
         was_busy = busy;
 
@@ -1371,9 +1386,10 @@ extern "C" void launcher_run(const char *root) {
                     float f = test_busy ? 0.42f : extract_progress();
                     // (while the game code is built: what's happening, on whose files - runtime/gamebuild.c)
                     bool recompiling = g_build_frac >= 0;
-                    const char *title = recompiling ? "Recompiling the game" : "Setting up the game files";
+                    const char *title = g_auto_update ? "Updating the game" : recompiling ? "Recompiling the game"
+                                                                                         : "Setting up the game files";
                     static const char *const notes[] = {"This only needs to be done once and may take a while."};
-                    int nnotes = recompiling ? 1 : 0;
+                    int nnotes = recompiling && !g_auto_update ? 1 : 0;
                     float tfs = g_font_menu->FontSize * 0.75f, sfs = g_font_small->FontSize * 0.85f;
                     ImVec2 ts = g_font_menu->CalcTextSizeA(tfs, FLT_MAX, 0, title);
                     float line_h = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, "A").y;
