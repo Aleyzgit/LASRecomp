@@ -599,6 +599,9 @@ def main():
         print('roam:', roam.write(out_dir, _uw_leb, romfs), flush=True)
         import miniboss_guard  # (copies of a mini-boss whose flow gives a check don't give it again)
         print('miniboss guard:', miniboss_guard.apply(out_dir, romfs, _uw_leb, _uw_ev, _ot, settings), flush=True)
+    if pot_locs or dig_locs:  # (after every flow edit) refills at real checks are refills, not the item
+        import refill_gets
+        print('refill gets:', refill_gets.apply(out_dir, romfs, settings), flush=True)
     import bomb_bag_text  # (after every flow edit, digs too) found bombs: "You found your Bomb Bag!"
     print('bomb bag text:', bomb_bag_text.apply(out_dir, romfs, settings), flush=True)
     print('flags.tsv:', seed_tables.write_flags(out_dir, _ot, romfs), flush=True)
