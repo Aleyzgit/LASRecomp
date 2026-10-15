@@ -40,11 +40,21 @@ SPECIAL = {  # level -> (region, extra condition)
 
 # extra filler added to the pool, one per pot location (fractions of the pot count; user 2026-10-08: not only
 # rupees - what pots really drop: single hearts, single arrows, bomb / powder refills). rupee-5 = the blue rupee.
-JUNK_MIX = [('rupee-5', 0.26), ('rupee-20', 0.12), ('rupee-50', 0.05), ('rupee-100', 0.03),
+JUNK_MIX = [('pot-rupee-5', 0.26), ('pot-rupee-20', 0.12), ('pot-rupee-50', 0.05), ('pot-rupee-100', 0.03),
             ('pot-heart', 0.22), ('pot-arrows', 0.12), ('pot-bombs', 0.12), ('pot-powder', 0.08)]
 # pot filler items (LAS item defs). Refills only work once the item is owned: placed with REFILL_INDEX, the
 # runtime (runtime/hle/keysanity.c rt_add_item) gives a blue rupee instead when the bombs / powder / bow are missing.
 FILLER_DEFS = {
+    # (own rupee items, as digs.py: LAS's trapsanity turns every rupee-20 / rupee-50 - with blupsanity every rupee-5 -
+    # into a trap, which made most pots and bushes traps)
+    'pot-rupee-5': {'item-key': 'Rupee5', 'model-path': 'ItemRupeeBlue.bfres', 'model-name': 'RupeeBlue',
+                    'npc-key': 'ItemRupeeBlue'},
+    'pot-rupee-20': {'item-key': 'Rupee20', 'model-path': 'ItemRupeeRed.bfres', 'model-name': 'RupeeRed',
+                     'npc-key': 'ItemRupeeRed'},
+    'pot-rupee-50': {'item-key': 'Rupee50', 'model-path': 'ItemRupeePurple.bfres', 'model-name': 'RupeePurple',
+                     'npc-key': 'ItemRupeePurple'},
+    'pot-rupee-100': {'item-key': 'Rupee100', 'model-path': 'ItemRupeeSilver.bfres', 'model-name': 'RupeeSilver',
+                      'npc-key': 'ItemRupeeSilver'},
     'pot-heart': {'item-key': 'Heart', 'model-path': 'ItemRecoveryHeart.bfres', 'model-name': 'RecoveryHeart',
                   'npc-key': 'ItemRecoveryHeart'},
     'pot-arrows': {'item-key': 'Arrow', 'model-path': 'ItemArrow.bfres', 'model-name': 'Arrow', 'npc-key': 'ItemArrow'},
