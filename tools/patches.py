@@ -627,6 +627,14 @@ for _a in DELEGATE_FORWARDER_SITES:
     PATCHES[_a] = _delegate_forwarder
 
 
+# Issue #41: an event's handler that is an empty std::function. The event dispatcher main+0x108ddc0 calls it through
+# main+0x108dfc0 (std::function's call: throws std::bad_function_call when empty) and catches that (its landing pad
+# 0x108de78 -> 0x108de00: returns 0, "not handled") - the catch can't work in recompiled code (no unwinding), so the
+# throw ended in std::terminate. The hook skips the call when the function is empty, to where the catch goes. Seen
+# with Warp tab jumps; same family as NO_HANDLER_SITES (the action dispatcher's).
+EMPTY_HANDLER_SITE = 0x700108de48  # bl main+0x108dfc0
+
+
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
 # The game code they generate never changes when a hook's behaviour does: only a new site needs the game code
@@ -644,4 +652,5 @@ HOOKS = {
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
     HOLE_CAP_SITES[0]: (0xf101451f, (), 'cmp x8, #0x51: dug-hole limit (digs.c)'),
     HOLE_CAP_SITES[1]: (0xf101411f, (), 'cmp x8, #0x50: dug-hole limit (digs.c)'),
+    EMPTY_HANDLER_SITE: (0x9400005e, (0x700108de00,), 'bl std::function call: an empty event handler, as its catch'),
 }

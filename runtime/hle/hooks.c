@@ -4,9 +4,11 @@
 //
 // rt_hook returns 0: run the site's own instruction, 1: the hook did it all, 2..: jump to the site's targets
 // (HOOKS[site][1], in order).
+#include <stdio.h>
 #include <string.h>
 
 #include "../cpu.h"
+#include "../rt.h"
 
 void rt_mb_seen(uint64_t o);  // miniboss.c
 int rt_gohma_free(void);
@@ -56,6 +58,10 @@ int rt_hook(Cpu *c, uint64_t site) {
     case 0x7000d22dc0:
         (void)subs64(c, c->x[8], rt_hole_cap() - 1);
         return 1;
+    case 0x700108de48:  // EMPTY_HANDLER_SITE - bl main+0x108dfc0: an empty std::function would throw (issue #41)
+        if (c->x[0]) return 0;
+        LOG("[event] empty handler skipped (issue #41)\n");
+        return 2;  // (the dispatcher's catch: returns 0)
     }
     return 0;
 }
