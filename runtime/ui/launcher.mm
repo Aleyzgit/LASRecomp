@@ -177,7 +177,7 @@ static std::string check_copied_files(const std::string &root) {
     size_t n = fread(id, 1, 8, f);
     fclose(f);
     if (n != 8 || memcmp(id, BUILD_ID, 8)) return "Wrong game version (needs v1.0.0)";
-    if (!file_exists(root + "/romfs/region_common") || !file_exists(root + "/romfs.bin")) return "Game data missing";
+    if (!file_exists(root + "/romfs/region_common")) return "Game data missing";
     return "";
 }
 
@@ -190,8 +190,7 @@ static std::string check_game_files(const std::string &root) {
 
 // ------------------------------------------------------------------ setup (background thread)
 // The player brings their own game files: a folder holding exefs/ and romfs/. They're copied into the data root (APFS
-// clones / hard links where the file system allows) and the data image the game reads is built from romfs/
-// (runtime/romfs_build.c).
+// clones / hard links where the file system allows); the game reads romfs/ in place (runtime/services/fs.c).
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_src;           // the picked folder
 static std::string g_job;           // current setup step / result for the status line
@@ -261,9 +260,9 @@ static bool build_id_ok(const std::string &main_path) {
     return n == 8 && !memcmp(id, BUILD_ID, 8);
 }
 
-// progress (the overlay's bar): the romfs copy, then the image build - each about the size of romfs/
+// progress (the overlay's bar): the romfs copy (bytes)
 static std::atomic<unsigned long long> g_done, g_total;
-// The bar: copying and the data image are the first tenth, building the game code (runtime/gamebuild.c) the rest
+// The bar: copying is the first tenth, building the game code (runtime/gamebuild.c) the rest
 static unsigned long long g_phase_base;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
@@ -322,7 +321,7 @@ static void *extract_thread(void *) {
         rt_remove_game_files(g_root.c_str());  // (an earlier or interrupted setup's; removes the folder too)
         mkdir(g_root.c_str(), 0755);
         unsigned long long rbytes = romfs_dir_bytes(romfs.c_str());
-        g_total = 2 * rbytes;
+        g_total = rbytes;
         set_job("Copying the game files...");
         if (!romfs_copy_tree(exefs.c_str(), (g_root + "/exefs").c_str(), NULL) ||
             !romfs_copy_tree(romfs.c_str(), (g_root + "/romfs").c_str(), setup_progress)) {
@@ -330,13 +329,6 @@ static void *extract_thread(void *) {
             goto done;
         }
         g_phase_base = rbytes, g_done = rbytes;
-        set_job("Building the game data image...");
-        char why[256] = "";
-        if (!romfs_build((g_root + "/romfs").c_str(), (g_root + "/romfs.bin").c_str(), setup_progress, why, sizeof why)) {
-            fprintf(stderr, "[launcher] romfs image: %s\n", why);
-            set_failure(FAIL_COPY);
-            goto done;
-        }
         if (!build_game_code()) goto done;
     }
 check:
@@ -897,6 +889,10 @@ extern "C" void launcher_run(const char *root) {
     launcher_pad_open_all();
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
 
+    // an older version's game data image: the game reads the romfs/ folder itself now - 5.8 GB back
+    if (check_copied_files(g_root).empty() && file_exists(g_root + "/romfs.bin") &&
+        rt_remove_game_file(g_root.c_str(), "romfs.bin"))
+        fprintf(stderr, "[launcher] removed the old game data image (romfs.bin)\n");
     std::string status = check_game_files(g_root);
     if (status.empty()) load_background(dev);
     std::vector<std::string> seeds = list_seeds();
