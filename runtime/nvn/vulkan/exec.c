@@ -470,7 +470,23 @@ static int new_chunk(uint64_t size) {
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
-    static bool sysmem;  // (the device-local window ran out: system memory from then on)
+    static int sysmem = -1;  // (system memory: the device-local window is small, or it ran out)
+    if (sysmem < 0) {
+        // Without resizable BAR the window is ~256 MB, shared with other programs and the driver: two 64 MB chunks took
+        // nearly all of it on an RTX 3080 Ti (its budget fell to 81 MB). Only a big window (resizable BAR) holds the
+        // ring; system memory otherwise costs ~2 fps (measured on Windows). LARECOMP_VK_RING_BAR=1: the window anyway.
+        const VkPhysicalDeviceMemoryProperties *mp;
+        vmaGetMemoryProperties(g_vk.vma, &mp);
+        VkDeviceSize bar = 0;
+        for (uint32_t i = 0; i < mp->memoryTypeCount; i++) {
+            VkMemoryPropertyFlags f = mp->memoryTypes[i].propertyFlags;
+            VkDeviceSize hs = mp->memoryHeaps[mp->memoryTypes[i].heapIndex].size;
+            if ((f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && hs > bar) bar = hs;
+        }
+        sysmem = bar && bar < (1ull << 30) && !getenv("LARECOMP_VK_RING_BAR");
+        if (sysmem) LOG("[vk] transient ring: device-local host-visible window is only %llu MB: system memory\n",
+                        (unsigned long long)(bar >> 20));
+    }
     if (sysmem || getenv("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
     VmaAllocationInfo info;
     VkResult r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
@@ -479,7 +495,7 @@ static int new_chunk(uint64_t size) {
     if ((r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY) && ai.usage != VMA_MEMORY_USAGE_AUTO_PREFER_HOST) {
         LOG("[vk] transient ring: device-local memory full after %d chunks, system memory from now on\n", nchunks);
         vk_log_memory("ring chunk failed");
-        sysmem = moved = true;
+        sysmem = 1, moved = true;
         ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
     }
