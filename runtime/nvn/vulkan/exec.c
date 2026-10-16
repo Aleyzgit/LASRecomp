@@ -1013,10 +1013,12 @@ static void begin_pass(void) {
         LOG("[vk] pass %ux%u: %u color", minw, minh, pass_ncolor);
         for (uint32_t i = 0; i < pass_ncolor; i++) LOG(" [%u: fmt %d view %s %s]", i, pass_color[i], ca[i].imageView ? "yes" : "none",
                                                        ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "clear" : "load");
-        LOG(", depth %s fmt %d, stencil %s fmt %d (same view %s, layout %d, load op %d / %d), samples %u\n",
-            has_d ? "yes" : "no", pass_depth, has_s ? "yes" : "no", pass_stencil,
-            has_d && has_s && da.imageView == sa.imageView ? "yes" : "no", has_d ? da.imageLayout : has_s ? sa.imageLayout : 0,
-            has_d ? da.loadOp : -1, has_s ? sa.loadOp : -1, pass_samples);
+        if (has_d || has_s)
+            LOG(", depth %s fmt %d, stencil %s fmt %d (same view %s, layout %d, load op %d / %d)", has_d ? "yes" : "no",
+                pass_depth, has_s ? "yes" : "no", pass_stencil, has_d && has_s && da.imageView == sa.imageView ? "yes" : "no",
+                has_d ? da.imageLayout : sa.imageLayout, has_d ? da.loadOp : -1, has_s ? sa.loadOp : -1);
+        else LOG(", no depth / stencil");
+        LOG(", samples %u\n", pass_samples);
     }
     vkCmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
