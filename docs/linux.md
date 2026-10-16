@@ -34,6 +34,9 @@ Ubuntu / Debian packages (other distributions: the same libraries under their na
     sudo apt install clang lld make pkg-config python3-venv libsdl3-dev libavformat-dev libavcodec-dev \
         libavutil-dev libswscale-dev libvulkan-dev libshaderc-dev libvulkan-memory-allocator-dev glslc vulkan-tools
 
+shaderc is linked the way its pkg-config file says (`libshaderc_shared` on Arch, Fedora, AOSC...); to choose
+yourself: `make SHADERC=-lshaderc_shared` (or `-lshaderc`).
+
 Then from the repo root:
 
     python3 -m venv tools/venv && tools/venv/bin/pip install lz4 capstone unicorn
