@@ -961,6 +961,17 @@ static void begin_pass(void) {
         if (eh < minh) minh = eh;
         pass_samples = b->samples;
     }
+    // Bound color slots without a texture / view stay as VK_NULL_HANDLE attachments (legal), but Intel's Windows
+    // driver for UHD 630 (Vulkan 1.3.215) crashes in vkCmdBeginRendering reading near a null pointer on the title
+    // screen's first clear (issues #8, #46). Empty slots at the end are left out (pipelines and clears follow
+    // pass_ncolor); one in the middle, or a pass with no attachment at all, is logged once for the next report.
+    while (pass_ncolor && !ca[pass_ncolor - 1].imageView) pass_ncolor--;
+    static bool logged_hole;
+    for (uint32_t i = 0; i < pass_ncolor && !logged_hole; i++)
+        if (!ca[i].imageView) {
+            logged_hole = true;
+            LOG("[vk] pass with an empty color slot %u of %u (texture %s)\n", i, pass_ncolor, st.rt.color[i] ? "without a view" : "none");
+        }
     pass_depth = pass_stencil = VK_FORMAT_UNDEFINED;
     bool has_d = false, has_s = false;
     if (st.rt.depth) {
@@ -981,7 +992,11 @@ static void begin_pass(void) {
             if (!pass_ncolor) pass_samples = b->samples;
         }
     }
-    if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
+    if (!w) {
+        pass_sx = pass_sy = 1; minw = minh = 16;
+        static bool logged_none;
+        if (!logged_none) logged_none = true, LOG("[vk] pass with no attachments (%d color slots bound)\n", st.rt.ncolor);
+    }
     pass_w = minw; pass_h = minh;
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
