@@ -86,11 +86,13 @@ def roomy(room, act, most_blocked):
 MINIBOSS_CHANCES = (0.08, 0.17, 0.28, 1.0)
 # LARecomp: dungeon bosses that fight on the overworld (setting 'enemy-bosses'): the runtime arms them with their
 # dungeon room's start (runtime/hle/miniboss.c), and Link walking into their AreaEventBox plays their own intro.
-# Left out (2026-10-12): Hot Head (lives in lava), Angler Fish / Slime Eel (water / walls), Evil Eagle (the tower),
-# Genie (intro plays, then his bottle idles), Hardhit Beetle / Slime Eye (don't spawn on the Field yet).
+# Left out: Hot Head (lives in lava), Angler Fish / Slime Eel (water / walls), Evil Eagle (the tower), Slime Eye
+# (drops from his room's ceiling), Genie (2026-10-16 with his start box: his intro camera looks at an empty spot, then
+# he waits invisible in state 15 - his fight is his arena's).
 FIELD_BOSSES = {
     0x63: ['DeguTailStart'],  # Moldorm
     0x68: [],                 # Facade (with its floor area: tiles and pots fly at Link)
+    0x62: [],                 # Hardhit Beetle (Color Dungeon's Evil Orb: bounces at Link, shoves him; with its start box)
 }
 BOSS_CHANCE = 0.04
 import os as _os
@@ -111,6 +113,7 @@ MINIBOSS_KITS = {  # (no AreaEventBox: it plays the arena intro - camera, music 
     0x57: ('Field_13O', ()),                 # Lanmola (his rail)
     0x63: ('Lv01TailCave_04G', (0x191,)),        # Moldorm (+ the rail it circles; its start box)
     0x68: ('Lv06FaceShrine_04E', (0x191, 0x219)),  # Facade (+ AreaMatFaceBattle: without it the fight crashes)
+    0x62: ('Lv10ClothesDungeon_04B', (0x191,)),    # Hardhit Beetle (+ its start box)
 }
 
 
