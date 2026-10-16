@@ -3,7 +3,8 @@
 //  2. a dump from the user's own console in fonts/: nintendo_udsg-r_std_003.bfttf (Standard, Morisawa UD Shin Go)
 //     and nintendo_ext_003.bfttf (NintendoExt button glyphs); plain .ttf versions of those names also work
 //  3. a Japanese gothic like UD Shin Go (much closer to the game's look than Arial): Hiragino Sans W4 on macOS,
-//     Yu Gothic Regular / Medium on Windows
+//     Yu Gothic Regular / Medium on Windows - not for Russian: Japanese fonts carry Cyrillic as full-width
+//     characters (JIS X 0208), every letter a square apart (issue #32)
 //  4. Arial
 // .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key.
 // .ttc collections get face 0 copied out as a standalone font (the game's font engine wants one sfnt).
@@ -119,8 +120,11 @@ static void load_fonts(void) {
                          // which the game's font engine crashes on (it wants TrueType)
                          "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
                          "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf"};
+    extern const char *settings_language(void);
+    bool cyrillic = !strcmp(settings_language(), "ru");
     for (size_t i = 0; i < sizeof std / sizeof *std && !fonts[0].addr; i++)
-        if (std[i]) load_one(std[i], &fonts[0]);
+        if (std[i] && !(cyrillic && (strstr(std[i], "/System/Library/Fonts/ヒラギノ") || strstr(std[i], "YuGoth"))))
+            load_one(std[i], &fonts[0]);
     if (!fonts[0].addr) FATAL("no usable system font substitute\n");
     if (!load_one("fonts/nintendo_ext_003.bfttf", &fonts[1])) load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
 }
