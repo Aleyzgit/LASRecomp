@@ -13,7 +13,7 @@
 //     full-width characters (JIS X 0208), every letter a square apart (issue #32) - Arial / DejaVu Sans then.
 //  4. Standard only: DejaVu Sans shipped with the app (third_party/fonts/DejaVu, free license), for systems with none
 //     of the above (Bazzite / Fedora Atomic have no DejaVu - issue #37).
-// .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key.
+// .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key (bfttf_decode).
 // .ttc collections get face 0 copied out as a standalone font (the game's font engine wants one sfnt).
 #include <stdlib.h>
 #include <string.h>
@@ -42,26 +42,25 @@ static uint8_t *read_file(const char *path, size_t *len) {
     return p;
 }
 
-// .bfttf -> TTF in place (returns the new length, 0 if it isn't one)
+// .bfttf -> TTF in place (returns the new length, 0 if it isn't one). Read as little-endian words: the first is
+// 0x7F9A0218 ^ key, the second the font's size ^ key, then the font itself, each word XORed with the key and stored
+// byte-swapped (issue #48: the console's own files; decoded without the swap they never matched)
 static size_t bfttf_decode(uint8_t *d, size_t len) {
-    static const uint32_t KEY = 0x49621806;
+    static const uint32_t KEY = 0x49621806, MAGIC = 0x7F9A0218;
     if (len < 12) return 0;
-    for (int swap = 0; swap < 2; swap++) {  // the key's byte order differs between descriptions; accept both
-        uint32_t k = swap ? __builtin_bswap32(KEY) : KEY;
-        uint32_t w0, w1, w2;
-        memcpy(&w0, d, 4); memcpy(&w1, d + 4, 4); memcpy(&w2, d + 8, 4);
-        uint32_t size = w1 ^ k, ver = w2 ^ k;
-        if (size == 0 || size > len - 8 || (ver != 0x00000100u && ver != 0x4F54544Fu)) continue;  // sfnt 1.0 / OTTO
-        (void)w0;
-        for (size_t i = 0; i + 4 <= size; i += 4) {
-            uint32_t w;
-            memcpy(&w, d + 8 + i, 4);
-            w ^= k;
-            memcpy(d + i, &w, 4);
-        }
-        return size;
+    uint32_t w0, w1;
+    memcpy(&w0, d, 4);
+    memcpy(&w1, d + 4, 4);
+    uint32_t size = w1 ^ KEY;
+    size_t words = ((size_t)size + 3) & ~(size_t)3;  // (the last word is padded)
+    if ((w0 ^ KEY) != MAGIC || size < 4 || words > len - 8) return 0;
+    for (size_t i = 0; i < words; i += 4) {
+        uint32_t w;
+        memcpy(&w, d + 8 + i, 4);
+        put32(d + i, w ^ KEY);  // (big-endian: the font's own byte order)
     }
-    return 0;
+    uint32_t ver = be32(d);
+    return ver == 0x00010000u || ver == 0x4F54544Fu || ver == 0x74727565u ? size : 0;  // TrueType / 'OTTO' / 'true'
 }
 
 // .ttc -> face 0 as its own sfnt (table data copied, offsets rewritten)
