@@ -470,24 +470,32 @@ static int new_chunk(uint64_t size) {
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
-    static int sysmem = -1;  // (system memory: the device-local window is small, or it ran out)
-    if (sysmem < 0) {
-        // Without resizable BAR the window is ~256 MB, shared with other programs and the driver: two 64 MB chunks took
-        // nearly all of it on an RTX 3080 Ti (its budget fell to 81 MB). Only a big window (resizable BAR) holds the
-        // ring; system memory otherwise costs ~2 fps (measured on Windows). LARECOMP_VK_RING_BAR=1: the window anyway.
-        const VkPhysicalDeviceMemoryProperties *mp;
-        vmaGetMemoryProperties(g_vk.vma, &mp);
-        VkDeviceSize bar = 0;
-        for (uint32_t i = 0; i < mp->memoryTypeCount; i++) {
-            VkMemoryPropertyFlags f = mp->memoryTypes[i].propertyFlags;
-            VkDeviceSize hs = mp->memoryHeaps[mp->memoryTypes[i].heapIndex].size;
-            if ((f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) && (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && hs > bar) bar = hs;
+    static bool sysmem;  // (the device-local window ran out: system memory from then on)
+    // Without resizable BAR the device-local host-visible window is ~256 MB, shared with other programs and the driver:
+    // two 64 MB chunks took 128 of its 132 MB in use while its budget fell to 81 MB (RTX 3080 Ti), and a GTX 1060 ran
+    // out (issue #45). A chunk goes there only while the window's use stays under half its budget; past that, system
+    // memory (~1 ms more GPU time a frame on a 3080 Ti at 1x). The first chunks, which most frames use, stay fast.
+    // LARECOMP_VK_RING_BAR=1: no budget check.
+    bool spill = false;
+    if (!sysmem && !getenv("LARECOMP_VK_RING_BAR")) {
+        uint32_t type;
+        if (vmaFindMemoryTypeIndexForBufferInfo(g_vk.vma, &bi, &ai, &type) == VK_SUCCESS) {
+            const VkPhysicalDeviceMemoryProperties *mp;
+            vmaGetMemoryProperties(g_vk.vma, &mp);
+            uint32_t heap = mp->memoryTypes[type].heapIndex;
+            VmaBudget bud[VK_MAX_MEMORY_HEAPS];
+            vmaGetHeapBudgets(g_vk.vma, bud);
+            spill = (mp->memoryTypes[type].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+                    bud[heap].usage + size > bud[heap].budget / 2;
+            static bool logged;
+            if (spill && !logged) {
+                logged = true;
+                LOG("[vk] transient ring: device-local window %llu of %llu MB budget in use: new chunks in system memory\n",
+                    (unsigned long long)(bud[heap].usage >> 20), (unsigned long long)(bud[heap].budget >> 20));
+            }
         }
-        sysmem = bar && bar < (1ull << 30) && !getenv("LARECOMP_VK_RING_BAR");
-        if (sysmem) LOG("[vk] transient ring: device-local host-visible window is only %llu MB: system memory\n",
-                        (unsigned long long)(bar >> 20));
     }
-    if (sysmem || getenv("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
+    if (sysmem || spill || getenv("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
     VmaAllocationInfo info;
     VkResult r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
     bool moved = false;
@@ -495,14 +503,16 @@ static int new_chunk(uint64_t size) {
     if ((r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY) && ai.usage != VMA_MEMORY_USAGE_AUTO_PREFER_HOST) {
         LOG("[vk] transient ring: device-local memory full after %d chunks, system memory from now on\n", nchunks);
         vk_log_memory("ring chunk failed");
-        sysmem = 1, moved = true;
+        sysmem = moved = true;
         ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
     }
     VK_CHECK(r);
     c->ptr = info.pMappedData;
     c->size = size;
-    if (!nchunks || moved) {  // where the ring lives: device-local (resizable BAR) or system memory read across PCIe
+    static bool spilled;  // (the first chunk in system memory: logged too)
+    if (!nchunks || moved || (spill && !spilled)) {  // where the ring lives: device-local (resizable BAR) or system memory read across PCIe
+        if (spill) spilled = true;
         VkMemoryPropertyFlags f;
         vmaGetMemoryTypeProperties(g_vk.vma, info.memoryType, &f);
         LOG("[vk] transient ring: memory type %u (%s%s%s)\n", info.memoryType, f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "device-local " : "system memory ",
