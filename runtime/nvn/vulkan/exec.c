@@ -1004,15 +1004,19 @@ static void begin_pass(void) {
     // LARECOMP_VK_LOG_PASSES=<n> (default 300 with =1): each of the first n passes before it begins - an Intel crash
     // inside vkCmdBeginRendering (issues #8, #46) ends the log on the pass the driver choked on
     static long log_passes = -1;
-    if (log_passes < 0) log_passes = getenv("LARECOMP_VK_LOG_PASSES") ? atol(getenv("LARECOMP_VK_LOG_PASSES")) : 0;
-    if (log_passes == 1) log_passes = 300;
+    if (log_passes < 0) {
+        log_passes = getenv("LARECOMP_VK_LOG_PASSES") ? atol(getenv("LARECOMP_VK_LOG_PASSES")) : 0;
+        if (log_passes == 1) log_passes = 300;
+    }
     if (log_passes > 0) {
         log_passes--;
         LOG("[vk] pass %ux%u: %u color", minw, minh, pass_ncolor);
         for (uint32_t i = 0; i < pass_ncolor; i++) LOG(" [%u: fmt %d view %s %s]", i, pass_color[i], ca[i].imageView ? "yes" : "none",
                                                        ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "clear" : "load");
-        LOG(", depth %s fmt %d, stencil %s fmt %d, samples %u\n", has_d ? "yes" : "no", pass_depth, has_s ? "yes" : "no",
-            pass_stencil, pass_samples);
+        LOG(", depth %s fmt %d, stencil %s fmt %d (same view %s, layout %d, load op %d / %d), samples %u\n",
+            has_d ? "yes" : "no", pass_depth, has_s ? "yes" : "no", pass_stencil,
+            has_d && has_s && da.imageView == sa.imageView ? "yes" : "no", has_d ? da.imageLayout : has_s ? sa.imageLayout : 0,
+            has_d ? da.loadOp : -1, has_s ? sa.loadOp : -1, pass_samples);
     }
     vkCmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
