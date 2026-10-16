@@ -171,6 +171,21 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - Dev / portable mode: if the folder you start from has `extracted/` (a source checkout), that folder is used, as above.
 - `LARECOMP_DATA_ROOT=<dir>` overrides all of these.
 
+### Resuming game-code builds
+
+The game-code build keeps completed pieces in the game folder's `.gamebuild/`
+directory. **Cancel (B / Esc)** stops the compiler helpers; **Resume game code**
+continues from verified completed pieces. An interrupted build also resumes when
+LAS Recomp starts again. Generated source and object contents are checked before
+reuse. A generator update recompiles only changed pieces; changes to compiler
+inputs or flags require a full rebuild.
+
+**Game Files → Clear build cache** removes these temporary files when space is
+needed or to restart a build from scratch. It keeps the installed game library,
+game files and saves. A cache created by an older LAS Recomp build may need this
+one-time cleanup before it can use the new receipts. Failed or cancelled builds
+keep the previous installed library until a replacement is ready.
+
 ## Credits
 
 **LAS-Randomizer** - the randomizer at the heart of this project's randomizer features, vendored (with local
