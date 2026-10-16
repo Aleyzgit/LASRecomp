@@ -999,8 +999,21 @@ static void begin_pass(void) {
     }
     pass_w = minw; pass_h = minh;
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
-                          .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
+                          .colorAttachmentCount = pass_ncolor, .pColorAttachments = pass_ncolor ? ca : NULL,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
+    // LARECOMP_VK_LOG_PASSES=<n> (default 300 with =1): each of the first n passes before it begins - an Intel crash
+    // inside vkCmdBeginRendering (issues #8, #46) ends the log on the pass the driver choked on
+    static long log_passes = -1;
+    if (log_passes < 0) log_passes = getenv("LARECOMP_VK_LOG_PASSES") ? atol(getenv("LARECOMP_VK_LOG_PASSES")) : 0;
+    if (log_passes == 1) log_passes = 300;
+    if (log_passes > 0) {
+        log_passes--;
+        LOG("[vk] pass %ux%u: %u color", minw, minh, pass_ncolor);
+        for (uint32_t i = 0; i < pass_ncolor; i++) LOG(" [%u: fmt %d view %s %s]", i, pass_color[i], ca[i].imageView ? "yes" : "none",
+                                                       ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR ? "clear" : "load");
+        LOG(", depth %s fmt %d, stencil %s fmt %d, samples %u\n", has_d ? "yes" : "no", pass_depth, has_s ? "yes" : "no",
+            pass_stencil, pass_samples);
+    }
     vkCmdBeginRendering(cb, &ri);
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
