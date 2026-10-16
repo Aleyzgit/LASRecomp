@@ -5,7 +5,9 @@
 //  3. a Japanese gothic like UD Shin Go (much closer to the game's look than Arial): Hiragino Sans W4 on macOS,
 //     Yu Gothic Regular / Medium on Windows - not for Russian: Japanese fonts carry Cyrillic as full-width
 //     characters (JIS X 0208), every letter a square apart (issue #32)
-//  4. Arial
+//  4. Arial (macOS / Windows), DejaVu Sans (Linux, where installed)
+//  5. DejaVu Sans shipped with the app (third_party/fonts/DejaVu, free license): systems without any of the above
+//     (Bazzite / Fedora Atomic have no DejaVu - issue #37)
 // .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key.
 // .ttc collections get face 0 copied out as a standalone font (the game's font engine wants one sfnt).
 #include <stdlib.h>
@@ -13,6 +15,7 @@
 #include <strings.h>
 
 #include "../hle.h"
+#include "../paths.h"
 
 typedef struct { uint64_t addr, size; } Font;
 static Font fonts[2];  // [0] Standard (every type), [1] NintendoExt when a dump provides it
@@ -125,7 +128,11 @@ static void load_fonts(void) {
     for (size_t i = 0; i < sizeof std / sizeof *std && !fonts[0].addr; i++)
         if (std[i] && !(cyrillic && (strstr(std[i], "/System/Library/Fonts/ヒラギノ") || strstr(std[i], "YuGoth"))))
             load_one(std[i], &fonts[0]);
-    if (!fonts[0].addr) FATAL("no usable system font substitute\n");
+    char bundled[1100];
+    if (!fonts[0].addr && rt_resource("DejaVuSans.ttf", "third_party/fonts/DejaVu/DejaVuSans.ttf", bundled, sizeof bundled))
+        load_one(bundled, &fonts[0]);
+    if (!fonts[0].addr)  // (only a broken install: the app ships DejaVu Sans)
+        FATAL("no font for the game's text: import the Switch fonts in Settings (Game font), or reinstall LAS Recomp\n");
     if (!load_one("fonts/nintendo_ext_003.bfttf", &fonts[1])) load_one("fonts/nintendo_ext_003.ttf", &fonts[1]);
 }
 
