@@ -1964,6 +1964,7 @@ static bool gmem_import(uint64_t size) {
 // on the main thread before any guest thread exists; a reboot frees it with gmem_buf (vk_exec_reset) and the guest
 // window's reset unmaps it, so the next boot gets fresh zeroed memory. Costs: the whole HEAP_MAX is committed once the
 // GPU first uses it, and Linux write tracking can't watch this mapping (the heap is then re-checked like on Beta 4).
+// Nothing writes the heap before boot (the start screen doesn't use guest memory): the mapping replaces it unseen.
 // Default on for RADV; LARECOMP_VK_HEAP_DMABUF=0 off, =1 on any Linux driver with dma-buf export.
 void backend_guest_heap_prepare(void) {
 #ifdef __linux__
@@ -2006,23 +2007,47 @@ void backend_guest_heap_prepare(void) {
     VkMemoryGetFdInfoKHR fi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = mem,
                                .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     int fd = -1;
-    void *at = MAP_FAILED;
-    if (get_fd && get_fd(g_vk.dev, &fi, &fd) == VK_SUCCESS && fd >= 0)
-        at = mmap((void *)(uintptr_t)HEAP_BASE, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+    const char *why = NULL;
+    if (!get_fd || get_fd(g_vk.dev, &fi, &fd) != VK_SUCCESS || fd < 0) why = "no dma-buf for it";
+    // First mapped anywhere, to know the driver lets it be mapped at all: MAP_FIXED unmaps what's at HEAP_BASE before
+    // the driver is asked, so a refusal there would leave the heap unmapped (review of 2c27f3d)
+    if (!why) {
+        void *probe = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (probe == MAP_FAILED) why = strerror(errno);
+        else munmap(probe, size);
+    }
+    if (!why && mmap((void *)(uintptr_t)HEAP_BASE, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) !=
+                    (void *)(uintptr_t)HEAP_BASE) {
+        why = strerror(errno);
+        // (the old mapping is gone: plain zeroed memory again, registered for write tracking like a reboot's)
+        if (!plat_reset_guest(HEAP_BASE, HEAP_BASE + size)) FATAL("cannot restore the guest heap mapping\n");
+    }
     if (fd >= 0) close(fd);  // (the mapping keeps the dma-buf)
-    if (at != (void *)(uintptr_t)HEAP_BASE) {
-        // (MAP_FIXED failing leaves the old mapping alone: the heap stays plain memory, imported as before)
-        LOG("[vk] heap as driver memory: mapping at %llx failed (%s)\n", (unsigned long long)HEAP_BASE, strerror(errno));
+    VkResult br = why ? VK_SUCCESS : vkBindBufferMemory(g_vk.dev, buf, mem, 0);
+    if (!why && br != VK_SUCCESS) {
+        why = "binding failed";
+        if (!plat_reset_guest(HEAP_BASE, HEAP_BASE + size)) FATAL("cannot restore the guest heap mapping\n");
+    }
+    if (why) {
+        LOG("[vk] heap as driver memory: mapping at %llx failed (%s): the heap is shared as before\n",
+            (unsigned long long)HEAP_BASE, why);
         vkDestroyBuffer(g_vk.dev, buf, NULL);
         vkFreeMemory(g_vk.dev, mem, NULL);
         return;
     }
-    vkBindBufferMemory(g_vk.dev, buf, mem, 0);
+    // the game expects a zeroed heap; the kernel hands out zeroed pages, but 8 spread pages are checked to be sure
+    static const uint8_t zero_page[4096];
+    for (int i = 0; i < 8; i++)
+        if (memcmp((const void *)(uintptr_t)(HEAP_BASE + size / 8 * i), zero_page, sizeof zero_page)) {
+            LOG("[vk] heap as driver memory: not zeroed, clearing it\n");
+            memset((void *)(uintptr_t)HEAP_BASE, 0, size);
+            break;
+        }
     gmem_buf = buf;
     gmem_mem = mem;
     gmem_size = size;
-    LOG("[vk] guest heap as driver memory (dma-buf, memory type %d): %llu MB at %llx\n", type,
-        (unsigned long long)(size >> 20), (unsigned long long)HEAP_BASE);
+    LOG("[vk] guest heap as driver memory (dma-buf, memory type %d): %llu MB at %llx - all of it is held in system memory "
+        "once the GPU first uses it\n", type, (unsigned long long)(size >> 20), (unsigned long long)HEAP_BASE);
 #endif
 }
 
