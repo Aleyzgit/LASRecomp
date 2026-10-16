@@ -644,6 +644,8 @@ void backend_present(NvnTexture *t) {
         frames = 0;
         last_fps_time = now;
     }
+    static double mem_at = 60.0;  // (memory in steady state: a minute in, then every 10 minutes)
+    if (now >= mem_at) { vk_log_memory("playing"); mem_at = now + 600.0; }
 }
 
 // ================================================================== UI thread
