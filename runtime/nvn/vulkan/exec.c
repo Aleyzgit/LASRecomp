@@ -478,6 +478,7 @@ static int new_chunk(uint64_t size) {
     // (a driver may report the full window as out of host memory too; if memory is really gone, the retry fails as well)
     if ((r == VK_ERROR_OUT_OF_DEVICE_MEMORY || r == VK_ERROR_OUT_OF_HOST_MEMORY) && ai.usage != VMA_MEMORY_USAGE_AUTO_PREFER_HOST) {
         LOG("[vk] transient ring: device-local memory full after %d chunks, system memory from now on\n", nchunks);
+        vk_log_memory("ring chunk failed");
         sysmem = moved = true;
         ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
         r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
