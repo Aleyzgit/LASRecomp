@@ -169,6 +169,11 @@ bool plat_module_name(uint64_t pc, char *out, size_t n) {
 }
 
 void plat_init(void) {
+    // abort() (rt_fatal_trace, after the crash dialog) without the C runtime's own "Microsoft Visual C++ Runtime
+    // Library - abort() has been called" box and the Windows error report: the player sees only LAS Recomp's dialog
+#ifdef _WRITE_ABORT_MSG  // (MinGW's stdlib.h declares it with these flags)
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
     log_to_file_without_console();
     require_cpu();
     _fmode = _O_BINARY;  // fopen/open default to binary (the runtime's "r"/"w" files are binary or LF text)
