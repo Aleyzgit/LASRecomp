@@ -368,6 +368,7 @@ static void rom_index(void) {
     }
     if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
+    rt_romfs_files = rom_nfiles;  // (the game's own: before a seed's added files; the crash dialog checks it)
     add_new_files(h, dmeta, dsz, fsz);
     qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
     free(dmeta);

@@ -61,6 +61,7 @@ bool plat_remove_tree(const char *dir);      // rm -rf
 // ---- diagnostics
 // Name of the host function containing pc (guest functions are f_<addr>), NULL if unknown.
 const char *plat_symbol(uint64_t pc, uint64_t *offset);
+bool plat_module_name(uint64_t pc, char *out, size_t n);  // the file of the module (exe / library / driver) holding pc
 void plat_print_backtrace(void);
 void plat_fatal_notice(void);  // a fatal error is about to end the process: tell the user (Windows release: message box)
 void plat_crash_handler_install(void);  // per thread where the OS needs it (alternate signal stack)

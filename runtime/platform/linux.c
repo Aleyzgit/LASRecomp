@@ -20,6 +20,8 @@
 
 #include "../platform.h"
 
+void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
+
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
 #endif
@@ -161,12 +163,20 @@ const char *plat_symbol(uint64_t pc, uint64_t *offset) {
 }
 
 // Fatal error without a terminal: say so in a message box rather than vanishing (the details are in the log).
+// (what happened in plain words: runtime/crash_explain.c)
 void plat_fatal_notice(void) {
+    char text[1600];
+    rt_crash_explain(text, sizeof text, g_log_path);
     if (!g_log_path[0]) return;
     fflush(stderr);
-    char text[1200];
-    snprintf(text, sizeof text, "LAS Recomp stopped because of an error.\n\nDetails: %s", g_log_path);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
+}
+
+bool plat_module_name(uint64_t pc, char *out, size_t n) {
+    Dl_info di = {0};
+    if (!dladdr((void *)(uintptr_t)pc, &di) || !di.dli_fname) return false;
+    snprintf(out, n, "%s", di.dli_fname);
+    return true;
 }
 
 const char *rt_host_fn_name(uint64_t pc, uint64_t *offset);  // runtime/dispatch.c

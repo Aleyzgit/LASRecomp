@@ -162,8 +162,24 @@ static void mem_dump_test(uint64_t frame) {
     LOG("[memdump] frame %llu addr %llx bytes %zu\n", (unsigned long long)frame, (unsigned long long)p, n);
 }
 
+// LARECOMP_TEST_CRASH=<frame>:<segv|terminate|fatal> (test): stop the way those crashes do, for the crash dialog's
+// explanations (runtime/crash_explain.c) - segv: a game-memory read at 0; terminate: the uncaught-exception line
+static void crash_test(uint64_t frame) {
+    static const char *e;
+    static int init;
+    if (!init) init = 1, e = getenv("LARECOMP_TEST_CRASH");
+    if (!e || (uint64_t)strtoull(e, NULL, 10) != frame) return;
+    const char *k = strchr(e, ':');
+    k = k ? k + 1 : "";
+    if (!strcmp(k, "terminate")) FATAL("no function at 0 (lr=70044c7380 _ZSt13get_terminatev+20)\n");
+    if (!strcmp(k, "fatal")) FATAL("test fatal error\n");
+    volatile uint64_t *p = NULL;
+    (void)*p;
+}
+
 void warp_frame(uint64_t frame) {
     g_frame_now = frame;
+    crash_test(frame);
     { extern void shader_tour_tick(uint64_t); shader_tour_tick(frame); }
     warp_test(frame);
     warp_on_load(frame);
