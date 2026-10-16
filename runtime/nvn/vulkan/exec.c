@@ -452,7 +452,9 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 
 // ================================================================== transient memory ring
 // 64 MB host-visible chunks (device-local when the GPU exposes resizable BAR); a chunk is reused once every
-// submission that allocated from it has completed.
+// submission that allocated from it has completed. Without resizable BAR the device-local host-visible memory is a
+// small window (256 MB on a GTX 1060): once it's full, later chunks go to system memory (issue #45: it stopped the
+// game with "out of device memory").
 #define CHUNK_SIZE (64ull << 20)
 typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
 static Chunk *chunks;
@@ -468,12 +470,21 @@ static int new_chunk(uint64_t size) {
                                       VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
-    if (getenv("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
+    static bool sysmem;  // (the device-local window ran out: system memory from then on)
+    if (sysmem || getenv("LARECOMP_VK_RING_SYSMEM")) ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;  // (test: a GPU without resizable BAR)
     VmaAllocationInfo info;
-    VK_CHECK(vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info));
+    VkResult r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
+    bool moved = false;
+    if (r == VK_ERROR_OUT_OF_DEVICE_MEMORY && ai.usage != VMA_MEMORY_USAGE_AUTO_PREFER_HOST) {
+        LOG("[vk] transient ring: device-local memory full after %d chunks, system memory from now on\n", nchunks);
+        sysmem = moved = true;
+        ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        r = vmaCreateBuffer(g_vk.vma, &bi, &ai, &c->buf, &c->mem, &info);
+    }
+    VK_CHECK(r);
     c->ptr = info.pMappedData;
     c->size = size;
-    if (!nchunks) {  // where the ring lives: device-local (resizable BAR) or system memory read across PCIe
+    if (!nchunks || moved) {  // where the ring lives: device-local (resizable BAR) or system memory read across PCIe
         VkMemoryPropertyFlags f;
         vmaGetMemoryTypeProperties(g_vk.vma, info.memoryType, &f);
         LOG("[vk] transient ring: memory type %u (%s%s%s)\n", info.memoryType, f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT ? "device-local " : "system memory ",
