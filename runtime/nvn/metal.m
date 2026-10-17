@@ -16,6 +16,7 @@
 #include "nvn.h"
 #include "../game_addresses.h"
 #include "renderer.h"
+#include "pace.h"
 #include "texpatch.h"
 
 static id<MTLDevice> dev;
@@ -1047,6 +1048,8 @@ void backend_present(NvnTexture *t) {
         uint64_t nd0 = SDL_GetTicksNS();
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         uint64_t nd = SDL_GetTicksNS() - nd0;
+        extern __thread uint64_t g_blocked_ns;  // (kernel.c: waiting, not work - for the frame pacer, as Vulkan's acquire)
+        g_blocked_ns += nd;
         if (nd > 30000000) {
             static int warned;
             if (warned++ < 20) LOG("[metal] nextDrawable blocked %llums\n", (unsigned long long)(nd / 1000000));
@@ -1163,6 +1166,7 @@ void backend_present(NvnTexture *t) {
     frames++;
     total_frames++;
     g_frame_counter++;
+    pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
     static long slow_ms = -1;  // LARECOMP_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
@@ -1243,6 +1247,10 @@ void ui_window_init(void) {
     dev = MTLCreateSystemDefaultDevice();
     layer.device = dev;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    // The display's vsync stays on: without it frames show as soon as they're done, which tears (seen on a 5120x1440
+    // display), for ~2-3 fps near the limit at most (the game paces itself to vi.c's emulated 60 Hz vsync, and the two
+    // clocks drift). LARECOMP_DISPLAY_SYNC=0: off (tests).
+    layer.displaySyncEnabled = !getenv("LARECOMP_DISPLAY_SYNC") || atoi(getenv("LARECOMP_DISPLAY_SYNC")) != 0;
     layer.framebufferOnly = getenv("LARECOMP_WINDOW_SHOT") ? NO : YES;
 }
 
