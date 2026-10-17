@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as tmp:
         target, linked = tmp/'target', tmp/'junction'
         target.mkdir()
         assert target.resolve().is_relative_to(tmp.resolve())
-        subprocess.run(['cmd', '/c', 'mklink', '/J', str(linked), str(target)],
+        subprocess.run(['cmd', '/c', 'mklink', '/J', str(linked).replace('/', '\\'), str(target).replace('/', '\\')],
                        check=True, stdout=subprocess.DEVNULL)
         data = linked/'data'
     subprocess.run([str(exe),str(data)],check=True)
