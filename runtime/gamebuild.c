@@ -288,8 +288,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     // Generator changes should rebuild only chunks whose C changed, as in the existing incremental builder.
     // Compiler/header/flag changes invalidate every object; entry always rebuilds because it embeds GAMELIB_ID.
     const char *inputs[] = {input_paths[2], input_paths[3], input_paths[4], input_paths[5], t.cc};
-    snprintf(spec, sizeof spec, "LASBUILD3\n%s\n%s\n%s\n%s\nzig=%d pointer=%d\n", GAMELIB_BASE_ID,
-             GAMELIB_CFLAGS, GAMELIB_SHARED, t.cc, t.zig, (int)sizeof(void *));
+    // The compiler's contents identify it, so relocating the app does not discard reusable objects.
+    snprintf(spec, sizeof spec, "LASBUILD3\n%s\n%s\n%s\nzig=%d pointer=%d\n", GAMELIB_BASE_ID,
+             GAMELIB_CFLAGS, GAMELIB_SHARED, t.zig, (int)sizeof(void *));
     if (o->progress) o->progress(0, "Checking completed build files...");
     BuildCache *cache = build_cache_open(game_dir, spec, inputs, 5, why, why_size);
     if (!cache) return false;
@@ -297,6 +298,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     int ngen = 4;
     if (t.gen_script[0]) gen_inputs[ngen++] = t.gen_script;
     if (!build_cache_prepare_generation(cache, GAMELIB_ID, gen_inputs, ngen, why, why_size)) {
+        build_cache_failed(cache);
         build_cache_close(cache);
         return false;
     }
@@ -508,6 +510,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         }
     }
     if (ok) ok = build_cache_publish(cache, GAMELIB_NAME, GAMELIB_ID, why, why_size);
+    if (!ok && !(o->cancelled && o->cancelled())) build_cache_failed(cache);
     free(units.u);
     build_cache_close(cache);
     LOG("[gamebuild] reused %d objects, compiled %d objects\n", reused, compiled);

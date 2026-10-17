@@ -346,17 +346,21 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
     // A separate job per helper: cancelling one compiler also stops its children immediately,
     // without killing the other compilation jobs. Handles close on app exit as well.
     WinProcess *child = calloc(1, sizeof *child);
+    if (!child) {
+        TerminateProcess(pi.hProcess, 255);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        return 0;
+    }
     HANDLE job = CreateJobObjectW(NULL, NULL);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION li = {0};
     li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    if (!child || !job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li) ||
+    if (!job || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &li, sizeof li) ||
         !AssignProcessToJobObject(job, pi.hProcess)) {
-        fprintf(stderr, "[plat] could not supervise %s (error %lu)\n", argv[0], GetLastError());
-        TerminateProcess(pi.hProcess, 255);
-        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+        // A restricted parent job can prevent assignment. Still run the helper, as before jobs were added;
+        // cancellation can stop this process only in that case, not its descendants.
+        fprintf(stderr, "[plat] could not supervise %s (error %lu); starting without a job\n", argv[0], GetLastError());
         if (job) CloseHandle(job);
-        free(child);
-        return 0;
+        job = NULL;
     }
     child->process = pi.hProcess, child->job = job;
     ResumeThread(pi.hThread);
@@ -366,9 +370,11 @@ PlatProc plat_spawn(const char *const argv[], const char *log_path, bool append_
 
 void plat_proc_kill(PlatProc p) {
     WinProcess *child = (WinProcess *)p;
-    TerminateJobObject(child->job, 255);
+    if (child->job) TerminateJobObject(child->job, 255);
+    else TerminateProcess(child->process, 255);
     WaitForSingleObject(child->process, INFINITE);
-    CloseHandle(child->process); CloseHandle(child->job);
+    CloseHandle(child->process);
+    if (child->job) CloseHandle(child->job);
     free(child);
 }
 
@@ -378,7 +384,8 @@ int plat_proc_wait(PlatProc p, bool block) {
     if (w == WAIT_TIMEOUT) return -1;
     DWORD code = 255;
     if (w == WAIT_OBJECT_0) GetExitCodeProcess(child->process, &code);
-    CloseHandle(child->process); CloseHandle(child->job);
+    CloseHandle(child->process);
+    if (child->job) CloseHandle(child->job);
     free(child);
     return code > 255 ? 255 : (int)code;  // (a crash's NTSTATUS, e.g. 0xC0000409, is not "still running" (-1))
 }

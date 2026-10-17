@@ -346,7 +346,7 @@ static bool build_game_code(void) {
     if (!ok) {
         fprintf(stderr, "[launcher] game code: %s\n", why);
         if (g_cancel_build) set_job("Compilation cancelled. Completed files are kept.");
-        else set_job("Game code build failed.", true, why);
+        else set_failure(FAIL_BUILD);
     }
     return ok;
 }
@@ -1405,7 +1405,8 @@ extern "C" void launcher_run(const char *root) {
                     first_row();
                     opt_section("Set up");
                     if (busy || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
-                    if (opt_action(src.empty() && check_copied_files(g_root).empty() ? "Resume game code" : "Set up game files", busy ? "Working..." : "", ex_d.c_str(), true)) {
+                    bool resume = !busy && src.empty() && build_cache_resumable(g_root.c_str());
+                    if (opt_action(resume ? "Resume game code" : "Set up game files", busy ? "Working..." : "", ex_d.c_str(), true)) {
                         pthread_mutex_lock(&g_lock);
                         g_busy = true;
                         pthread_mutex_unlock(&g_lock);

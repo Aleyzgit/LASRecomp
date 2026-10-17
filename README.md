@@ -175,16 +175,17 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
 
 The game-code build keeps completed pieces in the game folder's `.gamebuild/`
 directory. **Cancel (B / Esc)** stops the compiler helpers; **Resume game code**
-continues from verified completed pieces. An interrupted build also resumes when
-LAS Recomp starts again. Generated source and object contents are checked before
-reuse. A generator update recompiles only changed pieces; changes to compiler
-inputs or flags require a full rebuild.
+appears after cancellation or interruption and continues from verified completed
+pieces. An interrupted build also resumes when LAS Recomp starts again. Generated
+source and object contents are checked before reuse. After success, only objects
+and their cache records are kept; generated C, logs, link files and compiler caches
+are removed. A generator update recompiles only changed pieces. Moving the app
+keeps reusable objects; changed compiler contents or flags require a full rebuild.
 
-**Game Files → Clear build cache** removes these temporary files when space is
-needed or to restart a build from scratch. It keeps the installed game library,
-game files and saves. A cache created by an older LAS Recomp build may need this
-one-time cleanup before it can use the new receipts. Failed or cancelled builds
-keep the previous installed library until a replacement is ready.
+**Game Files → Clear build cache** removes cached objects and temporary files,
+including the older `.zigcache` folder, while keeping the installed game library,
+game files and saves. Legacy build caches are upgraded automatically. Failed or
+cancelled builds keep the previous installed library until a replacement is ready.
 
 ## Credits
 
