@@ -94,6 +94,9 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // which Intel runs as a loop over the wave - 13.6 vs 8 ms for the main pass - and which needs features of its own).
 // A chunk that isn't bound holds a small dummy buffer; an access to one counts in GMiss. 0: one buffer.
 extern uint32_t maxwell_gmem_chunk_shift;
+// (diagnostic, exec.c LARECOMP_VK_GMEM_CHECK=1, windows of one import only) every chunked read is compared with the
+// same word read through the whole heap at GMEM_BUFFER_INDEX; a difference counts as a miss of that chunk (with its address)
+extern bool maxwell_gmem_check;
 #define GMEM_CHUNKS_MAX 256  // descriptors in the array (HEAP_MAX in 16 MB chunks is 208)
 #define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
 #define GMEM_CHUNK_BINDING 0  // GMem gmem_[chunks]

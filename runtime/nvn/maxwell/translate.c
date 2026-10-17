@@ -24,6 +24,7 @@
 
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
+bool maxwell_gmem_check;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -1832,6 +1833,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         // reads 0 / drops the store, and the miss is counted for the host, with the lowest word index that hit it.
         sp(&s, "#define GMC(i) ((i) >> %du)\n#define GMO(i) ((i) & 0x%xu)\n", ws, (1u << ws) - 1);
         sp(&s, "void gmiss(uint c, uint i) { atomicAdd(gmiss_.n[c], 1u); atomicMin(gmiss_.w[c], i); }\n");
+        if (maxwell_gmem_check) sp(&s, "layout(std430, set = %d, binding = %d) readonly buffer GMemAll { uint w[]; } gmall_;\n", set, GMEM_BUFFER_INDEX);
         static const char *const ops[4][3] = {
             {"uint GMR_(uint i)", "if (gmem_[%d].w.length() > 1024u) return gmem_[%d].w[o]; gmiss(%du, i); return 0u;", "return 0u;"},
             {"void GMW_(uint i, uint v)", "if (gmem_[%d].w.length() > 1024u) gmem_[%d].w[o] = v; else gmiss(%du, i); return;", "return;"},
@@ -1840,8 +1842,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int op = 0; op < (c->uses_gmem_store ? 4 : 1); op++) {
             sp(&s, "%s { uint o = GMO(i); switch (GMC(i)) {\n", ops[op][0]);
             for (int k = 0; k < n; k++) {
-                char body[200];
-                snprintf(body, sizeof body, ops[op][1], k, k, k);
+                char body[260];
+                if (op == 0 && maxwell_gmem_check)
+                    snprintf(body, sizeof body, "{ uint v = gmem_[%d].w[o]; if (v != gmall_.w[i]) gmiss(%du, i); return v; }", k, k);
+                else snprintf(body, sizeof body, ops[op][1], k, k, k);
                 sp(&s, "  case %du: %s\n", k, body);
             }
             sp(&s, "  default: %s } }\n", ops[op][2]);

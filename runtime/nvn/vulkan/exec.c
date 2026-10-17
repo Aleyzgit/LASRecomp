@@ -2185,6 +2185,8 @@ static uint32_t gmem_chunk_shift(void) {
     if (!shift) gc_lazy = false;
     gc_shift = (uint32_t)shift;
     gc_n = shift ? n : 0;
+    maxwell_gmem_check = shift && !gc_lazy && getenv("LARECOMP_VK_GMEM_CHECK") && atoi(getenv("LARECOMP_VK_GMEM_CHECK")) != 0;
+    if (maxwell_gmem_check) LOG("[vk] guest heap chunks: every chunked read is checked against the whole heap (LARECOMP_VK_GMEM_CHECK)\n");
     if (shift) LOG("[vk] guest heap bound to shaders in %llu MB chunks%s (storage buffers up to %llu MB here)\n",
                    (unsigned long long)(1ull << shift) >> 20, gc_lazy ? ", imported as the game binds them" : "", (unsigned long long)lim >> 20);
     return (uint32_t)shift;
