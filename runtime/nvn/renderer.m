@@ -206,11 +206,15 @@ static void counters_resolve(void) {
     int k = 0;
     for (int i = 0; i < nctr; i++) {
         uint64_t bs = ctr_pend[i].before, as = ctr_pend[i].after;
-        id<MTLCommandBuffer> b = bs && submit_seq - bs < CB_HIST ? cb_hist[bs % CB_HIST] : nil;
-        id<MTLCommandBuffer> a = as <= submit_seq && submit_seq - as < CB_HIST ? cb_hist[as % CB_HIST] : nil;
-        bool a_pending = a && a.status < MTLCommandBufferStatusCompleted;
-        if ((b && b.status < MTLCommandBufferStatusCompleted) || a_pending) {
-            ctr_pend[k++] = ctr_pend[i];  // (not done yet)
+        if (submit_seq - bs >= CB_HIST || (as <= submit_seq && submit_seq - as >= CB_HIST)) continue;  // (gone)
+        id<MTLCommandBuffer> b = bs ? cb_hist[bs % CB_HIST] : nil;
+        id<MTLCommandBuffer> a = as <= submit_seq ? cb_hist[as % CB_HIST] : nil;
+        // both sides done: a buffer not committed yet (a frame's first chunk still being translated) would leave a
+        // start counter at the previous frame's end - backend_execute commits one at the end of each list
+        bool done = as <= submit_seq && (!b || b.status >= MTLCommandBufferStatusCompleted) &&
+                    (!a || a.status >= MTLCommandBufferStatusCompleted);
+        if (!done) {
+            ctr_pend[k++] = ctr_pend[i];
             continue;
         }
         double t = b ? b.GPUEndTime : 0;
@@ -224,6 +228,16 @@ static void counters_resolve(void) {
     nctr = k;
     pthread_mutex_unlock(&cb_lock);
     pthread_mutex_unlock(&ctr_lock);
+}
+
+// A counter waits for the buffer after it: true when one ended the list just translated (backend_execute commits
+// one then, empty, so the counter isn't held until the next list).
+static bool counters_want_next(void) {
+    pthread_mutex_lock(&ctr_lock);
+    bool want = false;
+    for (int i = 0; i < nctr && !want; i++) want = ctr_pend[i].after > submit_seq;
+    pthread_mutex_unlock(&ctr_lock);
+    return want;
 }
 
 static int g_wait_kind;
@@ -283,6 +297,7 @@ void renderer_submit(void) {
         cb_hist[submit_seq % CB_HIST] = c;
         pthread_mutex_unlock(&cb_lock);
         stat_flushes++;
+        counters_resolve();  // (also without fence waits: a movie, loading - the table doesn't fill)
     }
 }
 
@@ -2690,6 +2705,9 @@ static void exec_list(uint64_t handle, int depth) {
                     ctr_pend[nctr].out = out, ctr_pend[nctr].start = prev_out;
                     ctr_pend[nctr].before = submit_seq, ctr_pend[nctr].after = submit_seq + 1;
                     nctr++;
+                } else {
+                    static int warned;
+                    if (!warned++) LOG("[metal] timing counters: %d pending, this one keeps the host clock\n", CTR_MAX);
                 }
                 pthread_mutex_unlock(&ctr_lock);
             }
@@ -2745,6 +2763,9 @@ void renderer_reset(void) {
     nfeedback = 0;
     g_cur_fs_hash = 0;
     last_bias_enc = nil;
+    pthread_mutex_lock(&ctr_lock);
+    nctr = 0;  // (pending timing counters point into the old boot's memory)
+    pthread_mutex_unlock(&ctr_lock);
     pthread_mutex_lock(&cb_lock);
     last_cb = nil;
     for (int i = 0; i < CB_HIST; i++) cb_hist[i] = nil;  // (they retain the old guest heap buffer)
@@ -2759,5 +2780,9 @@ void backend_execute(uint64_t handle) {
         if (sync_submit < 0) sync_submit = getenv("LARECOMP_SYNC_SUBMIT") ? 1 : 0;
         if (sync_submit) renderer_flush();  // old behaviour: finish the GPU work before returning
         else renderer_submit();  // the guest fences (nvnSyncWait) before reusing memory the GPU reads
+        if (counters_want_next()) {  // (a timing counter ended the list: its buffer after it, empty)
+            (void)cb();
+            renderer_submit();
+        }
     }
 }

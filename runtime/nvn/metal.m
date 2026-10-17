@@ -16,6 +16,7 @@
 #include "nvn.h"
 #include "../game_addresses.h"
 #include "renderer.h"
+#include "pace.h"
 #include "texpatch.h"
 
 static id<MTLDevice> dev;
@@ -1047,6 +1048,8 @@ void backend_present(NvnTexture *t) {
         uint64_t nd0 = SDL_GetTicksNS();
         id<CAMetalDrawable> drawable = [layer nextDrawable];
         uint64_t nd = SDL_GetTicksNS() - nd0;
+        extern __thread uint64_t g_blocked_ns;  // (kernel.c: waiting, not work - for the frame pacer, as Vulkan's acquire)
+        g_blocked_ns += nd;
         if (nd > 30000000) {
             static int warned;
             if (warned++ < 20) LOG("[metal] nextDrawable blocked %llums\n", (unsigned long long)(nd / 1000000));
@@ -1163,7 +1166,6 @@ void backend_present(NvnTexture *t) {
     frames++;
     total_frames++;
     g_frame_counter++;
-    extern void pace_frame(void);
     pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);

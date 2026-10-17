@@ -14,6 +14,7 @@
 #include "vk.h"
 #include "../output_scale.h"
 #include "../renderer.h"
+#include "../pace.h"
 
 VkG g_vk;
 static SDL_Window *window;
@@ -571,7 +572,6 @@ void backend_present(NvnTexture *t) {
     frames++;
     total_frames++;
     g_frame_counter++;
-    extern void pace_frame(void);
     pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
