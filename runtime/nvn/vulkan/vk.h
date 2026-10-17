@@ -35,6 +35,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, dmabuf;
+    bool ssbo_array;  // storage buffer arrays indexed per invocation + stores from fragment shaders (exec.c: the heap in chunks)
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;

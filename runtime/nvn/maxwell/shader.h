@@ -87,6 +87,18 @@ typedef struct {
 #define GMAP_MAX 16  // ranges in the table (GMap { uvec4 gmap[GMAP_MAX + 1]; }: [i] = addr lo, addr hi, size, word offset;
                      // [GMAP_MAX].x = count)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
+// (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes when one storage buffer
+// can't span it (maxStorageBufferRange: 1 GB on Intel, issue #8) or when it is imported chunk by chunk as the game
+// binds it (AMD APUs: vulkan/exec.c gmem_lazy): a descriptor array in a set of its own after the stages' sets, indexed
+// by the address. A chunk that isn't bound holds a small dummy buffer; an access to one counts in GMiss. 0: one buffer.
+extern uint32_t maxwell_gmem_chunk_shift;
+#define GMEM_CHUNKS_MAX 256  // descriptors in the array (HEAP_MAX in 16 MB chunks is 208)
+#define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
+#define GMEM_CHUNK_BINDING 0  // GMem gmem_[chunks]
+#define GMEM_MISS_BINDING 1   // GMiss: uint n[chunks]
+static inline int maxwell_gmem_chunks(void) {
+    return maxwell_gmem_chunk_shift ? (int)((maxwell_gmem_size + (1ull << maxwell_gmem_chunk_shift) - 1) >> maxwell_gmem_chunk_shift) : 1;
+}
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;
