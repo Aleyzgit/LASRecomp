@@ -35,7 +35,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, dmabuf;
-    bool ssbo_array;  // storage buffer arrays indexed per invocation + stores from fragment shaders (exec.c: the heap in chunks)
+    bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
     // window
     VkSurfaceKHR surface;
     VkSwapchainKHR swapchain;
@@ -107,6 +107,7 @@ void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags as
 // Destruction once every submission that may use the object has completed.
 void vk_defer_image(VkImage img, VmaAllocation mem);
 void vk_defer_view(VkImageView v);
+void vk_defer_buffer(VkBuffer b, VkDeviceMemory m);  // raw memory (an import); destroyed once the pending submission is done
 void vk_views_forget(TexBackend *b);  // drop (deferred) the cached views of an image being replaced
 uint64_t vk_frame_counter(void);
 

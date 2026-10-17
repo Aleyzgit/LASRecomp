@@ -89,13 +89,15 @@ typedef struct {
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes when one storage buffer
 // can't span it (maxStorageBufferRange: 1 GB on Intel, issue #8) or when it is imported chunk by chunk as the game
-// binds it (AMD APUs: vulkan/exec.c gmem_lazy): a descriptor array in a set of its own after the stages' sets, indexed
-// by the address. A chunk that isn't bound holds a small dummy buffer; an access to one counts in GMiss. 0: one buffer.
+// binds it (AMD APUs: vulkan/exec.c gmem_lazy): a descriptor array in a set of its own after the stages' sets, which
+// the shader indexes with constants only (a switch on the address's chunk: no per-invocation descriptor indexing,
+// which Intel runs as a loop over the wave - 13.6 vs 8 ms for the main pass - and which needs features of its own).
+// A chunk that isn't bound holds a small dummy buffer; an access to one counts in GMiss. 0: one buffer.
 extern uint32_t maxwell_gmem_chunk_shift;
 #define GMEM_CHUNKS_MAX 256  // descriptors in the array (HEAP_MAX in 16 MB chunks is 208)
 #define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
 #define GMEM_CHUNK_BINDING 0  // GMem gmem_[chunks]
-#define GMEM_MISS_BINDING 1   // GMiss: uint n[chunks]
+#define GMEM_MISS_BINDING 1   // GMiss: uint n[GMEM_CHUNKS_MAX] (accesses), w[GMEM_CHUNKS_MAX] (lowest word hit)
 static inline int maxwell_gmem_chunks(void) {
     return maxwell_gmem_chunk_shift ? (int)((maxwell_gmem_size + (1ull << maxwell_gmem_chunk_shift) - 1) >> maxwell_gmem_chunk_shift) : 1;
 }

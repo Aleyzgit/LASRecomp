@@ -1802,9 +1802,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     if (c->fail) { free(body.buf); free(c->body.buf); free(c); return info; }
     int set = stage == STAGE_FRAGMENT ? 1 : 0;
     Str s = {0};
-    sp(&s, "#version 460\n");  // (the prelude's first line; an extension directive has to follow it)
-    if (info->uses_gmem && maxwell_gmem_chunk_shift) sp(&s, "#extension GL_EXT_nonuniform_qualifier : require\n");
-    sp(&s, "%s", glsl_prelude + sizeof "#version 460\n" - 1);
+    sp(&s, "%s", glsl_prelude);
     static int exact = -1;
     if (exact < 0) exact = getenv("LARECOMP_VK_EXACT_H2F") && atoi(getenv("LARECOMP_VK_EXACT_H2F")) != 0;
     sp(&s, "%s%s", !exact && (stage == STAGE_FRAGMENT || stage == STAGE_COMPUTE) ? glsl_h2f_native : glsl_h2f_exact,
@@ -1824,22 +1822,32 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->uses_gmem_store)
             sp(&s, "#define GMW(i, v) gmem_.w[i] = (v)\n#define GMAND(i, m) atomicAnd(gmem_.w[i], m)\n"
                    "#define GMOR(i, m) atomicOr(gmem_.w[i], m)\n");
-    } else if (info->uses_gmem) {  // the heap in chunks: a descriptor array picked by the address (shader.h)
+    } else if (info->uses_gmem) {  // the heap in chunks: a descriptor array, one case per chunk (shader.h)
         int n = maxwell_gmem_chunks(), ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);  // (word index: chunk = i >> ws)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_[%d];\n", cs, GMEM_CHUNK_BINDING,
            c->uses_gmem_store ? "" : "readonly ", n);
-        sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint n[]; } gmiss_;\n", cs, GMEM_MISS_BINDING);
-        // (the chunk index differs between invocations: nonuniformEXT. A chunk bound to the dummy buffer - under 4 KB:
-        // not imported, or not among this frame's - reads 0 / drops the store, and the miss is counted for the host)
-        sp(&s, "#define GM(c) gmem_[nonuniformEXT(c)]\n#define GMC(i) ((i) >> %du)\n#define GMO(i) ((i) & 0x%xu)\n", ws, (1u << ws) - 1);
-        sp(&s, "bool gmiss(uint c) { if (GM(c).w.length() > 1024u) return false; atomicAdd(gmiss_.n[c], 1u); return true; }\n");
-        sp(&s, "uint GMR_(uint i) { uint c = GMC(i); return gmiss(c) ? 0u : GM(c).w[GMO(i)]; }\n#define GMR(i) GMR_(i)\n");
-        if (c->uses_gmem_store) {
-            sp(&s, "void GMW_(uint i, uint v) { uint c = GMC(i); if (!gmiss(c)) GM(c).w[GMO(i)] = v; }\n");
-            sp(&s, "void GMAND_(uint i, uint v) { uint c = GMC(i); if (!gmiss(c)) atomicAnd(GM(c).w[GMO(i)], v); }\n");
-            sp(&s, "void GMOR_(uint i, uint v) { uint c = GMC(i); if (!gmiss(c)) atomicOr(GM(c).w[GMO(i)], v); }\n");
-            sp(&s, "#define GMW(i, v) GMW_(i, v)\n#define GMAND(i, m) GMAND_(i, m)\n#define GMOR(i, m) GMOR_(i, m)\n");
+        sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint n[%d]; uint w[%d]; } gmiss_;\n", cs, GMEM_MISS_BINDING,
+           GMEM_CHUNKS_MAX, GMEM_CHUNKS_MAX);
+        // A chunk bound to the dummy buffer (under 4 KB: not imported, or not among the chunks this submission binds)
+        // reads 0 / drops the store, and the miss is counted for the host, with the lowest word index that hit it.
+        sp(&s, "#define GMC(i) ((i) >> %du)\n#define GMO(i) ((i) & 0x%xu)\n", ws, (1u << ws) - 1);
+        sp(&s, "void gmiss(uint c, uint i) { atomicAdd(gmiss_.n[c], 1u); atomicMin(gmiss_.w[c], i); }\n");
+        static const char *const ops[4][3] = {
+            {"uint GMR_(uint i)", "if (gmem_[%d].w.length() > 1024u) return gmem_[%d].w[o]; gmiss(%du, i); return 0u;", "return 0u;"},
+            {"void GMW_(uint i, uint v)", "if (gmem_[%d].w.length() > 1024u) gmem_[%d].w[o] = v; else gmiss(%du, i); return;", "return;"},
+            {"void GMAND_(uint i, uint v)", "if (gmem_[%d].w.length() > 1024u) atomicAnd(gmem_[%d].w[o], v); else gmiss(%du, i); return;", "return;"},
+            {"void GMOR_(uint i, uint v)", "if (gmem_[%d].w.length() > 1024u) atomicOr(gmem_[%d].w[o], v); else gmiss(%du, i); return;", "return;"}};
+        for (int op = 0; op < (c->uses_gmem_store ? 4 : 1); op++) {
+            sp(&s, "%s { uint o = GMO(i); switch (GMC(i)) {\n", ops[op][0]);
+            for (int k = 0; k < n; k++) {
+                char body[200];
+                snprintf(body, sizeof body, ops[op][1], k, k, k);
+                sp(&s, "  case %du: %s\n", k, body);
+            }
+            sp(&s, "  default: %s } }\n", ops[op][2]);
         }
+        sp(&s, "#define GMR(i) GMR_(i)\n");
+        if (c->uses_gmem_store) sp(&s, "#define GMW(i, v) GMW_(i, v)\n#define GMAND(i, m) GMAND_(i, m)\n#define GMOR(i, m) GMOR_(i, m)\n");
     }
     if (info->uses_gmem_map) {  // (compute) the dispatch's storage buffers, device-local: gmap[i] = heap offset, size, word
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GMap { uvec4 gmap[%d]; };\n", set, GMAP_BUFFER_INDEX, GMAP_MAX + 1);
