@@ -80,3 +80,4 @@
 #define GA_MCHIEF_STORY_SKIP                UINT64_C(0x70001f8b58)
 #define GA_EMPTY_HANDLER_CATCH              UINT64_C(0x700108de00)
 #define GA_FONT_BOX_GLYPH_SITE              UINT64_C(0x700111e000)
+#define GA_FONT_BOX_GLYPH_SKIP              UINT64_C(0x700111e06c)
