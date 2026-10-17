@@ -28,6 +28,10 @@ static uint32_t gc_shift;
 static uint32_t gmem_chunk_shift(void);
 static VkDescriptorSetLayout gmem_chunk_layout(void);
 static int gc_bound_count(void);
+static bool gc_lazy;
+static int gc_imported;
+static uint64_t gc_imported_bytes, stat_gc_misses;
+static uint64_t gmem_heap_size(void);
 static void gc_frame(void);
 static uint64_t stat_upload_bytes;
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
