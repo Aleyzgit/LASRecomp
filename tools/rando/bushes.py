@@ -113,6 +113,9 @@ POCKETS = {
     'Field_05H': ('feather | hookshot | rooster', _cols([1], range(2, 6))),                      # north-wasteland
     'Field_08B': ('bracelet', _cols([4, 5], range(2, 6)) | _cols([6], range(3, 7))),             # woods-south-chest
     'Field_02I': ('bracelet & break-crystal', _cols(range(2, 6), range(4, 7))),                  # taltal-east-left-chest
+    # taltal-ledge-chest: the walled courtyard from the cave door (tile 1) down the corridor (col 3) to the chest
+    'Field_02N': ('bombs', _cols([0], [1]) | _cols(range(1, 4), range(1, 4)) | _cols([4, 5], [3]) | _cols([6], [3, 4])
+                  | _cols([7], range(3, 6))),
 }
 
 
