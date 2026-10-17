@@ -51,6 +51,17 @@ typedef struct {
 
 typedef struct { uint64_t addr, size; } Range;
 
+// Same targets and views (field by field: the views come from guest records, their padding is not ours to compare).
+static bool rt_same(const RtState *a, const RtState *b) {
+    if (a->ncolor != b->ncolor || a->depth != b->depth || a->has_dview != b->has_dview) return false;
+    if (a->has_dview && memcmp(&a->dview, &b->dview, sizeof a->dview)) return false;
+    for (int i = 0; i < a->ncolor; i++) {
+        if (a->color[i] != b->color[i] || a->has_cview[i] != b->has_cview[i]) return false;
+        if (a->has_cview[i] && memcmp(&a->cview[i], &b->cview[i], sizeof a->cview[i])) return false;
+    }
+    return true;
+}
+
 static struct {
     RtState rt;
     bool rt_dirty;
@@ -154,7 +165,25 @@ static bool draw_item_cursor;           // a fragment texture is the Items page'
 #define RSCALE_BUFFER_INDEX 18
 
 static int debug_pass_no;
+// Attachment traffic. A tile GPU loads and stores every attachment of every pass, and the game clears each target
+// with a full clear before drawing it: 13 of the 45 passes of a Field_11C frame were clear quads alone, and the game
+// also re-sets the targets it already has between draw groups, which ended the pass (store + load of everything,
+// 3840x2160 depth, stencil and colour at 2x). Measured, Field_11C: 488 -> 343 MB of attachment traffic per frame at 1x,
+// 1701 -> 1297 MB at 2x, 45 -> 42 passes, picture unchanged. ~2 ms a frame on a 68 GB/s M1 Air.
+// - A full clear while no pass is open on its targets is recorded and becomes the load action of the pass that opens
+//   next on them (no load, no clear quad). If something else comes first (other targets, a copy, a dispatch, a submit),
+//   the clear gets a pass of its own that only stores. LARECOMP_MTL_LOAD_CLEAR=0: clears are quads again.
+// - SetRenderTargets with the targets already bound keeps the pass open. LARECOMP_MTL_RT_DEDUP=0: ends it as before.
+static struct {
+    bool on, color[8], depth, stencil;
+    double cc[8][4], dval;
+    uint32_t sval;
+} pending_clear;
+static bool opening_pass;  // begin_pass is ending the previous pass: end_pass must not open one for the recorded clear
+static void begin_pass(void);
+
 static void end_pass(void) {
+    if (pending_clear.on && !opening_pass) begin_pass();  // the recorded clear becomes a pass of its own
     if (enc) {
         [enc endEncoding];
         enc = nil;
@@ -457,6 +486,7 @@ static __unsafe_unretained id last_bias_enc;  // encoder the depth bias was last
 
 static void begin_pass(void) {
     if (enc && !st.rt_dirty) return;
+    opening_pass = true;  // (until the recorded clear is consumed below: the chunk submit's end_pass must not re-enter)
     end_pass();
     st.rt_dirty = false;
     MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
@@ -477,6 +507,11 @@ static void begin_pass(void) {
             rp.colorAttachments[i].loadAction = MTLLoadActionClear;
             rp.colorAttachments[i].clearColor = MTLClearColorMake(0, 0, 0, fresh ? 0 : 1);
         }
+        if (pending_clear.on && pending_clear.color[i]) {
+            const double *c = pending_clear.cc[i];
+            rp.colorAttachments[i].loadAction = MTLLoadActionClear;
+            rp.colorAttachments[i].clearColor = MTLClearColorMake(c[0], c[1], c[2], c[3]);
+        }
         rp.colorAttachments[i].storeAction = MTLStoreActionStore;
         if (!w) renderer_texture_scale(t, &pass_sx, &pass_sy);
         w = (int)tex.width; h = (int)tex.height;
@@ -488,11 +523,19 @@ static void begin_pass(void) {
             rp.depthAttachment.texture = tex;
             rp.depthAttachment.loadAction = MTLLoadActionLoad;
             rp.depthAttachment.storeAction = MTLStoreActionStore;
+            if (pending_clear.on && pending_clear.depth) {
+                rp.depthAttachment.loadAction = MTLLoadActionClear;
+                rp.depthAttachment.clearDepth = pending_clear.dval;
+            }
         }
         if (renderer_format_has_stencil(st.rt.depth->format)) {
             rp.stencilAttachment.texture = tex;
             rp.stencilAttachment.loadAction = MTLLoadActionLoad;
             rp.stencilAttachment.storeAction = MTLStoreActionStore;
+            if (pending_clear.on && pending_clear.stencil) {
+                rp.stencilAttachment.loadAction = MTLLoadActionClear;
+                rp.stencilAttachment.clearStencil = pending_clear.sval;
+            }
         }
         if (!w) { renderer_texture_scale(st.rt.depth, &pass_sx, &pass_sy); w = (int)tex.width; h = (int)tex.height; }
     }
@@ -509,6 +552,8 @@ static void begin_pass(void) {
     if (chunk < 0) { const char *e = ENV("LARECOMP_CHUNK_PASSES"); chunk = e ? atoi(e) : 8; }
     if (chunk > 0 && cmdbuf && ++g_passes_in_cb >= chunk) renderer_submit();
     enc = [cb() renderCommandEncoderWithDescriptor:rp];
+    memset(&pending_clear, 0, sizeof pending_clear);
+    opening_pass = false;
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
 }
@@ -584,8 +629,35 @@ static void attachment_formats(MTLRenderPipelineDescriptor *pd) {
         if (st.rt.color[i] && st.rt.color[i]->samples > 1) pd.rasterSampleCount = st.rt.color[i]->samples;
 }
 
+// A full clear (whole target, every channel) while no pass is open on the current targets: recorded for the next
+// pass's load action (see pending_clear). Partial clears and clears into an open pass stay quads.
+static bool record_clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil,
+                         uint32_t sval, uint32_t smask) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_MTL_LOAD_CLEAR"); on = !e || atoi(e); }
+    if (!on || (enc && !st.rt_dirty)) return false;
+    NvnTexture *t = index >= 0 ? (index < st.rt.ncolor ? st.rt.color[index] : NULL) : st.rt.depth;
+    if (!t) return false;
+    const int32_t *sc = st.scissor[0];
+    if (sc[0] != 0 || sc[1] != 0 || sc[2] < (int32_t)t->width || sc[3] < (int32_t)t->height) return false;
+    if (index >= 0 ? mask != 0xF : (!depth && !stencil) || (stencil && smask != 0xFF)) return false;
+    renderer_mark_gpu_owned(t);  // (as the pass would: the guest copy is stale from here on)
+    pending_clear.on = true;
+    if (index >= 0) {
+        pending_clear.color[index] = true;
+        for (int k = 0; k < 4; k++)
+            pending_clear.cc[index][k] = kind == 0 ? ((const float *)color)[k] : kind == 1 ? ((const int32_t *)color)[k] : ((const uint32_t *)color)[k];
+    } else {
+        if (depth) { pending_clear.depth = true; pending_clear.dval = dval; }
+        if (stencil) { pending_clear.stencil = true; pending_clear.sval = sval; }
+    }
+    if (g_debug_frame) LOG("[clear] recorded idx %d depth %d (%g) stencil %d for the next pass's load action\n", index, depth, dval, stencil);
+    return true;
+}
+
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil,
                   uint32_t sval, uint32_t smask) {
+    if (record_clear(index, kind, color, mask, depth, dval, stencil, sval, smask)) return;
     begin_pass();
     if (g_debug_frame) {
         int pw, ph;
@@ -2541,6 +2613,7 @@ static void exec_list(uint64_t handle, int depth) {
             }
             const struct { uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth;
                            NvnTextureView dview; uint8_t has_dview; } *rt = x;
+            RtState old = st.rt;
             memset(&st.rt, 0, sizeof st.rt);
             st.rt.ncolor = (int)r->x[0];
             for (int i = 0; i < st.rt.ncolor; i++) {
@@ -2551,6 +2624,16 @@ static void exec_list(uint64_t handle, int depth) {
             st.rt.depth = (NvnTexture *)(uintptr_t)rt->depth;
             st.rt.dview = rt->dview;
             st.rt.has_dview = rt->has_dview;
+            bool same = rt_same(&old, &st.rt);
+            static int dedup = -1;
+            if (dedup < 0) { const char *e = ENV("LARECOMP_MTL_RT_DEDUP"); dedup = !e || atoi(e); }
+            if (dedup && same && enc && !st.rt_dirty) break;  // the targets already bound: the pass goes on
+            if (pending_clear.on && !(dedup && same)) {  // the recorded clear belongs to the targets being replaced
+                RtState new = st.rt;
+                st.rt = old;
+                begin_pass();
+                st.rt = new;
+            }
             st.rt_dirty = true;
             break;
         }
@@ -2740,6 +2823,7 @@ static void exec_list(uint64_t handle, int depth) {
 // everything keyed by guest addresses or guest-owned objects - programs (by code address), pipelines (by program),
 // views, snapshots, bound state - so the next boot can't hit a stale entry. Metal's own shader cache stays warm.
 void renderer_reset(void) {
+    memset(&pending_clear, 0, sizeof pending_clear);  // (recorded for the old boot's textures)
     renderer_flush();
     pthread_mutex_lock(&gone_lock);
     ngone = 0;
