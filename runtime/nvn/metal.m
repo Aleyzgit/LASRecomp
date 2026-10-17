@@ -1247,10 +1247,10 @@ void ui_window_init(void) {
     dev = MTLCreateSystemDefaultDevice();
     layer.device = dev;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    // No wait for the display's vsync in nextDrawable / present: the game already paces itself to vi.c's emulated 60 Hz
-    // vsync, and two clocks drifting against each other cost frames near the limit (~2-3 fps measured at 2x on an M3
-    // Max). The compositor still shows whole frames. As Vulkan's MAILBOX (vulkan/device.c). LARECOMP_DISPLAY_SYNC=1: on.
-    layer.displaySyncEnabled = getenv("LARECOMP_DISPLAY_SYNC") && atoi(getenv("LARECOMP_DISPLAY_SYNC")) != 0;
+    // The display's vsync stays on: without it frames show as soon as they're done, which tears (seen on a 5120x1440
+    // display), for ~2-3 fps near the limit at most (the game paces itself to vi.c's emulated 60 Hz vsync, and the two
+    // clocks drift). LARECOMP_DISPLAY_SYNC=0: off (tests).
+    layer.displaySyncEnabled = !getenv("LARECOMP_DISPLAY_SYNC") || atoi(getenv("LARECOMP_DISPLAY_SYNC")) != 0;
     layer.framebufferOnly = getenv("LARECOMP_WINDOW_SHOT") ? NO : YES;
 }
 
