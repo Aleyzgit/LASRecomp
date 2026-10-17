@@ -18,11 +18,11 @@
 #ifndef GAMELIB_CFLAGS
 #define GAMELIB_CFLAGS "-O1 -fno-strict-aliasing -fvisibility=hidden"
 #endif
-#ifndef GAMELIB_BASE_ID
-#define GAMELIB_BASE_ID "dev"
-#endif
 #ifndef GAMELIB_SHARED
 #define GAMELIB_SHARED "-shared"
+#endif
+#ifndef GAMELIB_BASE_ID
+#define GAMELIB_BASE_ID "dev"
 #endif
 
 #ifdef _WIN32
@@ -38,7 +38,6 @@ static pthread_mutex_t g_plock = PTHREAD_MUTEX_INITIALIZER;
 static PlatProc g_procs[MAX_PROCS];
 static int g_nprocs;
 static bool g_quitting;
-static bool g_registered;
 
 static void end_all(void) {
     pthread_mutex_lock(&g_plock);
@@ -271,7 +270,8 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
 // ------------------------------------------------------------------ the build
 bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size_t why_size) {
     uint64_t t0 = plat_now_ns();
-    if (!g_registered) g_registered = true, atexit(end_all);
+    static bool registered;
+    if (!registered) registered = true, atexit(end_all);
     Tools t;
     if (!find_tools(&t)) {
         snprintf(why, why_size, "the game code builder is missing from this copy of LAS Recomp");

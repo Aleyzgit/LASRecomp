@@ -44,14 +44,17 @@ void error(char *out, size_t cap, const std::exception &e) {
         snprintf(out, cap, "%s", e.what());
 }
 bool is_link(const fs::path &p) {
-    if (fs::is_symlink(fs::symlink_status(p)))
-        return true;
 #ifdef _WIN32
-    auto a = GetFileAttributesW(p.c_str());
-    if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT))
-        return true;
+    // Cloud placeholders also have REPARSE_POINT: only symlinks and junctions redirect the path.
+    WIN32_FIND_DATAW data;
+    HANDLE find = FindFirstFileW(p.c_str(), &data);
+    if (find == INVALID_HANDLE_VALUE) return false;
+    FindClose(find);
+    return (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+           (data.dwReserved0 == IO_REPARSE_TAG_SYMLINK || data.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT);
+#else
+    return fs::is_symlink(fs::symlink_status(p));
 #endif
-    return false;
 }
 void plain(const fs::path &p) {
     fs::path part;
@@ -59,9 +62,9 @@ void plain(const fs::path &p) {
     for (const auto &c : fs::absolute(p)) {
         part /= c;
         if (c == ".gamebuild") inside = true;
-        if (inside) need(!is_link(part), "The build cache cannot contain links or reparse points.");
+        if (inside) need(!is_link(part), "The build cache cannot contain symlinks or junctions.");
     }
-    if (!inside) need(!is_link(p), "Build files cannot be links or reparse points.");
+    if (!inside) need(!is_link(p), "Build files cannot be symlinks or junctions.");
 }
 void plain_tree(const fs::path &p) {
     plain(p);
@@ -133,6 +136,8 @@ std::unique_ptr<BuildCache> acquire(const char *game_dir) {
     c->root = fs::weakly_canonical(fs::absolute(fs::u8path(game_dir))) / ".gamebuild";
     plain(c->root);
     fs::create_directories(c->root);
+    // Keep the lock file in place: unlinking it would let a second builder lock a different file.
+    // Closing the OS handle releases ownership even when the application exits during a build.
     auto lock = c->root / ".lock";
     plain(lock);
 #ifdef _WIN32
@@ -151,6 +156,8 @@ bool library_name(const std::string &s) {
     return s == "lasgame.dll" || s == "lasgame.so" || s == "lasgame.dylib";
 }
 void recover(BuildCache *c) {
+    // The library and its ID cannot be replaced together. A remaining journal means restore the old pair
+    // before a retry or cleanup can discard the backups; repeatable recovery also survives another exit.
     auto journal = c->root / "install-journal";
     if (!fs::exists(journal))
         return;
@@ -181,6 +188,7 @@ void clear_old_zig_cache(BuildCache *c) {
 void finish(BuildCache *c) {
     // Only objects and their input identities are useful to the next update. Regeneration is cheap compared
     // with compiling; its receipts cannot remain valid once the generated C has been removed.
+    // Keep source/object receipts for content comparison after regeneration, but drop the unfinished-build marker.
     plain_tree(c->root);
     for (auto &e : fs::directory_iterator(c->root)) {
         auto name = e.path().filename().u8string();
@@ -339,6 +347,7 @@ extern "C" bool build_cache_publish(BuildCache *c, const char *name, const char 
             fs::copy_file(lib, c->root / "previous-library", fs::copy_options::overwrite_existing);
         if (had_id)
             fs::copy_file(id, c->root / "previous-id", fs::copy_options::overwrite_existing);
+        // Record recovery information before replacing either installed file. Removing it commits the pair.
         write(c->root / "install-journal",
               std::string("LASINSTALL1\n") + name + "\n" + (had_lib ? "1" : "0") + " " + (had_id ? "1" : "0") + "\n");
         replace(tmp, lib);

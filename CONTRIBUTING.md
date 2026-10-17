@@ -67,7 +67,7 @@ them, then `make -j10`. The randomizer needs its Python environment in
 - State that belongs to a seed must be reset when the player switches seeds in place: use an `RT_ON_RESET` hook
   (see `runtime/hle.h`).
 
-## Code style
+## Tests
 
 Build-cache regression tests use synthetic inputs and the production scheduler:
 `python tools/test_build_cache.py` and `python tools/test_gamebuild_resume.py`.
@@ -76,6 +76,8 @@ helper process trees, descendant cleanup and crash exit codes. `CC` / `CXX` sele
 the native compiler (defaults: `clang` / `clang++`). For a release smoke test,
 cancel a real game-code build after some objects finish, resume it, inspect the
 reused/compiled counts in the log, and launch the resulting game library.
+
+## Code style
 
 - Match the surrounding code: its naming, structure and comment density. Comments explain *why* (what the game does,
   what an address is, which seed or bug showed the problem), not what the next line does.

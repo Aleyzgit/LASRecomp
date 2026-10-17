@@ -193,7 +193,14 @@ static int count_files(const std::string &dir, int depth = 0) {
 // The copied romfs' file count, counted once (the checks below run every frame): -1 = count again (game files set
 // up, deleted)
 static int g_romfs_count = -1;
-static void game_files_changed(void) { g_romfs_count = -1; }
+static std::atomic<bool> g_build_cache_changed{true};
+static void game_files_changed(void) { g_romfs_count = -1; g_build_cache_changed = true; }
+static bool resumable_build(void) {
+    // The setup page redraws every frame; read its disk marker only after the files/build state changes.
+    static bool resumable;
+    if (g_build_cache_changed.exchange(false)) resumable = build_cache_resumable(g_root.c_str());
+    return resumable;
+}
 
 static std::string incomplete(int have) {
     char b[96];
@@ -1078,6 +1085,7 @@ extern "C" void launcher_run(const char *root) {
         pthread_mutex_unlock(&g_lock);
         static bool was_busy;
         if (was_busy && !busy) {
+            g_build_cache_changed = true;
             status = check_game_files(g_root);
             if (status.empty()) { load_background(dev); page = MAIN; }
             g_auto_update = false;
@@ -1405,7 +1413,7 @@ extern "C" void launcher_run(const char *root) {
                     first_row();
                     opt_section("Set up");
                     if (busy || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
-                    bool resume = !busy && src.empty() && build_cache_resumable(g_root.c_str());
+                    bool resume = !busy && src.empty() && resumable_build();
                     if (opt_action(resume ? "Resume game code" : "Set up game files", busy ? "Working..." : "", ex_d.c_str(), true)) {
                         pthread_mutex_lock(&g_lock);
                         g_busy = true;
@@ -1447,6 +1455,7 @@ extern "C" void launcher_run(const char *root) {
                     if (opt_action("Clear build cache", "", "Removes generated source, finished objects and compiler caches. "
                                    "The installed game library, game files and saves are kept. The next build starts over.", true)) {
                         char why[512] = "";
+                        g_build_cache_changed = true;
                         if (build_cache_clear(g_root.c_str(), why, sizeof why)) set_job("Build cache cleared.");
                         else set_job("Could not clear the build cache.", true, why);
                     }
