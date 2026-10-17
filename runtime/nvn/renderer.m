@@ -14,6 +14,7 @@
 #include "maxwell/shader.h"
 #include "nvn.h"
 #include "renderer.h"
+#include "pace.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandBuffer> cmdbuf;
@@ -84,6 +85,7 @@ static int stat_compiles;
 static inline double now_ms(void) { return (double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e6; }
 #define TIMED_COMPILE(expr) ({ double t0_ = now_ms(); __auto_type r_ = (expr); stat_compile_ms += now_ms() - t0_; stat_compiles++; r_; })
 
+static uint64_t stat_counters_gpu;  // timing counters given the GPU's time (the game's 30 / 60 fps choice)
 const char *renderer_stats(void) {
     static int dumps;
     if (dumps++ < 3) {
@@ -96,9 +98,11 @@ const char *renderer_stats(void) {
     struct task_vm_info vmi;
     mach_msg_type_number_t vn = TASK_VM_INFO_COUNT;
     uint64_t foot = task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vmi, &vn) == KERN_SUCCESS ? vmi.phys_footprint : 0;
-    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms, compile %d/%.0fms, fbcopy %llu | tex %d (%.0f MB) views %d snaps %lu mem %.0f MB | waits fence %.0fms/%llu flush %.0fms/%llu all %.0fms/%llu", stat_draws, stat_skipped,
+    snprintf(stats_text, sizeof stats_text, "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, gpu %.0fms, wait %.0fms, compile %d/%.0fms, fbcopy %llu | tex %d (%.0f MB) views %d snaps %lu mem %.0f MB | waits fence %.0fms/%llu flush %.0fms/%llu all %.0fms/%llu | counters gpu %llu | pace %s, %llu frames over", stat_draws, stat_skipped,
              stat_passes, stat_dispatches, stat_flushes, stat_gpu_s * 1000.0, (double)stat_wait_ns / 1e6 * 125.0 / 3.0, stat_compiles, stat_compile_ms, stat_feedback_copies,
-             g_tex_live, g_tex_live_bytes / 1048576.0, g_views_live, (unsigned long)(g_snap_copies ? g_snap_copies.count : 0), foot / 1048576.0, stat_wait_by[0] / 24e3, (unsigned long long)stat_wait_n[0], stat_wait_by[1] / 24e3, (unsigned long long)stat_wait_n[1], stat_wait_by[2] / 24e3, (unsigned long long)stat_wait_n[2]);
+             g_tex_live, g_tex_live_bytes / 1048576.0, g_views_live, (unsigned long)(g_snap_copies ? g_snap_copies.count : 0), foot / 1048576.0, stat_wait_by[0] / 24e3, (unsigned long long)stat_wait_n[0], stat_wait_by[1] / 24e3, (unsigned long long)stat_wait_n[1], stat_wait_by[2] / 24e3, (unsigned long long)stat_wait_n[2],
+             (unsigned long long)stat_counters_gpu, pace_is_slow() ? "30" : "60", (unsigned long long)pace_frames_over());
+    stat_counters_gpu = 0;
     stat_compiles = 0;
     stat_feedback_copies = 0;
     stat_compile_ms = 0;
@@ -182,6 +186,46 @@ static pthread_mutex_t cb_lock = PTHREAD_MUTEX_INITIALIZER;
 static uint64_t submit_seq;
 static id<MTLCommandBuffer> cb_hist[CB_HIST];
 
+// ---- the game's GPU timing counters (nvnCommandBufferReportCounter, two per frame)
+// The game times its GPU work with these and takes its 30 fps mode when frames look slow (pace.c). They used to get
+// the host clock at translation time: our command translation (~2 ms however long the GPU took), so a Mac that
+// couldn't hold 60 kept the game in its 60 fps mode - slow motion at 30. Now the command buffer is split at each
+// counter (Apple GPUs have no timestamps inside a buffer), and once that's done the counter gets the GPU's time
+// there: the end of the buffer before it, or the start of the one after it if the GPU sat idle in between. Until
+// then the host clock (the game waits on its fence before reading them; resolved after each wait). As vulkan/exec.c.
+// LARECOMP_MTL_COUNTER=cpu: the host clock only.
+#define CTR_MAX 64
+static struct { uint64_t *out; const uint64_t *start; uint64_t before, after; } ctr_pend[CTR_MAX];
+static int nctr;
+static pthread_mutex_t ctr_lock = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t ns_to_gpu_ticks(uint64_t ns) { return (uint64_t)((unsigned __int128)ns * 384 / 625); }  // (614.4 MHz)
+
+static void counters_resolve(void) {
+    pthread_mutex_lock(&ctr_lock);
+    pthread_mutex_lock(&cb_lock);
+    int k = 0;
+    for (int i = 0; i < nctr; i++) {
+        uint64_t bs = ctr_pend[i].before, as = ctr_pend[i].after;
+        id<MTLCommandBuffer> b = bs && submit_seq - bs < CB_HIST ? cb_hist[bs % CB_HIST] : nil;
+        id<MTLCommandBuffer> a = as <= submit_seq && submit_seq - as < CB_HIST ? cb_hist[as % CB_HIST] : nil;
+        bool a_pending = a && a.status < MTLCommandBufferStatusCompleted;
+        if ((b && b.status < MTLCommandBufferStatusCompleted) || a_pending) {
+            ctr_pend[k++] = ctr_pend[i];  // (not done yet)
+            continue;
+        }
+        double t = b ? b.GPUEndTime : 0;
+        if (a && a.GPUStartTime > t) t = a.GPUStartTime;
+        if (t > 0) {
+            uint64_t *out = ctr_pend[i].out;
+            out[1] = pace_end_counter(ctr_pend[i].start, out, ns_to_gpu_ticks((uint64_t)(t * 1e9)));  // (host time base)
+            stat_counters_gpu++;
+        }
+    }
+    nctr = k;
+    pthread_mutex_unlock(&cb_lock);
+    pthread_mutex_unlock(&ctr_lock);
+}
+
 static int g_wait_kind;
 static void wait_cb(id<MTLCommandBuffer> c) {
     if (!c) return;
@@ -191,6 +235,7 @@ static void wait_cb(id<MTLCommandBuffer> c) {
     stat_wait_ns += d;
     stat_wait_by[g_wait_kind] += d;
     if (d > 24000) stat_wait_n[g_wait_kind]++;  // (> ~1 ms counts as a real wait)
+    counters_resolve();
 }
 
 // Textures the game destroyed (any thread): their cached views and snapshot copies are dropped on the render thread.
@@ -2632,7 +2677,23 @@ static void exec_list(uint64_t handle, int depth) {
             uint32_t type = (uint32_t)r->x[0];
             if (type < 32 && !(seen & (1u << type))) { seen |= 1u << type; LOG("[nvn] ReportCounter type %u\n", type); }
             // (Switch GPU ticks, 614.4 MHz: the game converts the difference to ns itself - see the Vulkan exec.c)
-            if (out) { out[0] = 0; out[1] = (uint64_t)((unsigned __int128)plat_now_ns() * 384 / 625); }
+            if (!out) break;
+            static int gpu = -1;
+            if (gpu < 0) gpu = !(getenv("LARECOMP_MTL_COUNTER") && !strcmp(getenv("LARECOMP_MTL_COUNTER"), "cpu"));
+            static uint64_t *prev_out;  // (frame pacing: the pair's start)
+            out[0] = 0;
+            out[1] = pace_end_counter(prev_out, out, ns_to_gpu_ticks(plat_now_ns()));
+            if (gpu && type == 0) {  // (type 0: timestamp) the GPU's time at this point, once it's done
+                renderer_submit();
+                pthread_mutex_lock(&ctr_lock);
+                if (nctr < CTR_MAX) {
+                    ctr_pend[nctr].out = out, ctr_pend[nctr].start = prev_out;
+                    ctr_pend[nctr].before = submit_seq, ctr_pend[nctr].after = submit_seq + 1;
+                    nctr++;
+                }
+                pthread_mutex_unlock(&ctr_lock);
+            }
+            prev_out = out;
             break;
         }
         case CMD_COPY_TEXTURE_TO_TEXTURE: {

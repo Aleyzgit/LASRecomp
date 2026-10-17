@@ -350,7 +350,7 @@ static void recreate_swapchain(void) {
 }
 
 // Time this thread spends waiting here - for a frame slot's GPU work, a window image, the presentation engine -
-// counts as idle for the frame pacer (exec.c vk_pace_frame), like the game's own waits: in FIFO (exclusive fullscreen
+// counts as idle for the frame pacer (pace.c), like the game's own waits: in FIFO (exclusive fullscreen
 // on Windows offers no mailbox) acquire / present block until the display's refresh, and counted as busy that made
 // every frame look ~16.6 ms: the game's 30 fps mode outdoors on a fast GPU (issue #44). GPU-bound frames still show
 // in the game's GPU counters.
@@ -571,8 +571,8 @@ void backend_present(NvnTexture *t) {
     frames++;
     total_frames++;
     g_frame_counter++;
-    extern void vk_pace_frame(void);
-    vk_pace_frame();  // (exec.c: the game's 30 fps mode when frames don't fit 60)
+    extern void pace_frame(void);
+    pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
     static long slow_ms = -1;

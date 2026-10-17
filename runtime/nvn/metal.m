@@ -1163,6 +1163,8 @@ void backend_present(NvnTexture *t) {
     frames++;
     total_frames++;
     g_frame_counter++;
+    extern void pace_frame(void);
+    pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
     static long slow_ms = -1;  // LARECOMP_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
@@ -1243,6 +1245,10 @@ void ui_window_init(void) {
     dev = MTLCreateSystemDefaultDevice();
     layer.device = dev;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    // No wait for the display's vsync in nextDrawable / present: the game already paces itself to vi.c's emulated 60 Hz
+    // vsync, and two clocks drifting against each other cost frames near the limit (~2-3 fps measured at 2x on an M3
+    // Max). The compositor still shows whole frames. As Vulkan's MAILBOX (vulkan/device.c). LARECOMP_DISPLAY_SYNC=1: on.
+    layer.displaySyncEnabled = getenv("LARECOMP_DISPLAY_SYNC") && atoi(getenv("LARECOMP_DISPLAY_SYNC")) != 0;
     layer.framebufferOnly = getenv("LARECOMP_WINDOW_SHOT") ? NO : YES;
 }
 
