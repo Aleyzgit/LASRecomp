@@ -52,6 +52,8 @@ jobs:
         run: make -j"$(nproc)" build/lasrecomp DEPS="$HOME/sdl3"
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Game address table tests
+        run: python3 tools/test_game_addresses.py
       - name: FP/SIMD lowering vs a CPU emulator (a sample)
         run: |
           python3 -m venv tools/venv && tools/venv/bin/pip install -q unicorn capstone lz4
@@ -67,6 +69,8 @@ jobs:
         run: make -j"$(sysctl -n hw.ncpu)" build/lasrecomp
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Game address table tests
+        run: python3 tools/test_game_addresses.py
 
   windows:
     runs-on: windows-2022
