@@ -182,7 +182,7 @@ with tempfile.TemporaryDirectory() as temporary:
         assert run(),why.value
         assert len(generators())==2 and len(compiles())==1
         relocated.parent.mkdir()
-        shutil.copy2(compiler, relocated)
+        shutil.copy(compiler, relocated) # contents/mode only; macOS system file flags are not part of the identity
         os.environ['LARECOMP_CC'] = str(relocated)
         assert run(),why.value
         assert len(generators())==2 and len(compiles())==1 # moving the same binary does not recompile every object
