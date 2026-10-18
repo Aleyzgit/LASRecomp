@@ -52,6 +52,8 @@ jobs:
         run: make -j"$(nproc)" build/lasrecomp DEPS="$HOME/sdl3"
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Dynamic resolution controller (simulated GPU)
+        run: python3 tools/test_dynres.py
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
       - name: FP/SIMD lowering vs a CPU emulator (a sample)
@@ -69,6 +71,8 @@ jobs:
         run: make -j"$(sysctl -n hw.ncpu)" build/lasrecomp
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Dynamic resolution controller (simulated GPU)
+        run: python3 tools/test_dynres.py
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
 

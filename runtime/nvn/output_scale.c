@@ -31,12 +31,36 @@
 // median (a frame missing one vsync, 33 ms, still counts: that's how a slow GPU shows at 60 Hz). Either way a spike
 // neither steps it down nor, so, doubles the raise wait. LARECOMP_DYN_NO_GPU=1: ignore the GPU times (tests the
 // frame-time path); LARECOMP_SPIKE_MS (pace.c): CPU-side spikes.
-#define DYN_N 30  // frames per decision (~half a second)
+//
+// The GPU time has two parts: the game's (G, scales with the factor: about its area, factor^2) and the window step's
+// (W: the image drawn into the window - upscale, SMAA - and the menu: depends on the window's size only). The budget
+// is for G + W (87% of a 60 Hz frame); a raise must be predicted to fit with room to spare (G x (new / old)^2 + W under
+// 90% of it: no fixed raise threshold, so it settles one step under where it would go over instead of hunting), and a
+// step down goes straight to where G + W is predicted to fit (at most 0.25 at once).
+// Held: when even the floor (0.50) misses 60 fps and the frames wait for the display (vsync: a frame every 33 ms
+// for G + W = 17), going lower gains nothing, so the budget becomes 87% of that frame interval (whole 60 Hz refreshes:
+// 33.3 / 50 ms) and the factor goes back up as far as it fits there (a large W - 4K SMAA / FSR 1 on an integrated
+// GPU - or a slow GPU at a big window). It looks for 60 again when the floor would fit it with 10% to spare (after
+// 10 s, doubling each time that fails), and starts over when W changes (another upscaler / anti-aliasing / window
+// size). Frames that don't wait (mailbox: a frame every G + W) keep going down to the floor: there every step down is
+// a faster frame. tools/test_dynres.py: the controller against a simulated GPU (the UHD 770 cases).
+#define DYN_N 30            // frames per decision (~half a second)
+#define DYN_FLOOR 0.5
+#define DYN_BUDGET 14.5     // ms of GPU work per frame at 60 fps (G + W)
+#define DYN_RAISE_FIT 0.9   // a raise: predicted G + W under this share of the budget
 static double g_dyn = 1.0;
-static double g_dyn_gpu_sum, g_last_t, g_dyn_dt[DYN_N];
+static double g_dyn_gpu_sum, g_dyn_win_sum, g_last_t, g_dyn_dt[DYN_N];
 static int g_dyn_n, g_dyn_gpu_n, g_dyn_good;
 static double g_dyn_cool_until, g_dyn_raise_wait = 3.0, g_dyn_raise_at;
 static double g_dyn_last_raise = -100, g_dyn_last_lower = -100;
+static double g_hold_dt, g_hold_w;               // held: the frame interval at the floor (> 0) and W then
+static double g_probe_at, g_probe_wait = 10.0;  // looking for 60 again (from a hold)
+static bool g_probing;
+// held: G at the floor followed through the scene's load - measured there as the hold began, then scaled by how G
+// changed at each factor since (G right after a step is the reference at the new factor): the part of G that
+// doesn't scale with the resolution makes area estimates optimistic (UHD 770 1080p: ~6.5 of 9.1 ms at 0.50)
+static double g_floor_g, g_ref_g;
+static bool g_ref_pending;
 
 static DynSplit g_split;  // sums since the last decision
 static int g_split_n;
@@ -53,15 +77,16 @@ static int cmp_double(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
-static void dyn_update(double now, double gpu_ms) {
+// game_ms: the game's GPU time of the last frame (< 0: unknown); win_ms: the window step's (< 0: unknown / not counted)
+static void dyn_update(double now, double game_ms, double win_ms) {
     static int no_gpu = -1;
     if (no_gpu < 0) no_gpu = getenv("LARECOMP_DYN_NO_GPU") && atoi(getenv("LARECOMP_DYN_NO_GPU"));
-    if (no_gpu) gpu_ms = -1;
+    if (no_gpu) game_ms = -1;
     double dt = g_last_t > 0 ? (now - g_last_t) * 1000.0 : 16.7;
     g_last_t = now;
     if (dt > 250) return;  // (loading, menus, a stall: not the GPU's steady state)
     g_dyn_dt[g_dyn_n++] = dt;
-    if (gpu_ms >= 0) { g_dyn_gpu_sum += gpu_ms; g_dyn_gpu_n++; }
+    if (game_ms >= 0) { g_dyn_gpu_sum += game_ms; g_dyn_win_sum += fmax(0, win_ms); g_dyn_gpu_n++; }
     if (g_dyn_n < DYN_N) return;  // decide every ~half second
     // frame times: median, and the mean without the outliers (single CPU-side spikes)
     double sorted[DYN_N], kept = 0;
@@ -70,16 +95,66 @@ static void dyn_update(double now, double gpu_ms) {
     double med = (sorted[DYN_N / 2 - 1] + sorted[DYN_N / 2]) / 2;
     int nkept = 0;
     for (int i = 0; i < DYN_N; i++) if (sorted[i] <= 3 * med) { kept += sorted[i]; nkept++; }
-    double avg_dt = kept / nkept, avg_gpu = g_dyn_gpu_n >= DYN_N / 2 ? g_dyn_gpu_sum / g_dyn_gpu_n : -1;
+    bool gpu = g_dyn_gpu_n >= DYN_N / 2;
+    double avg_dt = kept / nkept, G = gpu ? g_dyn_gpu_sum / g_dyn_gpu_n : -1, W = gpu ? g_dyn_win_sum / g_dyn_gpu_n : 0;
+    double avg_gpu = gpu ? G + W : -1;
     int spikes = DYN_N - nkept;
-    g_dyn_gpu_sum = 0;
+    g_dyn_gpu_sum = g_dyn_win_sum = 0;
     g_dyn_n = g_dyn_gpu_n = 0;
     if (now < g_dyn_cool_until) return;
     double prev = g_dyn;
-    bool gpu = avg_gpu >= 0;
-    bool slow = gpu ? avg_gpu > 14.5 : avg_dt > 17.4;
+    static int log = -1;  // LARECOMP_LOG_DYNRES=1: every decision, not only the steps
+    if (log < 0) log = getenv("LARECOMP_LOG_DYNRES") != NULL;
+    double budget = DYN_BUDGET;
+    if (gpu) {
+        if (g_hold_dt > 0 && fabs(W - g_hold_w) > fmax(1.0, 0.25 * g_hold_w)) {  // another upscaler / AA / window size
+            LOG("[dynres] window step %.1f -> %.1f ms: hold at %.0f fps ended\n", g_hold_w, W, 1000 / g_hold_dt);
+            g_hold_dt = 0, g_probing = false, g_probe_wait = 10.0;
+        }
+        if (g_hold_dt > 0 && g_ref_pending) g_ref_g = G, g_ref_pending = false;  // (the first measure at a new factor)
+        else if (g_hold_dt > 0 && now >= g_probe_at && g_ref_g > 0) {
+            double g_floor = g_floor_g * G / g_ref_g;
+            if (g_floor + W <= DYN_BUDGET * 0.9) {
+                LOG("[dynres] the floor would fit 60 fps now (game %.1f ms at %.2f: ~%.1f at %.2f, window %.1f): looking for it\n",
+                    G, g_dyn, g_floor, DYN_FLOOR, W);
+                g_hold_dt = 0, g_probing = true;
+            }
+        }
+        if (g_hold_dt > 0) budget = g_hold_dt * 0.87;
+        // 60 out of reach at the floor and the frames wait for the display: lower gains nothing, hold that frame rate
+        // (whole refreshes of a 60 Hz display: a floor that alternates 1 and 2 of them - 40 fps - beats 30 at a higher factor)
+        double vsyncs = floor(avg_dt / (1000 / 60.0) + 0.1);
+        static int votes;  // (two half seconds in a row)
+        bool held_back = g_hold_dt == 0 && g_dyn <= DYN_FLOOR && avg_gpu > DYN_BUDGET && vsyncs >= 2 && avg_dt >= 1.25 * avg_gpu;
+        votes = held_back ? votes + 1 : 0;
+        if (held_back && votes >= 2) {
+            g_hold_dt = vsyncs * 1000 / 60.0, g_hold_w = W;
+            g_floor_g = g_ref_g = G, g_ref_pending = false;
+            if (g_probing) g_probe_wait = fmin(g_probe_wait * 2, 160.0);
+            g_probing = false;
+            g_probe_at = now + g_probe_wait;
+            budget = g_hold_dt * 0.87;
+            if (W >= 0.4 * 1000 / 60.0 || W >= G)
+                LOG("[dynres] window step %.1f ms is the limit (game %.1f ms at %.2f, a frame every %.1f ms): 60 fps out of "
+                    "reach, holding %.0f fps; the factor goes up while G + W fits %.1f ms\n", W, G, g_dyn, avg_dt,
+                    1000 / g_hold_dt, budget);
+            else
+                LOG("[dynres] game %.1f + window %.1f ms at %.2f (a frame every %.1f ms): 60 fps out of reach, holding %.0f "
+                    "fps; the factor goes up while G + W fits %.1f ms\n", G, W, g_dyn, avg_dt, 1000 / g_hold_dt, budget);
+        }
+        if (g_probing && g_hold_dt == 0 && avg_gpu <= DYN_BUDGET && avg_dt < 20) g_probing = false, g_probe_wait = 10.0;
+    }
+    bool slow = gpu ? avg_gpu > budget : avg_dt > 17.4;
+    // held, but the frames came slower than the hold's (the display waits one more refresh): over budget too
+    if (gpu && g_hold_dt > 0 && avg_dt > 1.2 * g_hold_dt && avg_gpu > 0.8 * budget) slow = true;
     if (slow) {
-        g_dyn = fmax(0.5, g_dyn - ((gpu ? avg_gpu > 19 : avg_dt > 22) ? 0.1 : 0.05));
+        double down = g_dyn - ((gpu ? avg_gpu > budget * 1.3 : avg_dt > 22) ? 0.1 : 0.05);
+        if (gpu && G > 0) {  // straight to where G + W is predicted to fit
+            double fit = g_dyn * sqrt(fmax(0, budget - W) / G);
+            down = fmin(down, floor(fit * 20 + 1e-6) / 20);
+            down = fmax(down, g_dyn - 0.25);
+        }
+        g_dyn = fmax(DYN_FLOOR, down);
         g_dyn_good = 0;
         // the raise didn't hold (spikes can't undo one any more: they're not in the measure)
         if (now - g_dyn_last_raise < 10.0) g_dyn_raise_wait = fmin(g_dyn_raise_wait * 2, 60.0);
@@ -87,15 +162,17 @@ static void dyn_update(double now, double gpu_ms) {
         g_dyn_raise_at = now + g_dyn_raise_wait;
     } else if (g_dyn < 1.0) {
         g_dyn_good++;
-        // headroom for a while (with GPU timing: clearly under budget; without: frames at 60), and not too soon after
-        // the last step down
-        bool room = (gpu ? avg_gpu < 10.5 : avg_dt < 16.9) && g_dyn_good >= 6 && now >= g_dyn_raise_at;
-        if (room) { g_dyn = fmin(1.0, g_dyn + 0.05); g_dyn_good = 0; g_dyn_last_raise = now; g_dyn_raise_at = now + g_dyn_raise_wait; }
+        // headroom for a while, and not too soon after the last step down. With GPU timing: the next step is predicted
+        // to fit (G scales with the area); without: frames at 60
+        double up = fmin(1.0, g_dyn + 0.05);
+        bool fits = gpu ? G * (up / g_dyn) * (up / g_dyn) + W <= budget * DYN_RAISE_FIT : avg_dt < 16.9;
+        bool room = fits && g_dyn_good >= 6 && now >= g_dyn_raise_at;
+        if (room) { g_dyn = up; g_dyn_good = 0; g_dyn_last_raise = now; g_dyn_raise_at = now + g_dyn_raise_wait; }
         else if (now - g_dyn_last_lower > 60.0 && g_dyn_raise_wait > 3.0) g_dyn_raise_wait = 3.0;  // (a minute of calm: forget the hunting)
     }
     g_dyn = round(g_dyn * 20) / 20;
-    static int log = -1;  // LARECOMP_LOG_DYNRES=1: every decision, not only the steps
-    if (log < 0) log = getenv("LARECOMP_LOG_DYNRES") != NULL;
+    if (gpu && g_hold_dt > 0 && g_dyn != prev && !g_ref_pending && g_ref_g > 0)  // the floor's G as of now; G's new reference next time
+        g_floor_g *= G / g_ref_g, g_ref_pending = true;
     if (g_dyn != prev || log) {
         if (g_dyn != prev) g_dyn_cool_until = now + 1.0;
         char split[320] = "";
@@ -106,8 +183,11 @@ static void dyn_update(double now, double gpu_ms) {
                      g_split.span / nf, g_split.span / nf - (g_split.game + g_split.win) / n, g_split.w_slot / n, g_split.w_acquire / n,
                      g_split.w_present / n, g_split.w_other / n);
         }
-        LOG("[dynres] %.2f -> %.2f (frame %.1f ms, median %.1f, %d spike%s left out, gpu %.1f ms, next raise in %.0f s%s)\n", prev,
-            g_dyn, avg_dt, med, spikes, spikes == 1 ? "" : "s", avg_gpu, fmax(0, g_dyn_raise_at - now), split);
+        char hold[48] = "";
+        if (g_hold_dt > 0) snprintf(hold, sizeof hold, ", holding %.0f fps", 1000 / g_hold_dt);
+        LOG("[dynres] %.2f -> %.2f (frame %.1f ms, median %.1f, %d spike%s left out, gpu %.1f ms = game %.1f + window %.1f, "
+            "budget %.1f%s, next raise in %.0f s%s)\n", prev, g_dyn, avg_dt, med, spikes, spikes == 1 ? "" : "s", avg_gpu, G, W,
+            budget, hold, fmax(0, g_dyn_raise_at - now), split);
     }
     memset(&g_split, 0, sizeof g_split);
     g_split_n = 0;
@@ -115,7 +195,7 @@ static void dyn_update(double now, double gpu_ms) {
 
 double output_scale_dynamic_factor(void) { return g_dyn; }
 
-void output_scale(double dw, double dh, bool reshape_allowed, double now, double gpu_ms, OutScale *o) {
+void output_scale(double dw, double dh, bool reshape_allowed, double now, double game_ms, double win_ms, OutScale *o) {
     double fit = fmin(dw / 1920.0, dh / 1080.0);
     static double forced = -1, wide_test = -1;
     if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
@@ -134,7 +214,7 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
             static double pinned = -1;
             if (pinned < 0) pinned = getenv("LARECOMP_DYN_TEST") ? atof(getenv("LARECOMP_DYN_TEST")) : 0;
             if (pinned > 0) dyn = pinned;
-            else { dyn_update(now, gpu_ms); dyn = g_dyn; }
+            else { dyn_update(now, game_ms, win_ms); dyn = g_dyn; }
         }
         else if (mode == RES_Q75) h *= 0.75;
         else if (mode == RES_Q25) h *= 0.25;

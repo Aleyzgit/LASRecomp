@@ -110,6 +110,7 @@ static void pick_device(void) {
     free(qp);
     if (g_vk.qfam == UINT32_MAX) FATAL("no graphics+present queue\n");
     LOG("[vk] using %s\n", g_vk.props.deviceName);
+    settings_resolve_defaults(g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
 }
 
 static bool g_fault_ext;
@@ -560,12 +561,12 @@ void backend_present(NvnTexture *t) {
         static uint64_t sp_prev[4], wt_prev[4], cw_prev;
         static bool sp_have;
         uint64_t sp[4];
-        double gpu_ms = -1;
+        double game_ms = -1, win_ms = -1;
         if (vk_gpu_split_ns(sp)) {
             uint64_t cw = vk_cum_wait_ns();
             if (sp_have) {
                 double game = (sp[0] - sp_prev[0]) / 1e6, win = (sp[1] - sp_prev[1]) / 1e6;
-                gpu_ms = game + (count_present ? win : 0);
+                game_ms = game, win_ms = count_present ? win : -1;
                 double slotw = (g_vk_frame_waits[0] - wt_prev[0]) / 1e6;
                 DynSplit ds = {game, win, (sp[2] - sp_prev[2]) / 1e6, (double)(sp[3] - sp_prev[3]), slotw,
                                (g_vk_frame_waits[1] - wt_prev[1]) / 1e6, (g_vk_frame_waits[2] - wt_prev[2]) / 1e6,
@@ -578,7 +579,7 @@ void backend_present(NvnTexture *t) {
             sp_have = true;
         }
         OutScale os;
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
+        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);

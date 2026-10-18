@@ -42,4 +42,13 @@ with tempfile.TemporaryDirectory() as directory:
                 assert f'language = {expected}\n' in saved
                 assert f'rando_seed = {seed}\n' in saved
                 count += 1
-    print(f'{count} parser, locale and roundtrip cases passed (LF/CRLF, empty/nonempty seeds)')
+    # the upscaler's default follows the GPU until the player picks one (settings_resolve_defaults)
+    for lines, mode in [(['upscaler = auto'], 'upscaler-auto'), (['volume = 1'], 'upscaler-auto'),
+                        (['upscaler = fsr1'], 'upscaler-chosen'), (['upscaler = metalfx'], 'upscaler-chosen')]:
+        ini = directory / 'test.ini'
+        ini.write_text('\n'.join(lines) + '\n')
+        subprocess.run([str(exe), mode], env=dict(os.environ, LARECOMP_SETTINGS=str(ini)), check=True, capture_output=True)
+        if mode == 'upscaler-auto':
+            assert 'upscaler = auto\n' in ini.read_text()
+        count += 1
+    print(f'{count} parser, locale, upscaler default and roundtrip cases passed (LF/CRLF, empty/nonempty seeds)')

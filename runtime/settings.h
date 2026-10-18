@@ -26,6 +26,7 @@ typedef struct {
     bool fullscreen;
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
+    bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
@@ -67,6 +68,12 @@ extern Settings g_settings;
 
 void settings_load(void);
 void settings_save(void);
+// At device init: the defaults that depend on the GPU. integrated (Vulkan: an integrated GPU; never on macOS): plain
+// bilinear upscaling instead of the sharp upscaler, whose pass at the window's size costs as much as the game's frame
+// there (UHD 770: FSR 1 + SMAA 8 ms of GPU per frame at 1080p, 20 ms at 4K). A player's own choice is kept.
+// Anti-aliasing is off by default everywhere.
+void settings_resolve_defaults(bool integrated);
+extern int g_default_upscaler;  // UPSCALE_*: what the menu shows as the default
 // The language code to serve the game ("es", "en-US", ...): the setting, or the host locale for LANG_AUTO
 const char *settings_language(void);
 // That code's name for the menu ("Spanish")

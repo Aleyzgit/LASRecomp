@@ -9,8 +9,10 @@ typedef struct {
     double vx, vy, vw, vh;     // where the image is drawn in the window (pixels)
 } OutScale;
 
-// dw x dh: the window's drawable size in pixels; now: seconds; gpu_ms: GPU time of the last frame (< 0: unknown)
-void output_scale(double dw, double dh, bool reshape_allowed, double now, double gpu_ms, OutScale *o);
+// dw x dh: the window's drawable size in pixels; now: seconds; GPU time of the last frame: game_ms the game's (< 0:
+// unknown), win_ms the window step's - the game's image drawn into the window (upscale, SMAA) and the menu (< 0:
+// unknown / not counted)
+void output_scale(double dw, double dh, bool reshape_allowed, double now, double game_ms, double win_ms, OutScale *o);
 double output_scale_dynamic_factor(void);
 
 // (Vulkan) where a frame's time went, noted once per frame before output_scale(); LARECOMP_LOG_DYNRES's [dynres] line

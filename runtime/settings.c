@@ -28,6 +28,7 @@ Settings g_settings = {
     .chaos_letters = CHAOS_LETTERS_MAP,
     .diff_damage = 1.0f,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
+    .upscaler_auto = true,
 };
 
 // The game's own text languages: its RomFS carries these per region (regionUS/USen|USes|USfr, regionEU/EUen|EUes|...,
@@ -87,6 +88,16 @@ const char *settings_language_name(void) {
     return "English";
 }
 
+int g_default_upscaler = UPSCALE_SHARP;
+
+void settings_resolve_defaults(bool integrated) {
+    g_default_upscaler = integrated ? UPSCALE_BILINEAR : UPSCALE_SHARP;
+    if (g_settings.upscaler_auto) g_settings.upscaler = g_default_upscaler;
+    LOG("[settings] %s GPU: upscaler %s (%s), anti-aliasing %s\n", integrated ? "integrated" : "discrete / other",
+        g_settings.upscaler == UPSCALE_BILINEAR ? "bilinear" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "metalfx",
+        g_settings.upscaler_auto ? "default" : "chosen", g_settings.antialias == AA_SMAA ? "smaa" : "off");
+}
+
 void settings_load(void) {
     static bool loaded;
     if (loaded) return;
@@ -118,7 +129,11 @@ void settings_load(void) {
                                   !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 :
                                   (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;  // (5x-8x were removed)
         }
-        else if (!strcmp(key, "upscaler")) g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : UPSCALE_SHARP;  // (metalfx / fsr1: this OS's)
+        else if (!strcmp(key, "upscaler")) {  // (metalfx / fsr1: this OS's; auto: never chosen, the GPU's default)
+            g_settings.upscaler_auto = !strcmp(val, "auto");
+            if (!g_settings.upscaler_auto) g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : UPSCALE_SHARP;
+            else g_settings.upscaler = g_default_upscaler;
+        }
         else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;  // ("fxaa": SMAA now)
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
@@ -170,7 +185,8 @@ void settings_save(void) {
     fprintf(f, "reverb = %d\n", g_settings.reverb);
     fprintf(f, "movie_audio = %d\n", g_settings.movie_audio);
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
-    fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
+    fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
+                                   g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
     if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
     else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");

@@ -1099,14 +1099,15 @@ void backend_present(NvnTexture *t) {
         static _Atomic uint64_t present_ns;
         static int count_present = -1;
         if (count_present < 0) count_present = !getenv("LARECOMP_DYNRES_COUNT_PRESENT") || atoi(getenv("LARECOMP_DYNRES_COUNT_PRESENT"));
-        uint64_t gpu_now = __atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED) + (count_present ? present_ns : 0);
-        double gpu_ms = gpu_prev ? (gpu_now - gpu_prev) / 1e6 : -1;
-        gpu_prev = gpu_now;
+        static uint64_t win_prev;
+        uint64_t gpu_now = __atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED), win_now = present_ns;
+        double game_ms = gpu_prev ? (gpu_now - gpu_prev) / 1e6 : -1, win_ms = count_present ? (win_now - win_prev) / 1e6 : -1;
+        gpu_prev = gpu_now, win_prev = win_now;
         [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {  // (the upscale / scaling draw and the menu)
             present_ns += (uint64_t)((done.GPUEndTime - done.GPUStartTime) * 1e9);
         }];
         OutScale os;
-        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
+        output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
         bool reshape = shape != 1.0;
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
@@ -1284,6 +1285,7 @@ void ui_window_init(void) {
     SDL_MetalView view = SDL_Metal_CreateView(window);
     layer = (__bridge CAMetalLayer *)SDL_Metal_GetLayer(view);
     dev = MTLCreateSystemDefaultDevice();
+    settings_resolve_defaults(false);  // (Apple GPUs keep MetalFX as the default upscaler)
     layer.device = dev;
     layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     // The display's vsync stays on: without it frames show as soon as they're done, which tears (seen on a 5120x1440
