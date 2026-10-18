@@ -53,7 +53,7 @@ This is a beta release. That means bugs are likely, crashes could occur, randomi
 - **This is not emulation.** Runs natively on Windows, macOS and Linux using static recompilation of the Switch code.
 - Unlocked aspect ratio: wider (or taller) windows show more of the island, up to ultrawide; houses and dungeons
   keep their framing. The original 16:9 framing is one option away.
-- Start screen: play vanilla or any randomizer seed, set up game files from your own dump, import fonts.
+- Start screen: play vanilla or any randomizer seed, set up your own extracted game files, import fonts.
   - Switch games use fonts built into the Switch operating system for some text. Sensible replacements are used by default, but you may optionally set up the Switch fonts for an authentic look. Switch fonts are Nintendo IP; you must provide them from your own hardware.
 - In-game overlay menu (F1, or Minus + Plus on a controller).
 - Switch between vanilla and any randomizer seed without restarting the app.
