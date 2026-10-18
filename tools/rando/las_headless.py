@@ -634,6 +634,8 @@ def main():
         print('refill gets:', refill_gets.apply(out_dir, romfs, settings), flush=True)
     import bomb_bag_text  # (after every flow edit, digs too) found bombs: "You found your Bomb Bag!"
     print('bomb bag text:', bomb_bag_text.apply(out_dir, romfs, settings), flush=True)
+    import powder_bag_text  # (same) found powder: "You found your Powder Bag!"
+    print('powder bag text:', powder_bag_text.apply(out_dir, romfs, settings), flush=True)
     with open(os.path.join(out_dir, 'settings.json'), 'w') as f:
         s = dict(settings)
         s['excluded-locations'] = sorted(s['excluded-locations'])
