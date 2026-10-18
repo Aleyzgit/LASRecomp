@@ -653,6 +653,23 @@ for _a in DELEGATE_FORWARDER_SITES:
 # with Warp tab jumps; same family as NO_HANDLER_SITES (the action dispatcher's).
 EMPTY_HANDLER_SITE = A.EMPTY_HANDLER_SITE  # bl main+0x108dfc0
 
+# Issue #19 (the hang): the per-frame kick-off (main+0x15730, four inlined copies, one per owner X) rebuilds X's frame
+# job J (X+0xc8) in place. The job worker (main+0x13c21e0) runs J (main+0x10cceb0: sets X's done flag, wakes the main
+# thread, unlocks) and only then calls J's finish (main+0x10ccfa0 -> slot +0x00: base vtable, delegate cleared). A
+# worker preempted between the two lets the main thread kick off the next frame first; the late finish then wipes the
+# new J, whose release is dropped and the main thread waits for X's done flag forever. The kick-off hooks wait for the
+# previous run's finish (runtime/hle/delegate_null.c); the finish hook only serves a debug delay to force the race.
+FRAME_JOB_KICKOFF_SITES = [A.FRAME_JOB_KICKOFF_SITES_0, A.FRAME_JOB_KICKOFF_SITES_1, A.FRAME_JOB_KICKOFF_SITES_2,
+                           A.FRAME_JOB_KICKOFF_SITES_3]
+FRAME_JOB_FINISH_SITE = A.FRAME_JOB_FINISH_SITE
+
+
+# Shadow Link's Appear event (main+0xd157f0: requested once Link is within 3 units, ShadowLink.bfevfl) stops Link and
+# turns the camera to him; on the Field (seeds) the request is skipped and runtime/hle/miniboss.c plays his appearance
+# (Sign glow, then he pops up) without an event. The site is right after the function's already-requested check; the
+# skip goes to its return.
+SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
+
 
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
@@ -667,9 +684,15 @@ HOOKS = {
     GOHMA_ARRIVED_SITE: (0x3dc58260, (A.GOHMA_ARRIVED_SKIP,), 'ldr q0, [x19, #0x1600]: Gohma, no track end on the Field'),
     MSTALFOS_BODY_SITE: (0x320003e8, (), 'mov w8, #1: Master Stalfos body collision flag, off on the Field'),
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
+    SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
     HOLE_CAP_SITES[0]: (0xf101451f, (), 'cmp x8, #0x51: dug-hole limit (digs.c)'),
     HOLE_CAP_SITES[1]: (0xf101411f, (), 'cmp x8, #0x50: dug-hole limit (digs.c)'),
     EMPTY_HANDLER_SITE: (0x9400005e, (A.EMPTY_HANDLER_CATCH,), 'bl std::function call: an empty event handler, as its catch'),
+    FRAME_JOB_KICKOFF_SITES[0]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[1]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[2]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[3]: (0x910782b3, (), 'add x19, x21, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_FINISH_SITE: (0xf9400008, (), 'ldr x8, [x0]: frame job finish (debug delay)'),
 }

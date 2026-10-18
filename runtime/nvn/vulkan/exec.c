@@ -62,7 +62,7 @@ static bool in_pass;
 
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
-    vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v);
+    VK_CHECK(vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v));
     return v;
 }
 
@@ -90,7 +90,9 @@ void vk_wait_seq(uint64_t seq) {
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
     wait_account(SDL_GetTicksNS() - t0);
-    if (r == VK_TIMEOUT) LOG("[vk] GPU did not finish submission %llu within 10 s (device lost?)\n", (unsigned long long)seq);
+    // Callers recycle command buffers and allocations after this returns; a timeout is not completion.
+    if (r == VK_TIMEOUT) FATAL("[vk] GPU did not finish submission %llu within 10 s; stopping before reusing in-flight resources\n",
+                              (unsigned long long)seq);
     else if (r == VK_SUCCESS) cq_resolve_done(seq);  // (the game reads its timing counters after waiting)
     else {
         extern void vk_devlost_dump(void);
@@ -174,8 +176,10 @@ static Sub *sub(void) {
         }
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
         s->cur_pool = 0;
-        s->seq = submit_seq + 1;
+        pthread_mutex_lock(&seq_lock);
         s->main_begun = s->upload_begun = false;
+        s->seq = submit_seq + 1;
+        pthread_mutex_unlock(&seq_lock);
     }
     return s;
 }
@@ -189,7 +193,9 @@ static void begin_cb(VkCommandBuffer *cb, bool *begun) {
     }
     VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT};
     VK_CHECK(vkBeginCommandBuffer(*cb, &bi));
+    pthread_mutex_lock(&seq_lock);
     *begun = true;
+    pthread_mutex_unlock(&seq_lock);
 }
 
 static void gp_mark(VkCommandBuffer cb, const char *fmt, ...);
@@ -338,8 +344,8 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     }
     pthread_mutex_lock(&seq_lock);
     submit_seq++;
-    pthread_mutex_unlock(&seq_lock);
     cur_sub = (cur_sub + 1) % SUBS;
+    pthread_mutex_unlock(&seq_lock);
     stat_flushes++;
     cum_submits++;
     ring_retire();
@@ -364,7 +370,11 @@ void renderer_sync(void) {
 
 uint64_t renderer_fence_seq(void) {
     pthread_mutex_lock(&seq_lock);
-    uint64_t q = submit_seq + (subs[cur_sub].main_begun || subs[cur_sub].upload_begun ? 1 : 0);
+    Sub *s = &subs[cur_sub];
+    // A reused slot still has its old begun flags until sub() prepares it. An empty queue fence must refer to
+    // the last submission, not a future value that submit's empty-work fast path will never signal.
+    bool pending = s->seq == submit_seq + 1 && (s->main_begun || s->upload_begun);
+    uint64_t q = submit_seq + (pending ? 1 : 0);
     pthread_mutex_unlock(&seq_lock);
     return q;
 }

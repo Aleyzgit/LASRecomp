@@ -20,6 +20,9 @@ FIELD_MINIBOSSES = {
     0x59: [],              # Master Stalfos (starts by himself)
     0x57: [],              # Lanmola (his rail from Field_13O; copies give no item: tools/rando/miniboss_guard.py)
     0x52: ['Bossblin'],    # Moblin Chief (his hideout's story check skipped on the Field: tools/patches.py)
+    0x55: [],              # Ball-and-chain Soldier (Dampe's chamber dungeons only; fights on his own)
+    0x21E: [],             # Shadow Link (Dampe's chamber, unlocked by an amiibo in the original; rises from a shadow and
+    #                        fights on his own; his defeat event only plays his fade - no flags, a rupee drops)
 }
 MINIBOSS_VARIANTS = {0x53: [['HinoxStart'], [2]]}  # (one picked per mini-boss: Hinox 2 = Turtle Rock's blue one)
 ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
@@ -180,6 +183,9 @@ def fit_rail(room_data, act, points, rail):
 
 
 def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy_settings: dict, rand_state: tuple):
+    # LARecomp: miniboss-frequency 0 / 1 / 2 / 3 = normal, 2x, 3x, every room with a randomized land enemy
+    miniboss_chance = (MINIBOSS_CHANCE, MINIBOSS_CHANCE * 2, MINIBOSS_CHANCE * 3, 1.0)[
+        min(3, max(0, int(enemy_settings.get('miniboss-frequency', 0))))]
     """"""
 
     random.setstate(rand_state)
@@ -231,7 +237,7 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 room = enemy_settings['arena'](file[:-4])
                 fits = [m for m in fits if m not in NEEDS_ROOM or roomy(room, act, NEEDS_ROOM[m])]
             if (enemy_settings.get('minibosses') and fits and folder == 'Field'
-                    and (_ONLY or (not room_has_miniboss and random.random() < MINIBOSS_CHANCE))):
+                    and (_ONLY or (not room_has_miniboss and random.random() < miniboss_chance))):
                 mini = random.choice(fits)
                 room_has_miniboss = True
                 new_enemy = mini
