@@ -29,6 +29,7 @@ typedef struct {
     VkDevice dev;
     VkQueue queue;
     uint32_t qfam;
+    uint32_t ts_bits;          // the queue's timestampValidBits (0: no timestamps)
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
     VkPipelineCache pcache;
@@ -59,6 +60,13 @@ void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra);  // submit + one more cb (present)
+// GPU timer (exec.c gpu_timer_add): the window image's submission starts its counted work here (after its acquire wait)
+void vk_gpu_timer_window_start(void);
+bool vk_gpu_split_ns(uint64_t out[4]);  // cumulative: game GPU ns, window GPU ns, frame spans' ns, frames; false: no timer
+uint64_t vk_cum_wait_ns(void);          // cumulative vk_wait_seq time
+// (device.c) CPU time blocked presenting, cumulative ns: [0] frame slot's fence, [1] window image acquire, [2] present;
+// [3]: frames presented
+extern uint64_t g_vk_frame_waits[4];
 
 // Transient GPU-visible memory that lives until the submission it was allocated for completes.
 typedef struct { VkBuffer buf; uint64_t off; void *ptr; } VkSpan;
@@ -81,7 +89,8 @@ typedef struct TexBackend {
     bool scalable, presented;
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
-    float sx, sy;
+    float sx, sy;        // the scale the contents were drawn at (scalable textures)
+    float ax, ay;        // the allocation scale (the image's size; Dynamic: the contents use a part of it)
     void *pending_rgba;  // host-produced pixels (video) waiting to be uploaded on the render thread
     uint32_t pending_w, pending_h, pending_stride;
     bool pending_nv12;        // pending_rgba holds NV12 (Y, then UV at pending_uv_off): converted on the GPU
