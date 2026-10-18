@@ -94,9 +94,10 @@ void vk_wait_seq(uint64_t seq) {
     rq_watch("vkWaitSemaphores (GPU submission)", seq);
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
     rq_watch(NULL, 0);
-    stat_wait_ns += SDL_GetTicksNS() - t0;
-    cum_wait += SDL_GetTicksNS() - t0;
-    wait_account(SDL_GetTicksNS() - t0);
+    uint64_t waited = SDL_GetTicksNS() - t0;  // (the game thread's fence waits and the render thread's: atomic sums)
+    __atomic_fetch_add(&stat_wait_ns, waited, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&cum_wait, waited, __ATOMIC_RELAXED);
+    wait_account(waited);
     // Callers recycle command buffers and allocations after this returns; a timeout is not completion.
     if (r == VK_TIMEOUT) FATAL("[vk] GPU did not finish submission %llu within 10 s; stopping before reusing in-flight resources\n",
                               (unsigned long long)seq);
@@ -231,7 +232,7 @@ bool vk_gpu_split_ns(uint64_t out[4]) {
     out[3] = __atomic_load_n(&gpu_frames, __ATOMIC_RELAXED);
     return true;
 }
-uint64_t vk_cum_wait_ns(void) { return cum_wait; }  // (all vk_wait_seq waits so far)
+uint64_t vk_cum_wait_ns(void) { return __atomic_load_n(&cum_wait, __ATOMIC_RELAXED); }  // (all vk_wait_seq waits so far)
 
 static Sub *sub(void) {
     Sub *s = &subs[cur_sub];

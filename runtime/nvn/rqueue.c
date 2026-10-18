@@ -13,11 +13,11 @@
 // of work; latency stays one frame), and the queue has a fixed size. Waits by guest threads give up while the
 // kernel stops them for a reboot (g_rt_unwind), as kernel waits do.
 //
-// Watchdog (LARECOMP_RQ_WATCHDOG=<seconds>, default 15, 0 = off; runs from the game's GPU device setup, render
-// thread on or off): when no frame was presented twice that long after the device setup, presenting stops for that
-// long, or a wait noted with rq_watch() lasts that long, the log gets both sides' state ("[rq-watchdog]"): the queue
-// (counts, the last items, the one running and for how long), what each noted thread waits on and for how long, and
-// every guest thread's kernel wait - so a hang explains itself.
+// Hang dump: part of runtime/kernel.c's "[hang]" watch (LARECOMP_HANG_DUMP=<seconds>, default 30, 0 = off; this side
+// armed at the game's GPU device setup, render thread on or off): when no frame was presented twice that long after
+// the device setup, presenting stops for that long, or a wait noted with rq_watch() lasts that long, the dump adds
+// the queue (counts, the last items, the one running and for how long) and what each noted thread waits on to the
+// guest threads' kernel waits - so a hang explains itself.
 #include "rqueue.h"
 
 #include <pthread.h>
@@ -52,7 +52,7 @@ typedef struct {
 #define RQ_HIST 4096
 static Item items[RQ_CAP];
 static uint64_t gpu_seq_of[RQ_HIST];  // per item number: the backend submission it ended with
-static uint8_t kind_of[RQ_HIST];      // (watchdog) per item number: its kind
+static uint8_t kind_of[RQ_HIST];      // (hang dump) per item number: its kind
 static uint64_t enq_ns[RQ_HIST], done_ns[RQ_HIST];  // (LARECOMP_LOG_PACE fence stats) per item: queued, translated
 static uint64_t q_enq, q_done, q_cur;  // items queued / finished / in progress (0: none)
 static int presents_pending;
@@ -60,7 +60,7 @@ static uint64_t last_present_q;  // (LARECOMP_LOG_PACE fence stats) the latest p
 extern __thread uint64_t rq_fence_q;
 uint64_t rq_trace_t0;  // (debug: LARECOMP_RQ_TRACE's time base)
 static uint64_t exec_frame;  // (the render thread) the frame whose lists it runs now: see rq_frame
-static _Atomic uint64_t presents_done, cur_since;  // (watchdog) presents the thread finished; when q_cur started
+static _Atomic uint64_t presents_done, cur_since;  // (hang dump) presents the thread finished; when q_cur started
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv_work = PTHREAD_COND_INITIALIZER, cv_done = PTHREAD_COND_INITIALIZER;
 static pthread_t thread;
@@ -98,7 +98,7 @@ static void start(void) {
     }
     LOG("[rq] render thread %s (first asked by guest thread %llu)\n", want ? "on" : "off", (unsigned long long)asker);
     atomic_store(&on, want);
-    rq_watchdog_start();
+    rq_hang_watch_start();
 }
 
 extern uint64_t kernel_current_thread_id(void);
@@ -116,7 +116,7 @@ bool rq_on(void) {
     return v > 0;
 }
 
-// ---- what threads wait on (the watchdog's view)
+// ---- what threads wait on (the hang dump's view)
 #define NWATCH 48
 typedef struct {
     _Atomic(const char *) what;  // NULL: not waiting
@@ -228,7 +228,7 @@ static void *run(void *arg) {
     (void)arg;
     plat_thread_guest(44);  // (the game's GPU thread's class: performance cores on a Mac)
     is_render = true;
-    rq_watch(NULL, 0);  // (registers this thread for the watchdog)
+    rq_watch(NULL, 0);  // (registers this thread for the hang dump)
     for (;;) {
         pthread_mutex_lock(&lock);
         wait_until(&cv_work, has_work, 0, false, NULL);
@@ -237,7 +237,7 @@ static void *run(void *arg) {
         q_cur = q;
         atomic_store_explicit(&cur_since, plat_now_ns(), memory_order_relaxed);
         pthread_mutex_unlock(&lock);
-        static long stall_at = -1;  // (test) LARECOMP_RQ_STALL_AT=<item>: the thread stops there for 60 s (watchdog test)
+        static long stall_at = -1;  // (test) LARECOMP_RQ_STALL_AT=<item>: the thread stops there for 60 s (hang dump test)
         if (stall_at < 0) stall_at = getenv("LARECOMP_RQ_STALL_AT") ? atol(getenv("LARECOMP_RQ_STALL_AT")) : 0;
         if (stall_at && q == (uint64_t)stall_at) { rq_watch("LARECOMP_RQ_STALL_AT (test)", q); sleep(60); rq_watch(NULL, 0); }
         static int stats = -1;  // (LARECOMP_LOG_PACE) the thread's wall vs CPU time per item kind
@@ -247,7 +247,7 @@ static void *run(void *arg) {
         switch (it.kind) {
         case IT_EXEC: backend_execute(it.handle); break;
         case IT_PRESENT: backend_present_now(it.tex, it.frame); break;
-        case IT_DESTROY: backend_texture_destroyed(it.tex); free(it.tex); break;
+        case IT_DESTROY: { extern void nvn_texture_destroy(NvnTexture *t); nvn_texture_destroy(it.tex); break; }
         case IT_UPLOAD: backend_upload_now(it.tex, it.up_kind, it.data, it.w, it.h, it.stride, it.uv_off); break;
         case IT_FLUSH: { extern void renderer_flush(void); renderer_flush(); break; }
         }
@@ -422,24 +422,21 @@ void rq_flush(void) {
     rq_drain();
 }
 
-// ---- watchdog
+// ---- the hang dump's renderer side (runtime/kernel.c's hang watch: one "[hang]" facility, LARECOMP_HANG_DUMP)
 
-static void watchdog_dump(const char *why) {
-    static int dumps;
-    if (dumps++ >= 5) return;
+static void hang_state(const char *pfx) {
     uint64_t now = plat_now_ns();
     extern uint64_t renderer_present_count(void);
-    LOG("[rq-watchdog] ===== %s =====\n", why);
     bool locked = false;
     for (int i = 0; i < 100 && !(locked = pthread_mutex_trylock(&lock) == 0); i++) usleep(1000);
-    uint64_t enq = q_enq, done = q_done, cur = q_cur;
+    uint64_t enq = q_enq, done = q_done, cur = q_cur, cs = atomic_load(&cur_since);
     int pp = presents_pending;
     if (locked) pthread_mutex_unlock(&lock);
-    LOG("[rq-watchdog] render thread %s; queued %llu, done %llu, running %llu%s%s (for %llu ms), presents pending %d, "
-        "presents done %llu, game frames %llu, backend submissions %llu%s\n",
+    LOG("%s render thread %s; queued %llu, done %llu, running %llu%s%s (for %llu ms), presents pending %d, "
+        "presents done %llu, game frames %llu, backend submissions %llu%s\n", pfx,
         atomic_load(&on) > 0 ? "on" : "off", (unsigned long long)enq, (unsigned long long)done, (unsigned long long)cur,
         cur ? " " : "", cur ? kind_name[kind_of[cur % RQ_HIST] % 5] : "",
-        cur ? (unsigned long long)((now - atomic_load(&cur_since)) / 1000000) : 0ull, pp,
+        cur && cs < now ? (unsigned long long)((now - cs) / 1000000) : 0ull, pp,
         (unsigned long long)atomic_load(&presents_done), (unsigned long long)renderer_present_count(),
         (unsigned long long)renderer_submit_seq(), locked ? "" : " (queue lock held 100+ ms: read without it)");
     if (enq) {
@@ -448,69 +445,62 @@ static void watchdog_dump(const char *why) {
         uint64_t from = enq > 24 ? enq - 23 : 1;
         for (uint64_t q = from; q <= enq && n < (int)sizeof b - 32; q++)
             n += snprintf(b + n, sizeof b - (size_t)n, " %llu:%s", (unsigned long long)q, kind_name[kind_of[q % RQ_HIST] % 5]);
-        LOG("[rq-watchdog] last items:%s\n", b);
+        LOG("%s render queue, last items:%s\n", pfx, b);
     }
     int nw = atomic_load(&nwatch);
     if (nw > NWATCH) nw = NWATCH;
     for (int i = 0; i < nw; i++) {
         const char *w = atomic_load(&watches[i].what);
         uint64_t since = atomic_load(&watches[i].since);
-        if (w) LOG("[rq-watchdog] %s: waiting on %s (%llu) for %llu ms\n", watches[i].name, w,
+        if (w) LOG("%s %s: waiting on %s (%llu) for %llu ms\n", pfx, watches[i].name, w,
                    (unsigned long long)atomic_load(&watches[i].arg),
                    (unsigned long long)(since < now ? (now - since) / 1000000 : 0));
-        else LOG("[rq-watchdog] %s: no noted wait\n", watches[i].name);
+        else LOG("%s %s: no noted wait\n", pfx, watches[i].name);
     }
-    extern void kernel_dump_threads(const char *prefix);
-    kernel_dump_threads("[rq-watchdog]");
-    LOG("[rq-watchdog] =====\n");
 }
 
-static void *watchdog(void *arg) {
-    uint64_t limit = (uint64_t)(uintptr_t)arg * 1000000000ull;
-    uint64_t t_start = plat_now_ns(), last_frames = 0, frames_at = t_start;
-    bool reported_first = false, reported_stall = false;
+static _Atomic uint64_t hang_t_start;  // the GPU device setup (rq_hang_watch_start)
+static bool hang_check(uint64_t limit, char *why, size_t nwhy) {
+    static uint64_t last_frames, frames_at;
+    static bool reported_first, reported_stall;
     static uint64_t reported_since[NWATCH];
-    for (;;) {
-        struct timespec ts = {1, 0};
-        nanosleep(&ts, NULL);
-        uint64_t now = plat_now_ns();
-        extern uint64_t renderer_present_count(void);
-        uint64_t f = renderer_present_count() + atomic_load(&presents_done);
-        if (f != last_frames || g_rt_unwind) last_frames = f, frames_at = now, reported_stall = false;
-        bool dumped = false;  // (one dump per check: it shows every wait anyway)
-        if (!f && !reported_first && now - t_start > 2 * limit) {  // (the first frame: twice the time, loading)
-            reported_first = dumped = true;
-            watchdog_dump("no frame presented since the GPU device was set up");
-        } else if (f && !reported_stall && now - frames_at > limit) {
-            reported_stall = dumped = true;
-            watchdog_dump("presenting stopped");
-        }
-        int nw = atomic_load(&nwatch);
-        if (nw > NWATCH) nw = NWATCH;
-        now = plat_now_ns();  // (after the loads below can't see a newer start: since <= now)
-        for (int i = 0; i < nw; i++) {
-            const char *w = atomic_load(&watches[i].what);
-            uint64_t since = atomic_load(&watches[i].since);
-            // (a wait that started after `now` was read, or a slot rewritten between the two loads: not stale)
-            if (w && since < now && now - since > limit && reported_since[i] != since) {
-                reported_since[i] = since;
-                if (dumped) continue;
-                dumped = true;
-                char why[96];
-                snprintf(why, sizeof why, "%s: one wait for %llu s", watches[i].name, (unsigned long long)((now - since) / 1000000000ull));
-                watchdog_dump(why);
-            }
+    uint64_t t_start = atomic_load(&hang_t_start);
+    if (!t_start) return false;
+    uint64_t now = plat_now_ns();
+    if (!frames_at) frames_at = now;
+    extern uint64_t renderer_present_count(void);
+    uint64_t f = renderer_present_count() + atomic_load(&presents_done);
+    if (f != last_frames || g_rt_unwind) last_frames = f, frames_at = now, reported_stall = false;
+    bool hit = false;  // (one reason per check: the dump shows every wait anyway)
+    if (!f && !reported_first && now - t_start > 2 * limit) {  // (the first frame: twice the time, loading)
+        reported_first = hit = true;
+        snprintf(why, nwhy, "no frame presented since the GPU device was set up");
+    } else if (f && !reported_stall && now - frames_at > limit) {
+        reported_stall = hit = true;
+        snprintf(why, nwhy, "presenting stopped");
+    }
+    int nw = atomic_load(&nwatch);
+    if (nw > NWATCH) nw = NWATCH;
+    now = plat_now_ns();  // (after the loads below can't see a newer start: since <= now)
+    for (int i = 0; i < nw; i++) {
+        const char *w = atomic_load(&watches[i].what);
+        uint64_t since = atomic_load(&watches[i].since);
+        // (a wait that started after `now` was read, or a slot rewritten between the two loads: not stale)
+        if (w && since < now && now - since > limit && reported_since[i] != since) {
+            reported_since[i] = since;
+            if (hit) continue;
+            hit = true;
+            snprintf(why, nwhy, "%s: one wait for %llu s (%s)", watches[i].name,
+                     (unsigned long long)((now - since) / 1000000000ull), w);
         }
     }
-    return NULL;
+    return hit;
 }
 
 static pthread_once_t wd_once = PTHREAD_ONCE_INIT;
 static void watchdog_start_once(void) {
-    const char *e = getenv("LARECOMP_RQ_WATCHDOG");
-    long s = e ? atol(e) : 15;
-    if (s <= 0) return;
-    pthread_t t;
-    if (pthread_create(&t, NULL, watchdog, (void *)(uintptr_t)s) == 0) pthread_detach(t);
+    atomic_store(&hang_t_start, plat_now_ns());
+    extern void kernel_hang_hooks(bool (*)(uint64_t, char *, size_t), void (*)(const char *));
+    kernel_hang_hooks(hang_check, hang_state);
 }
-void rq_watchdog_start(void) { pthread_once(&wd_once, watchdog_start_once); }
+void rq_hang_watch_start(void) { pthread_once(&wd_once, watchdog_start_once); }

@@ -1,4 +1,5 @@
 // NVN objects, builders, and state objects (everything except command recording).
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -39,7 +40,7 @@ NVN(nvnDeviceInitialize) {
     static bool once;
     if (!once) {
         once = true;
-        rq_watchdog_start();  // (before anything of the renderer can hang: rqueue.c)
+        rq_hang_watch_start();  // (before anything of the renderer can hang: rqueue.c)
         backend_init();
         extern void shader_prep_boot(const char *romfs);
         shader_prep_boot(g_romfs_dir);  // (LARECOMP_SHADER_PREP=1, tests: what the start screen's setup does)
@@ -441,11 +442,21 @@ NVN(nvnTextureInitialize) {
     RET(1);
 }
 static void pool_entries_forget(NvnTexture *t);
+// The end of a finalized texture: its texture pool slots emptied (pool_entries_forget), the backend's copy, the host
+// object. With the render thread, it runs there in queue order (rq_destroy_texture): lists queued before the
+// finalize still sample it through its slots, as they did when they were translated at submit; lists queued after
+// it see the slots empty, as without the render thread. (The NvnTexture stays allocated until then, so no other
+// texture can take its address while a slot still names it.)
+void nvn_texture_destroy(NvnTexture *t) {
+    pool_entries_forget(t);
+    backend_texture_destroyed(t);
+    free(t);
+}
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
     if (t) {
         if (rq_on()) rq_destroy_texture(t);  // after the queued lists that refer to it
-        else { pool_entries_forget(t); backend_texture_destroyed(t); free(t); }
+        else nvn_texture_destroy(t);
     }
     SET_HOST(A(0), 0);
 }
@@ -577,6 +588,11 @@ NVN(nvnSamplerGetDebugID) { RET(A(0)); }
 
 // ================================================================== descriptor pools
 NvnDescPool *g_texture_pools[64], *g_sampler_pools[64];
+// Texture pool registrations (the game's threads) and the emptying of a finalized texture's slots (the render thread
+// when it's on: nvn_texture_destroy) both change entries and pool_refs: this lock keeps them from crossing. (Reads by
+// the translation take no lock: the game doesn't change a slot that queued work still uses before its fence, as on
+// the Switch, and the emptying runs on the translating thread itself.)
+static pthread_mutex_t g_pool_lock = PTHREAD_MUTEX_INITIALIZER;
 RT_ON_RESET(desc_pools_reset) { memset(g_texture_pools, 0, sizeof g_texture_pools); memset(g_sampler_pools, 0, sizeof g_sampler_pools); }
 
 static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, int count, size_t entry, NvnDescPool **reg) {
@@ -588,7 +604,9 @@ static NvnDescPool *desc_pool_init(uint64_t guest, uint64_t pool, uint64_t off, 
     G(uint64_t, guest, 8) = pool;
     G(uint64_t, guest, 16) = off;
     G(uint32_t, guest, 24) = (uint32_t)count;
+    pthread_mutex_lock(&g_pool_lock);  // (pool_entries_forget walks the registry)
     for (int i = 0; i < 64; i++) if (!reg[i]) { reg[i] = d; break; }
+    pthread_mutex_unlock(&g_pool_lock);
     return d;
 }
 
@@ -606,12 +624,14 @@ static void register_texture(Cpu *c) {
     int id = (int)A(1);
     if (id < 0 || id >= d->count) return;
     NvnTexEntry *e = &((NvnTexEntry *)d->entries)[id];
+    pthread_mutex_lock(&g_pool_lock);
     if (e->tex && e->tex->pool_refs) e->tex->pool_refs--;
     e->tex = HOST(NvnTexture, A(2));
     if (e->tex) e->tex->pool_refs++;
     e->dead_format = 0;
     e->has_view = A(3) != 0;
     if (e->has_view) memcpy(&e->view, AP(3), sizeof e->view);
+    pthread_mutex_unlock(&g_pool_lock);
 }
 
 // A finalized texture can stay registered: the game frees a room's textures on a level / room change and leaves
@@ -620,7 +640,8 @@ static void register_texture(Cpu *c) {
 // old entry's view: a BC4 / BC5 / BC1 texture viewed as RGBA8 or the reverse, a Metal assertion that stopped the
 // game (about 1 in 6 long dungeon runs). Those entries are emptied (sampled as nothing, like an unregistered slot).
 static void pool_entries_forget(NvnTexture *t) {
-    if (!t->pool_refs) return;
+    pthread_mutex_lock(&g_pool_lock);
+    if (!t->pool_refs) { pthread_mutex_unlock(&g_pool_lock); return; }
     int n = 0;
     for (int p = 0; p < 64 && t->pool_refs; p++) {
         NvnDescPool *d = g_texture_pools[p];
@@ -635,6 +656,7 @@ static void pool_entries_forget(NvnTexture *t) {
                 n++;
             }
     }
+    pthread_mutex_unlock(&g_pool_lock);
     static int nlog;
     if (n && nlog++ < 8)
         LOG("[nvn] texture %ux%u fmt %#x finalized while in %d texture pool slot(s): emptied%s\n", t->width, t->height,
