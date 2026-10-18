@@ -146,18 +146,11 @@ static int newest_log(const void *a, const void *b) {
     int time = CompareFileTime(&y->created, &x->created);
     return time ? time : strcmp(y->name, x->name);
 }
-static bool session_log_name(const char *name) {
-    const char *p;
-    if (!strncmp(name, "lasrecomp-backup-", 16)) {
-        p = name + 16;
-        while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || *p == '-') p++;
-        return p > name + 16 && !strcmp(p, ".log");
-    }
-    // Also retire the earlier PR's per-PID files; unrelated .log files are left alone.
-    if (strncmp(name, "lasrecomp-", 10)) return false;
-    p = name + 10;
-    while (*p >= '0' && *p <= '9') p++;
-    return p > name + 10 && !strcmp(p, ".log");
+static bool session_log_name(const char *name) {  // lasrecomp-backup-<filetime hex>-<pid>.log
+    if (strncmp(name, "lasrecomp-backup-", 17)) return false;
+    const char *p = name + 17;
+    while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || *p == '-') p++;
+    return p > name + 17 && !strcmp(p, ".log");
 }
 static void keep_legacy_log(const char *dir) {
     WIN32_FILE_ATTRIBUTE_DATA old;
@@ -193,7 +186,7 @@ static void keep_legacy_log(const char *dir) {
 }
 static void prune_logs(const char *dir) {
     char path[MAX_PATH];
-    if (snprintf(path, sizeof path, "%slasrecomp-*.log", dir) >= (int)sizeof path) return;
+    if (snprintf(path, sizeof path, "%slasrecomp-backup-*.log", dir) >= (int)sizeof path) return;
     WIN32_FIND_DATAA data;
     HANDLE find = FindFirstFileA(path, &data);
     if (find == INVALID_HANDLE_VALUE) return;
@@ -289,7 +282,6 @@ static void log_to_file_without_console(void) {
     _close(fd);
     setvbuf(stderr, NULL, _IONBF, 0);
     _dup2(_fileno(stderr), _fileno(stdout));
-    _putenv("LASRECOMP_LOG_APPEND=1");
     _putenv_s("LASRECOMP_LOG_FILE", g_log_path);
     if (fresh) {
         fputs(g_log_tag, stderr);
