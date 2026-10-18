@@ -128,7 +128,7 @@ jobs:
           msystem: UCRT64
           update: true
           install: make git python
-          pacboy: clang:p lld:p binutils:p sdl3:p ffmpeg:p vulkan-devel:p shaderc:p spirv-tools:p pkgconf:p
+          pacboy: clang:p lld:p binutils:p python:p sdl3:p ffmpeg:p vulkan-devel:p shaderc:p spirv-tools:p pkgconf:p
             vulkan-memory-allocator:p
       - name: App builds
         run: make -j"$(nproc)" build/lasrecomp.exe
@@ -149,6 +149,8 @@ jobs:
         run: |
           clang -std=gnu11 -O1 tools/test_windows_thread_stack.c -lpsapi -o build/test-thread-stack.exe
           build/test-thread-stack.exe
+      - name: Windows session log regression
+        run: python tools/test_windows_logs.py
       - name: SIMD rounding and host-state regression
         run: |
           clang -std=gnu11 -O1 -mfma -pthread tools/test_simd_rounding.c -o build/test-simd-rounding.exe
