@@ -58,6 +58,13 @@ void vk_wait_seq(uint64_t seq);
 void vk_full_barrier(VkCommandBuffer cb);
 void vk_end_pass(void);
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra);  // submit + one more cb (present)
+// GPU timer (exec.c gpu_timer_add): the window image's submission starts its counted work here (after its acquire wait)
+void vk_gpu_timer_window_start(void);
+bool vk_gpu_split_ns(uint64_t out[4]);  // cumulative: game GPU ns, window GPU ns, frame spans' ns, frames; false: no timer
+uint64_t vk_cum_wait_ns(void);          // cumulative vk_wait_seq time
+// (device.c) CPU time blocked presenting, cumulative ns: [0] frame slot's fence, [1] window image acquire, [2] present;
+// [3]: frames presented
+extern uint64_t g_vk_frame_waits[4];
 
 // Transient GPU-visible memory that lives until the submission it was allocated for completes.
 typedef struct { VkBuffer buf; uint64_t off; void *ptr; } VkSpan;

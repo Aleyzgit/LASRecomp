@@ -38,6 +38,16 @@ static int g_dyn_n, g_dyn_gpu_n, g_dyn_good;
 static double g_dyn_cool_until, g_dyn_raise_wait = 3.0, g_dyn_raise_at;
 static double g_dyn_last_raise = -100, g_dyn_last_lower = -100;
 
+static DynSplit g_split;  // sums since the last decision
+static int g_split_n;
+void output_scale_note_split(const DynSplit *d) {
+    if (g_split_n >= 600) { memset(&g_split, 0, sizeof g_split); g_split_n = 0; }  // (not deciding: Dynamic is off)
+    g_split.game += d->game; g_split.win += d->win; g_split.span += d->span; g_split.frames += d->frames;
+    g_split.w_slot += d->w_slot; g_split.w_acquire += d->w_acquire; g_split.w_present += d->w_present; g_split.w_other += d->w_other;
+    g_split.win_counted = d->win_counted;
+    g_split_n++;
+}
+
 static int cmp_double(const void *a, const void *b) {
     double x = *(const double *)a, y = *(const double *)b;
     return x < y ? -1 : x > y;
@@ -88,9 +98,19 @@ static void dyn_update(double now, double gpu_ms) {
     if (log < 0) log = getenv("LARECOMP_LOG_DYNRES") != NULL;
     if (g_dyn != prev || log) {
         if (g_dyn != prev) g_dyn_cool_until = now + 1.0;
-        LOG("[dynres] %.2f -> %.2f (frame %.1f ms, median %.1f, %d spike%s left out, gpu %.1f ms, next raise in %.0f s)\n", prev,
-            g_dyn, avg_dt, med, spikes, spikes == 1 ? "" : "s", avg_gpu, fmax(0, g_dyn_raise_at - now));
+        char split[320] = "";
+        if (g_split_n) {  // (Vulkan) per frame: GPU by part, and where the CPU waited
+            double n = g_split_n, nf = g_split.frames > 0 ? g_split.frames : n;
+            snprintf(split, sizeof split, "; per frame: gpu game %.1f + window %.1f%s, span %.1f, gap %.1f ms; cpu waits slot %.1f acquire %.1f "
+                     "present %.1f other %.1f ms", g_split.game / n, g_split.win / n, g_split.win_counted ? "" : " (not counted)",
+                     g_split.span / nf, g_split.span / nf - (g_split.game + g_split.win) / n, g_split.w_slot / n, g_split.w_acquire / n,
+                     g_split.w_present / n, g_split.w_other / n);
+        }
+        LOG("[dynres] %.2f -> %.2f (frame %.1f ms, median %.1f, %d spike%s left out, gpu %.1f ms, next raise in %.0f s%s)\n", prev,
+            g_dyn, avg_dt, med, spikes, spikes == 1 ? "" : "s", avg_gpu, fmax(0, g_dyn_raise_at - now), split);
     }
+    memset(&g_split, 0, sizeof g_split);
+    g_split_n = 0;
 }
 
 double output_scale_dynamic_factor(void) { return g_dyn; }

@@ -360,6 +360,10 @@ static void recreate_swapchain(void) {
 // in the game's GPU counters.
 extern __thread uint64_t g_blocked_ns;  // kernel.c
 #define WAITING(x) do { uint64_t w0_ = plat_now_ns(); x; g_blocked_ns += plat_now_ns() - w0_; } while (0)
+// the same, also counted by place (dynamic resolution's log / LARECOMP_VK_PROF: 0 frame slot, 1 acquire, 2 present)
+uint64_t g_vk_frame_waits[4];
+#define WAITING_AT(i, x) do { uint64_t w0_ = plat_now_ns(); x; uint64_t w1_ = plat_now_ns() - w0_; g_blocked_ns += w1_; \
+                              g_vk_frame_waits[i] += w1_; } while (0)
 
 // ================================================================== frames (start screen and game)
 // Acquire semaphores rotate per frame in flight; a slot is reused once the submission that waited on it is done.
@@ -404,12 +408,12 @@ bool vk_frame_begin(const float clear[4]) {
     if (trace) LOG("[vk] frame begin %dx%d (swapchain %ux%u)\n", w, h, g_vk.sc_extent.width, g_vk.sc_extent.height);
     slot = (slot + 1) % FRAMES;
     if (!acquire_sem[slot]) acquire_sem[slot] = binary_semaphore();
-    WAITING(vk_wait_seq(slot_seq[slot]));
+    WAITING_AT(0, vk_wait_seq(slot_seq[slot]));
     VkResult r;
-    WAITING(r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
+    WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE, &cur_frame.image));
     if (r == VK_ERROR_OUT_OF_DATE_KHR) {
         recreate_swapchain();
-        WAITING(r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE,
+        WAITING_AT(1, r = vkAcquireNextImageKHR(g_vk.dev, g_vk.swapchain, UINT64_MAX, acquire_sem[slot], VK_NULL_HANDLE,
                                           &cur_frame.image));
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
@@ -417,6 +421,7 @@ bool vk_frame_begin(const float clear[4]) {
     slot_seq[slot] = vk_pending_seq();
     VkCommandBuffer cb = vk_cmd();
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    vk_gpu_timer_window_start();  // (the GPU timer: this submission's work starts after that barrier, which waits for the image)
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                     .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -480,7 +485,8 @@ void vk_frame_end(const char *shot_path) {
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &done_sem[img],
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
     VkResult r;
-    WAITING(r = vkQueuePresentKHR(g_vk.queue, &pi));
+    WAITING_AT(2, r = vkQueuePresentKHR(g_vk.queue, &pi));
+    g_vk_frame_waits[3]++;
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     cur_frame.ok = false;
     if (shot_path) {
@@ -529,8 +535,8 @@ void backend_present(NvnTexture *t) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
-    // the frame's work goes to the GPU now, in a submission of its own: it starts while we wait for the window's image,
-    // and its GPU time is counted (the window image's submission isn't: exec.c gpu_timer_add)
+    // the frame's work goes to the GPU now, in a submission of its own: it starts while we wait for the window's image.
+    // Its GPU time is counted, and the window image's submission's from after its wait (exec.c gpu_timer_add)
     renderer_submit();
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
@@ -547,12 +553,30 @@ void backend_present(NvnTexture *t) {
         extern void widescreen_set_factor(float f);
         extern bool widescreen_allowed(void);
         // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
-        // GPU time since the last frame (exec.c's GPU timer; -1 without one: dynamic resolution goes by frame times)
-        extern int64_t vk_gpu_total_ns(void);
-        static int64_t gpu_prev = -1;
-        int64_t gpu_now = vk_gpu_total_ns();
-        double gpu_ms = gpu_now >= 0 && gpu_prev >= 0 ? (gpu_now - gpu_prev) / 1e6 : -1;
-        gpu_prev = gpu_now;
+        // GPU time since the last frame (exec.c's GPU timer; -1 without one: dynamic resolution goes by frame times):
+        // the game's submissions and the window image's (LARECOMP_DYNRES_COUNT_PRESENT=0: the game's only, as before)
+        static int count_present = -1;
+        if (count_present < 0) count_present = !getenv("LARECOMP_DYNRES_COUNT_PRESENT") || atoi(getenv("LARECOMP_DYNRES_COUNT_PRESENT"));
+        static uint64_t sp_prev[4], wt_prev[4], cw_prev;
+        static bool sp_have;
+        uint64_t sp[4];
+        double gpu_ms = -1;
+        if (vk_gpu_split_ns(sp)) {
+            uint64_t cw = vk_cum_wait_ns();
+            if (sp_have) {
+                double game = (sp[0] - sp_prev[0]) / 1e6, win = (sp[1] - sp_prev[1]) / 1e6;
+                gpu_ms = game + (count_present ? win : 0);
+                double slotw = (g_vk_frame_waits[0] - wt_prev[0]) / 1e6;
+                DynSplit ds = {game, win, (sp[2] - sp_prev[2]) / 1e6, (double)(sp[3] - sp_prev[3]), slotw,
+                               (g_vk_frame_waits[1] - wt_prev[1]) / 1e6, (g_vk_frame_waits[2] - wt_prev[2]) / 1e6,
+                               fmax(0, (cw - cw_prev) / 1e6 - slotw), count_present != 0};
+                output_scale_note_split(&ds);
+            }
+            memcpy(sp_prev, sp, sizeof sp);
+            memcpy(wt_prev, g_vk_frame_waits, sizeof wt_prev);
+            cw_prev = cw;
+            sp_have = true;
+        }
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;

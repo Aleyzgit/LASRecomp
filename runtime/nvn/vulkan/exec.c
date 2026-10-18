@@ -28,7 +28,8 @@ static uint64_t stat_upload_bytes;
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
-static VkQueryPool prof_qp;  // the GPU timer's timestamps (2 per ring slot)
+static VkQueryPool prof_qp;  // the GPU timer's timestamps (3 per ring slot: start, end, window image acquired)
+static uint64_t prof_win, prof_span, prof_wframes;  // (profiling) the window image's submissions: GPU ns, frame spans, count
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
 static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
 uint64_t prof_views_created;  // textures.c vk_image_view cache misses
@@ -48,6 +49,7 @@ typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (the GPU timer)
     bool ts_skip;                       // (waits on the window image: not counted, see vk_gpu_total_ns)
+    bool ts_win;                        // the window image's submission: a 3rd timestamp after its acquire wait
     uint64_t seq;
     VkDescriptorPool pools[16];
     int npools, cur_pool;
@@ -162,19 +164,47 @@ static void cq_resolve_done(uint64_t done) {  // every slot whose submission is 
 // ---- GPU timer (dynamic resolution, runtime/nvn/output_scale.c; and LARECOMP_VK_PROF's "gpu"): a timestamp at the
 // start and the end of each submission's main command buffer, read when its ring slot comes round again (so a few
 // submissions late; the controller averages half a second). Submissions overlap a little (the next one's commands
-// may start before the previous one's end): their union is counted, the time the GPU was busy. The window image's
-// submission isn't counted - it waits for the image, which can be a vsync's wait - but the game's work is submitted
-// before it (device.c backend_present), so only the blit and the menu go uncounted.
+// may start before the previous one's end): their union is counted, the time the GPU was busy.
+// The window image's submission (device.c: the game's image drawn into the window - FSR / scaling - and the menu) waits
+// for the image, which can be a vsync's wait, so its start timestamp isn't its work's: it has a 3rd timestamp, written
+// after the barrier that waits for the image (vk_gpu_timer_window_start), and its time is counted from there - in a
+// total of its own (vk_gpu_split_ns): device.c adds it to what dynamic resolution sees unless
+// LARECOMP_DYNRES_COUNT_PRESENT=0. Also per frame: the span from the GPU starting the frame's first game submission
+// to the end of its window submission; span - game - window = the GPU idle / doing work no timestamp covers
+// (uploads ahead of a submission's main command buffer, waiting for the window image).
 static uint64_t gpu_total_ns, gpu_last_end;  // ns counted; (ticks) the latest submission end seen
+static uint64_t gpu_win_ns, gpu_span_ns, gpu_frames, span_from;  // window submissions: ns, frame spans' ns, count; (ticks)
 static bool gpu_timer_on;
 
-static void gpu_timer_add(uint64_t t0, uint64_t t1, bool skip) {
+static void gpu_timer_add(const uint64_t *t, bool skip, bool win) {
     double per = g_vk.props.limits.timestampPeriod;
-    if (g_vk.ts_bits < 64) { uint64_t m = (1ull << g_vk.ts_bits) - 1; t0 &= m, t1 &= m; }
-    if (t1 < t0 || (t1 - t0) * per > 1e9) return;  // (wrapped, or nonsense)
+    uint64_t t0 = t[0], t1 = t[1], tw = win ? t[2] : 0;
+    if (g_vk.ts_bits < 64) { uint64_t m = (1ull << g_vk.ts_bits) - 1; t0 &= m, t1 &= m, tw &= m; }
+    if (t1 < t0 || (t1 - t0) * per > 1e9) { span_from = 0; return; }  // (wrapped, or nonsense)
     if (gpu_last_end > t0 && (gpu_last_end - t0) * per > 1e9) gpu_last_end = 0;  // (the counter wrapped)
+    if (span_from > t1 || (span_from && (t1 - span_from) * per > 1e9)) span_from = 0;
+    uint64_t prev_end = gpu_last_end;
     uint64_t from = t0 > gpu_last_end ? t0 : gpu_last_end;
     if (t1 > gpu_last_end) gpu_last_end = t1;
+    if (win) {  // from after the image was acquired (and the work before it ended), to the end
+        if (tw >= t0 && tw <= t1) {
+            uint64_t wf = tw > prev_end ? tw : prev_end;
+            if (t1 > wf) {
+                uint64_t ns = (uint64_t)((double)(t1 - wf) * per);
+                __atomic_add_fetch(&gpu_win_ns, ns, __ATOMIC_RELAXED);
+                if (prof) prof_win += ns;
+            }
+        }
+        if (span_from && t1 > span_from) {
+            uint64_t ns = (uint64_t)((double)(t1 - span_from) * per);
+            __atomic_add_fetch(&gpu_span_ns, ns, __ATOMIC_RELAXED);
+            __atomic_add_fetch(&gpu_frames, 1, __ATOMIC_RELAXED);
+            if (prof) prof_span += ns, prof_wframes++;
+        }
+        span_from = 0;
+        return;
+    }
+    if (!span_from && !skip) span_from = from;  // the frame's first game submission (from where the GPU got to it)
     if (skip || t1 <= from) return;
     uint64_t ns = (uint64_t)((double)(t1 - from) * per);
     __atomic_add_fetch(&gpu_total_ns, ns, __ATOMIC_RELAXED);
@@ -183,6 +213,17 @@ static void gpu_timer_add(uint64_t t0, uint64_t t1, bool skip) {
 
 // GPU time of all counted submissions so far (ns); -1: no GPU timer on this device
 int64_t vk_gpu_total_ns(void) { return gpu_timer_on ? (int64_t)__atomic_load_n(&gpu_total_ns, __ATOMIC_RELAXED) : -1; }
+// (cumulative) out: game submissions' GPU ns, window submissions' GPU ns, frame spans' ns, frames with a span.
+// false: no GPU timer.
+bool vk_gpu_split_ns(uint64_t out[4]) {
+    if (!gpu_timer_on) return false;
+    out[0] = __atomic_load_n(&gpu_total_ns, __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&gpu_win_ns, __ATOMIC_RELAXED);
+    out[2] = __atomic_load_n(&gpu_span_ns, __ATOMIC_RELAXED);
+    out[3] = __atomic_load_n(&gpu_frames, __ATOMIC_RELAXED);
+    return true;
+}
+uint64_t vk_cum_wait_ns(void) { return cum_wait; }  // (all vk_wait_seq waits so far)
 
 static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
@@ -191,10 +232,11 @@ static Sub *sub(void) {
         vk_wait_seq(s->seq);
         cq_resolve_done(s->seq);
         if (s->ts) {  // GPU time of that submission
-            uint64_t t[2];
-            if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)cur_sub * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
-                gpu_timer_add(t[0], t[1], s->ts_skip);
-            s->ts = s->ts_skip = false;
+            uint64_t t[3];
+            uint32_t nq = s->ts_win ? 3 : 2;
+            if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)cur_sub * 3, nq, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+                gpu_timer_add(t, s->ts_skip, s->ts_win);
+            s->ts = s->ts_skip = s->ts_win = false;
         }
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
         s->cur_pool = 0;
@@ -237,12 +279,21 @@ VkCommandBuffer vk_cmd(void) {
         }
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
         if (prof_qp) {
-            vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
-            vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
+            vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 3, 3);
+            vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 3);
             s->ts = true;
         }
     }
     return s->main;
+}
+
+// (device.c vk_frame_begin) the window image's submission: its work starts here, after the barrier that waits for the
+// image (ALL_COMMANDS: after it, so not while the GPU waits for the image)
+void vk_gpu_timer_window_start(void) {
+    Sub *s = sub();
+    if (!s->ts || s->ts_win) return;
+    vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 3 + 2);
+    s->ts_win = true;
 }
 
 VkCommandBuffer vk_upload_cmd(void) {
@@ -341,7 +392,8 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     }
     vk_cmd();  // (an empty main buffer still carries the semaphores)
     s->ts_skip = wait != VK_NULL_HANDLE;
-    if (s->ts) vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 2 + 1);
+    if (s->ts_win && !s->ts_skip) s->ts_win = false;  // (not the window image's after all: counted as game work)
+    if (s->ts) vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 3 + 1);
     VK_CHECK(vkEndCommandBuffer(s->main));
     cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->main};
     VkSemaphoreSubmitInfo sig[2] = {{.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO, .semaphore = g_vk.timeline,
@@ -782,6 +834,19 @@ const char *renderer_stats(void) {
             snprintf(stats_text + n, sizeof stats_text - n, " | tex unwritten %llu", (unsigned long long)prof_tex_watch_skips);
             prof_tex_watch_skips = 0;
         }
+        {   // GPU time per frame by part (see gpu_timer_add), CPU waits per frame by place (device.c g_vk_frame_waits)
+            static uint64_t lw[4];
+            uint64_t dw[4];
+            for (int i = 0; i < 4; i++) dw[i] = g_vk_frame_waits[i] - lw[i], lw[i] = g_vk_frame_waits[i];
+            double nf = prof_wframes ? (double)prof_wframes : 1, np = dw[3] ? (double)dw[3] : 1;
+            double gap = ((double)prof_span - (double)prof_gpu - (double)prof_win) / nf / 1e6;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | gpu/frame game %.1f window %.1f span %.1f gap %.1f ms (%llu frames)"
+                     " | cpu wait/frame slot %.1f acquire %.1f present %.1f ms",
+                     prof_gpu / nf / 1e6, prof_win / nf / 1e6, prof_span / nf / 1e6, prof_wframes ? gap : 0.0,
+                     (unsigned long long)prof_wframes, dw[0] / np / 1e6, dw[1] / np / 1e6, dw[2] / np / 1e6);
+            prof_win = prof_span = prof_wframes = 0;
+        }
         pthread_mutex_lock(&wait_tab_lock);
         for (int i = 0; i < 12 && wait_tab[i].why; i++) {
             n = strlen(stats_text);
@@ -819,7 +884,7 @@ void vk_exec_init(void) {
     // the GPU timer (LARECOMP_VK_GPU_TIMER=0: off - dynamic resolution then goes by the frame times)
     const char *gt = getenv("LARECOMP_VK_GPU_TIMER");
     if (g_vk.ts_bits && g_vk.props.limits.timestampComputeAndGraphics && g_vk.props.limits.timestampPeriod > 0 && !(gt && !atoi(gt))) {
-        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
+        VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 3};
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
     }
     gpu_timer_on = prof_qp != VK_NULL_HANDLE;
