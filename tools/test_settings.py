@@ -51,4 +51,15 @@ with tempfile.TemporaryDirectory() as directory:
         if mode == 'upscaler-auto':
             assert 'upscaler = auto\n' in ini.read_text()
         count += 1
-    print(f'{count} parser, locale, upscaler default and roundtrip cases passed (LF/CRLF, empty/nonempty seeds)')
+    # likewise the resolution: Dynamic on an integrated GPU until the player picks one; a saved one is kept
+    for lines, mode, saved in [(['resolution = auto'], 'res-auto', 'auto'), (['volume = 1'], 'res-auto', 'auto'),
+                               (['resolution = match'], 'res-chosen', 'match'), (['resolution = 1x'], 'res-chosen', '1x'),
+                               (['resolution = 75%'], 'res-chosen', '75%'), (['resolution = dynamic'], 'res-chosen', 'dynamic')]:
+        ini = directory / 'test.ini'
+        ini.write_text('\n'.join(lines) + '\n')
+        env = dict(os.environ, LARECOMP_SETTINGS=str(ini))
+        env.pop('LARECOMP_INTEGRATED', None)
+        subprocess.run([str(exe), mode], env=env, check=True, capture_output=True)
+        assert f'resolution = {saved}\n' in ini.read_text(), (lines, ini.read_text())
+        count += 1
+    print(f'{count} parser, locale, upscaler / resolution default and roundtrip cases passed (LF/CRLF, empty/nonempty seeds)')

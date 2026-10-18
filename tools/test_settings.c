@@ -20,6 +20,25 @@ int main(int argc, char **argv) {
         settings_save();  // (still "auto")
         return 0;
     }
+    if (argc == 2 && !strcmp(argv[1], "res-auto")) {  // "resolution = auto" / none: Dynamic on an integrated GPU
+        settings_load();
+        assert(g_settings.res_auto);
+        settings_resolve_defaults(true);
+        assert(g_settings.res_mode == RES_DYNAMIC && g_default_res_mode == RES_DYNAMIC && g_gpu_integrated);
+        settings_resolve_defaults(false);
+        assert(g_settings.res_mode == RES_MATCH && !g_gpu_integrated);
+        settings_save();  // (still "auto")
+        return 0;
+    }
+    if (argc == 2 && !strcmp(argv[1], "res-chosen")) {  // a saved resolution is kept on an integrated GPU
+        settings_load();
+        assert(!g_settings.res_auto);
+        int mode = g_settings.res_mode;
+        settings_resolve_defaults(true);
+        assert(g_settings.res_mode == mode);
+        settings_save();
+        return 0;
+    }
     if (argc == 2 && !strcmp(argv[1], "upscaler-chosen")) {  // a choice is kept on an integrated GPU
         settings_load();
         assert(!g_settings.upscaler_auto);

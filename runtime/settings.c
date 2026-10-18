@@ -29,6 +29,7 @@ Settings g_settings = {
     .diff_damage = 1.0f,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .upscaler_auto = true,
+    .res_auto = true,
 };
 
 // The game's own text languages: its RomFS carries these per region (regionUS/USen|USes|USfr, regionEU/EUen|EUes|...,
@@ -89,13 +90,27 @@ const char *settings_language_name(void) {
 }
 
 int g_default_upscaler = UPSCALE_SHARP;
+int g_default_res_mode = RES_MATCH;
+bool g_gpu_integrated;
+
+static const char *res_name(int m) {
+    static char n[8];
+    if (m >= 1 && m <= 8) { snprintf(n, sizeof n, "%dx", m); return n; }
+    return m == RES_DYNAMIC ? "dynamic" : m == RES_Q75 ? "75%" : m == RES_Q50 ? "50%" : m == RES_Q25 ? "25%" : "match";
+}
 
 void settings_resolve_defaults(bool integrated) {
+    const char *e = getenv("LARECOMP_INTEGRATED");
+    if (e && *e) integrated = atoi(e) != 0;
+    g_gpu_integrated = integrated;
     g_default_upscaler = integrated ? UPSCALE_BILINEAR : UPSCALE_SHARP;
+    g_default_res_mode = integrated ? RES_DYNAMIC : RES_MATCH;
     if (g_settings.upscaler_auto) g_settings.upscaler = g_default_upscaler;
-    LOG("[settings] %s GPU: upscaler %s (%s), anti-aliasing %s\n", integrated ? "integrated" : "discrete / other",
+    if (g_settings.res_auto) g_settings.res_mode = g_default_res_mode;
+    LOG("[settings] %s GPU: upscaler %s (%s), resolution %s (%s), anti-aliasing %s\n", integrated ? "integrated" : "discrete / other",
         g_settings.upscaler == UPSCALE_BILINEAR ? "bilinear" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "metalfx",
-        g_settings.upscaler_auto ? "default" : "chosen", g_settings.antialias == AA_SMAA ? "smaa" : "off");
+        g_settings.upscaler_auto ? "default" : "chosen", res_name(g_settings.res_mode), g_settings.res_auto ? "default" : "chosen",
+        g_settings.antialias == AA_SMAA ? "smaa" : "off");
 }
 
 void settings_load(void) {
@@ -123,8 +138,10 @@ void settings_load(void) {
         else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
         else if (!strcmp(key, "movie_audio")) g_settings.movie_audio = atoi(val) != 0;
         else if (!strcmp(key, "show_fps")) g_settings.show_fps = atoi(val) != 0;
-        else if (!strcmp(key, "resolution")) {
+        else if (!strcmp(key, "resolution")) {  // (auto: never chosen, the GPU's default)
             int n = atoi(val);
+            g_settings.res_auto = !strcmp(val, "auto");
+            if (g_settings.res_auto) { g_settings.res_mode = g_default_res_mode; continue; }
             g_settings.res_mode = !strcmp(val, "dynamic") ? RES_DYNAMIC : (!strcmp(val, "75%") || !strcmp(val, "67%")) ? RES_Q75 :
                                   !strcmp(val, "50%") ? RES_Q50 : !strcmp(val, "25%") ? RES_Q25 :
                                   (n >= 1 && n <= 4) ? n : n > 4 ? 4 : RES_MATCH;  // (5x-8x were removed)
@@ -188,12 +205,7 @@ void settings_save(void) {
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
-    if (g_settings.res_mode == RES_DYNAMIC) fprintf(f, "resolution = dynamic\n");
-    else if (g_settings.res_mode == RES_Q75) fprintf(f, "resolution = 75%%\n");
-    else if (g_settings.res_mode == RES_Q25) fprintf(f, "resolution = 25%%\n");
-    else if (g_settings.res_mode == RES_Q50) fprintf(f, "resolution = 50%%\n");
-    else if (g_settings.res_mode >= 1 && g_settings.res_mode <= 8) fprintf(f, "resolution = %dx\n", g_settings.res_mode);
-    else fprintf(f, "resolution = match\n");
+    fprintf(f, "resolution = %s\n", g_settings.res_auto ? "auto" : res_name(g_settings.res_mode));
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\n", g_settings.move_360, g_settings.blur_removal,

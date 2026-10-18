@@ -457,18 +457,22 @@ static void tab_display(void) {
     enum { RES_MATCH_AT = 3 };
     enum { NRES = sizeof res_mode / sizeof res_mode[0] };
     {
-        int ri = RES_MATCH_AT;
-        for (int i = 0; i < NRES; i++) if (res_mode[i] == g_settings.res_mode) ri = i;
+        int ri = RES_MATCH_AT, rdef = RES_MATCH_AT;  // (rdef: the GPU's default - Dynamic on an integrated GPU)
+        for (int i = 0; i < NRES; i++) {
+            if (res_mode[i] == g_settings.res_mode) ri = i;
+            if (res_mode[i] == g_default_res_mode) rdef = i;
+        }
         float sx, sy;
         renderer_get_scale(&sx, &sy);
         char d[400];
         int n = snprintf(d, sizeof d, "How sharp the 3D image is. Match display: your screen's own resolution. Dynamic: "
-                                      "as sharp as your GPU keeps at full speed. 1x-4x: the Switch's 1080p times that. "
+                                      "as sharp as your GPU keeps at full speed. 1x-4x: the Switch's 1080p times that%s. "
                                       "75%% / 50%% / 25%%: a share of the display, for slower machines.\n\nRendering at "
-                                      "%.0f x %.0f.", 1920.0 * sx, 1080.0 * sy);
+                                      "%.0f x %.0f.", g_gpu_integrated ? " (1x: 720p on this GPU)" : "", 1920.0 * sx, 1080.0 * sy);
         if (g_settings.res_mode == RES_DYNAMIC)
             snprintf(d + n, sizeof d - n, " Dynamic: %.0f%% of the display right now.", output_scale_dynamic_factor() * 100);
-        if (opt_choice("Internal resolution", &ri, res, NRES, RES_MATCH_AT, d, false)) g_settings.res_mode = res_mode[ri];
+        if (opt_choice("Internal resolution", &ri, res, NRES, rdef, d, false))
+            g_settings.res_mode = res_mode[ri], g_settings.res_auto = false;
     }
     {   // each OS's own upscaler next to bilinear (UPSCALE_SHARP: MetalFX on macOS, AMD FSR 1 on Windows)
 #ifdef __APPLE__
