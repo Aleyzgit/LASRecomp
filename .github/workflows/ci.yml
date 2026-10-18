@@ -52,6 +52,8 @@ jobs:
         run: make -j"$(nproc)" build/lasrecomp DEPS="$HOME/sdl3"
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Vulkan fence sequence regression
+        run: python3 tools/test_fence_sequence.py
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
       - name: FP/SIMD lowering vs a CPU emulator (a sample)
@@ -88,11 +90,13 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: make git
+          install: make git python
           pacboy: clang:p lld:p binutils:p sdl3:p ffmpeg:p vulkan-devel:p shaderc:p spirv-tools:p pkgconf:p
             vulkan-memory-allocator:p
       - name: App builds
         run: make -j"$(nproc)" build/lasrecomp.exe
+      - name: Vulkan fence sequence regression
+        run: python tools/test_fence_sequence.py
       # (GLSL only: the script's MSL comparison needs a reference commit that isn't in the history any more; REF=HEAD
       # just satisfies it. The GLSL half - every fuzzed translation compiles and validates - is the check)
       - name: Shader translator fuzz (GLSL)
