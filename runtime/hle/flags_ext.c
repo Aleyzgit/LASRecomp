@@ -200,6 +200,16 @@ void flags_ext_set(int idx) {
     g_buf[idx >> 3] |= (uint8_t)(1 << (idx & 7));
 }
 
+// set / clear event flag `idx` wherever the game reads it now: our buffer once it has taken over, else (0..2047) the
+// save's own bitfield (runtime features that keep flags whether or not the seed has the extension: Triforce pieces)
+void flags_put(int idx, bool on) {
+    if (idx < 0 || idx >= NFLAGS) return;
+    uint8_t *p = LD64(GA_FLAG_PTR) == (uint64_t)(uintptr_t)g_buf ? g_buf : idx < 2048 ? (uint8_t *)(uintptr_t)LIVE_FLAGS : NULL;
+    if (!p) return;
+    if (on) p[idx >> 3] |= (uint8_t)(1 << (idx & 7));
+    else p[idx >> 3] &= (uint8_t)~(1 << (idx & 7));
+}
+
 void flags_ext_clear(int idx) {
     if (idx < 0 || idx >= NFLAGS || LD64(GA_FLAG_PTR) != (uint64_t)(uintptr_t)g_buf) return;
     g_buf[idx >> 3] &= (uint8_t)~(1 << (idx & 7));

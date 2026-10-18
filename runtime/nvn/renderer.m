@@ -2613,7 +2613,7 @@ static void draw(CmdRec *r, bool indexed) {
             pot_tint((const float *)(uintptr_t)st.ubuf[0][2].addr, tint, st.vbuf[0].addr);
         if (draw_bottle) {  // the gold Escape Bottle (runtime/hle/escape.c): its item icon / held-up model
             extern void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]);
-            int u = draw_bottle == 3 ? 3 : 0;  // (the fairy model: its bone matrices, for where it stands - souls.c)
+            int u = draw_bottle == 3 || draw_bottle == 6 ? 3 : 0;  // (fairy / Piece of Power models: their bone matrices, for where they stand - souls.c, triforce.c)
             escape_bottle_tint(draw_bottle, (const float *)(uintptr_t)st.ubuf[0][u].addr, (uint32_t)st.ubuf[0][u].size, tint);
         }
         if (draw_heart) { extern void texpatch_heart_tint(int kind, float tint[8]); texpatch_heart_tint(draw_heart, tint); }
