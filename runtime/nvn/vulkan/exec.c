@@ -2271,10 +2271,12 @@ static void gc_scan_pointers(const uint32_t *w, uint64_t bytes) {
     }
 }
 
-// A heap range a draw or dispatch binds: its chunks get imported (lazy mode).
+// A heap range a draw or dispatch binds: its chunks get imported (lazy mode), and the chunk after it as well - the
+// game's storage buffers are bound with sizes the shaders read past (the lighting pass's tile list: the misses sat
+// 1-9 MB into the chunk after the bound range), and a size of 0 means "the rest of the buffer".
 static void gc_touch(uint64_t off, uint64_t size) {
-    if (!gc_lazy || !size || off >= HEAP_MAX) return;
-    int k0 = (int)(off >> gc_shift), k1 = (int)((off + size - 1) >> gc_shift);
+    if (!gc_lazy || off >= HEAP_MAX) return;
+    int k0 = (int)(off >> gc_shift), k1 = (int)((off + (size ? size : 1) - 1) >> gc_shift) + 1;
     if (k1 >= gc_n) k1 = gc_n - 1;
     for (int k = k0; k <= k1; k++) if (!gc[k].buf) gc_import(k);
 }
@@ -2353,11 +2355,20 @@ static VkDescriptorSet gmem_chunk_set(void) {
 // Binds the chunk set for a draw / dispatch whose shaders (stages: a mask of 1 << stage) use global memory: their storage
 // buffers' chunks first.
 static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t set_index, uint32_t stages) {
+    static int log_sb = -1;  // LARECOMP_LOG_GMEM_SBUF=1: each distinct storage buffer bound to a gmem shader, once
+    if (log_sb < 0) log_sb = getenv("LARECOMP_LOG_GMEM_SBUF") != NULL;
     for (int stage = 0; stage < 6; stage++) {
         if (!(stages & (1u << stage))) continue;
         for (int i = 0; i < 16; i++) {
             uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
-            if (a >= HEAP_BASE && sz && a - HEAP_BASE < HEAP_MAX) gc_touch(a - HEAP_BASE, sz);
+            if (a < HEAP_BASE || a - HEAP_BASE >= HEAP_MAX) continue;
+            if (log_sb) {
+                static uint64_t seen[64]; static int nseen;
+                uint64_t key = a ^ (sz << 40) ^ ((uint64_t)(stage * 16 + i) << 56);
+                int j = 0; while (j < nseen && seen[j] != key) j++;
+                if (j == nseen && nseen < 64) { seen[nseen++] = key; LOG("[vk] gmem sbuf stage %d slot %d: %llx + %llx (chunk %d)\n", stage, i, (unsigned long long)a, (unsigned long long)sz, (int)((a - HEAP_BASE) >> gc_shift)); }
+            }
+            gc_touch(a - HEAP_BASE, sz);
         }
     }
     VkDescriptorSet set = gmem_chunk_set();
