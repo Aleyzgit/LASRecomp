@@ -196,10 +196,10 @@ with tempfile.TemporaryDirectory(prefix='windows-logs-', dir=build) as directory
     handoff_log, = temporary.glob(f'lasrecomp-backup-*-{handoff.pid}.log')
     assert session_lines(handoff_log) == ['stdout:handoff', 'stderr:handoff', 'stdout:child-inherited', 'stderr:child-inherited']
     assert (temporary/'lasrecomp.log').read_bytes() == handoff_log.read_bytes()
-    # Legacy per-PID names are pruned too; another tool's log must be preserved.
-    for i in range(10): (temporary/f'lasrecomp-{100+i}.log').write_text('legacy')
-    foreign=temporary/'lasrecomp-custom.log'; foreign.write_text('keep me')
-    finish(start('after-legacy'))
-    managed=[p for p in temporary.glob('lasrecomp-*.log') if p != foreign]
-    assert len(managed) == 5 and foreign.read_text() == 'keep me'
-print('PASS: independent/relaunched writers, live latest log, five backups, active-session protection, exit ordering, fallback and legacy cleanup')
+    # Only lasrecomp-backup-*.log files are pruned; other logs (another tool's, unrelated names) are left alone.
+    others=[temporary/f'lasrecomp-{100+i}.log' for i in range(3)] + [temporary/'lasrecomp-custom.log']
+    for other in others: other.write_text('keep me')
+    finish(start('after-others'))
+    assert len(list(temporary.glob('lasrecomp-backup-*.log'))) == 5
+    assert all(other.read_text() == 'keep me' for other in others)
+print('PASS: independent/relaunched writers, live latest log, five backups, active-session protection, exit ordering, fallback, other logs untouched')

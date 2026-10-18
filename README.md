@@ -167,13 +167,12 @@ Vulkan Memory Allocator from your distribution, Python 3.12. Packages, cross bui
 Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - macOS app: `~/Library/Application Support/com.peiikai.lasrecomp/` (the app itself is never written to).
 - Windows: next to `lasrecomp.exe`, so put the `LAS Recomp` folder somewhere writable (not Program Files).
-  `lasrecomp.log` contains the latest session for bug reports. Up to five recent sessions are kept as
-  `lasrecomp-backup-*.log`; a session still running is kept until a later launch can clean it up. The launcher
-  and the game it starts share one log. On filesystems without hard links, the latest log is copied at exit.
-- Linux: `~/.local/share/lasrecomp/` (`$XDG_DATA_HOME/lasrecomp`); the log is `lasrecomp.log` there when started
-  without a terminal.
+- Linux: `~/.local/share/lasrecomp/` (`$XDG_DATA_HOME/lasrecomp`).
 - Dev / portable mode: if the folder you start from has `extracted/` (a source checkout), that folder is used, as above.
 - `LARECOMP_DATA_ROOT=<dir>` overrides all of these.
+- The log (started without a terminal) is `lasrecomp.log` in that folder, always the latest run; up to five recent
+  runs are kept as `lasrecomp-backup-*.log`. For a bug report attach `lasrecomp.log`, or if the problem was in an
+  earlier run, that run's backup (by date modified).
 
 ## Credits
 
@@ -190,7 +189,8 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
   parsing and Traditional Chinese locale detection (#53); Windows game thread stacks reserved instead of committed,
   about 9 GB less memory committed (#107); the Vulkan fence fix for reused submission slots (#108); x86 rounding
   without x87 state changes (#115); movie memory freed on close, source change and reboot (#112); Vulkan stopping
-  cleanly on GPU timeouts (#127); a strict Vulkan validation mode for automated tests (#128)
+  cleanly on GPU timeouts (#127); a strict Vulkan validation mode for automated tests (#128); Windows session logs:
+  `lasrecomp.log` always the latest run, with five backups (#114)
 - **[@gitarre1234rr5](https://github.com/gitarre1234rr5)** - controller rumble: the game's vibration on your controller
   (#104), and a regression test for the kernel's timed condition-variable wait (#88)
 
