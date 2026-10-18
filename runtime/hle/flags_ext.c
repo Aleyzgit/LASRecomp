@@ -108,6 +108,19 @@ void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t s
         sidecar_path(save, sc, sizeof sc, false);
         f = fopen(sc, "rb");
     }
+    if (!pending) {  // beta 5 before PR #170 left every sidecar as savedataN.bin.pending.flagsx (never committed):
+        char old[1200];  // its flags are the player's latest - taken while it's newer than the committed sidecar
+        struct stat so, sn;
+        snprintf(old, sizeof old, "%s.pending.flagsx", save);
+        if (!stat(old, &so) && (!f || (!stat(sc, &sn) && so.st_mtime > sn.st_mtime))) {
+            FILE *fo = fopen(old, "rb");
+            if (fo) {
+                if (f) fclose(f);
+                f = fo;
+                LOG("[flags] extra flags from %s (left by an earlier build)\n", old);
+            }
+        }
+    }
     if (f) {
         size_t n = fread(s->ext, 1, sizeof s->ext, f);
         (void)n;
