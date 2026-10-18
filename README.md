@@ -101,6 +101,8 @@ This is a beta release. That means bugs are likely, crashes could occur, randomi
   - Switch companions from the pause menu, or send yours away.
 - Boss souls - a boss doesn't appear, can't be beaten and its reward stays locked until you find its soul.
 - Mini-boss souls - the same for dungeon mini-bosses (a separate option).
+- Triforce hunt - collect Triforce pieces (3, 12, 24 or any number up to 50, optionally with extra pieces hidden) instead
+  of waking the Wind Fish; the last one needed rolls the credits.
 - Entrance Randomizer - shuffles dungeon entrances, houses and caves, and connector caves. Includes a decoupled option.
 - Dungeon Room Shuffler - shuffles all dungeon rooms, creating unique custom dungeons every seed. Three modes:
   - Coherent: dungeon rooms are shuffled but connecting rooms are lined up. To keep this workable in logic, dungeons

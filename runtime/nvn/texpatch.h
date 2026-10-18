@@ -12,7 +12,10 @@
 // Which of the known textures `t` is (by its contents: the user's own game files are read once to know them), or -1.
 int texpatch_identify(const NvnTexture *t);
 // Known texture `id` is the empty bottle's item icon (1), its 3D model's colour map (2), the fairy's model map (3:
-// boss / mini-boss souls drawn red, runtime/hle/souls.c), else 0 (the gold Escape Bottle: runtime/hle/escape.c).
+// boss / mini-boss souls drawn red, runtime/hle/souls.c), the Magic Powder sack's (4), the Piece of Power's (6: Triforce
+// pieces drawn gold, runtime/hle/triforce.c), else 0 (the gold Escape Bottle: runtime/hle/escape.c).
+// One of the game's own UI textures by name (e.g. "MapMark_05^w") as RGBA8 (malloc'd; NULL if missing)
+uint8_t *texpatch_ui_rgba(const char *name, int *w, int *h);
 int texpatch_bottle_kind(int id);
 // Known texture `id` is one of the Items page's cursor brackets (hidden while the companion card has the cursor)
 bool texpatch_is_item_cursor(int id);

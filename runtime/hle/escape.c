@@ -162,6 +162,11 @@ static void bomb_bag_tint(float tint[8]) {
 
 void escape_bottle_tint(int kind, const float *ui, uint32_t ui_size, float tint[8]) {
     if (kind == 4) { bomb_bag_tint(tint); return; }  // (the Magic Powder sack's map)
+    if (kind == 6) {  // (the Piece of Power's model map: Triforce pieces, runtime/hle/triforce.c)
+        extern void triforce_model_tint(const float *m, uint32_t m_size, float tint[8]);
+        triforce_model_tint(ui, ui_size, tint);
+        return;
+    }
     if (kind == 3) {  // (the fairy's model map: boss / mini-boss souls, runtime/hle/souls.c)
         extern void souls_fairy_tint(const float *m, uint32_t m_size, float tint[8]);
         souls_fairy_tint(ui, ui_size, tint);

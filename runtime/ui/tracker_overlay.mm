@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "imgui.h"
+bool triforce_icon_draw(ImDrawList *dl, ImVec2 c, float size, bool full, ImU32 tint);  // triforce_icons.mm
 
 extern "C" {
 #include "../hle.h"
@@ -24,6 +25,7 @@ extern "C" {
 uint64_t renderer_present_count(void);
 int kernel_data_regions(uint64_t *addr, uint64_t *size, int max);
 const char *souls_at(int i, int *kind, bool *owned);  // runtime/hle/souls.c
+bool triforce_counts(int *have, int *needed);  // runtime/hle/triforce.c: false = no Triforce hunt
 }
 
 
@@ -233,6 +235,10 @@ static void inventory(void) {
     give("arrow-capacity", b(upg, 5));
     give("golden-leaf", __builtin_popcount(LD8(GA_LIVE_SAVE + 0x5582) & 0x1F));
     give("seashell", __builtin_popcountll(LD64(GA_LIVE_SAVE + 0x5548) & ((1ull << 50) - 1)));
+    {
+        int have, need;
+        if (triforce_counts(&have, &need)) give("triforce-piece", have);
+    }
     static const struct { const char *tok, *flag; int slot; } trade[] = {
         {"yoshi-doll", "TradeYoshiDollGet", 1}, {"ribbon", "TradeRibbonGet", 2}, {"dog-food", "TradeDogFoodGet", 3},
         {"bananas", "TradeBananasGet", 4}, {"stick", "TradeStickGet", 5}, {"honeycomb", "TradeHoneycombGet", 6},
@@ -457,6 +463,15 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     char sum[64];
     snprintf(sum, sizeof sum, "Checks: %d reachable / %d left", reach, left);
     dl->AddText(font, 20 * u, ImVec2(ox + 190 * u, oy + 640 * u), IM_COL32(255, 245, 225, 255), sum);
+    int tri_have, tri_need;  // Triforce hunt: pieces found / needed, after the checks line
+    if (triforce_counts(&tri_have, &tri_need)) {
+        float x = ox + 190 * u + font->CalcTextSizeA(20 * u, FLT_MAX, 0, sum).x + 34 * u, cy = oy + 652 * u;
+        triforce_icon_draw(dl, ImVec2(x, cy), 24 * u, true, IM_COL32(255, 255, 255, 255));
+        char tt[24];
+        snprintf(tt, sizeof tt, "%d / %d", tri_have, tri_need);
+        dl->AddText(font, 20 * u, ImVec2(x + 20 * u, oy + 640 * u),
+                    tri_have >= tri_need ? IM_COL32(250, 220, 90, 255) : IM_COL32(255, 245, 225, 255), tt);
+    }
     if (hover) {
         std::string t = hover == hover_group ? std::string(hover) : pretty(hover);
         ImVec2 ts = font->CalcTextSizeA(20 * u, FLT_MAX, 0, t.c_str());
