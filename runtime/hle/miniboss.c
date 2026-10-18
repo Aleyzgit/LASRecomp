@@ -116,6 +116,20 @@ static void scan_seen(uint64_t o, uint64_t vt) {
         }
 }
 
+// LARECOMP_MB_DIFF (RE, with LARECOMP_MB_SCAN): at each state change of a scanned actor, its 32-bit fields (first
+// 0x2000 bytes) that went down by 1..64 since the last change - its hit points among them
+static void scan_diff(int i, uint64_t o) {
+    static uint32_t snap[8][0x800];
+    static uint64_t snap_obj[8];
+    const uint32_t *now = (const uint32_t *)(uintptr_t)o;
+    if (snap_obj[i] == o)
+        for (int w = 0; w < 0x800; w++)
+            if (now[w] < snap[i][w] && snap[i][w] - now[w] <= 64 && snap[i][w] < 0x10000)
+                LOG("[mb-diff]   +%#x: %u -> %u\n", w * 4, snap[i][w], now[w]);
+    memcpy(snap[i], now, sizeof snap[i]);
+    snap_obj[i] = o;
+}
+
 static void scan_tick(uint64_t frame) {
     for (int i = 0; i < 8; i++) {
         uint64_t o = g_scan_obj[i];
@@ -125,9 +139,11 @@ static void scan_tick(uint64_t frame) {
         if (!alive) { g_scan_obj[i] = 0; continue; }
         for (int j = 0; j < 8 && g_scan_sm[i][j]; j++) {
             uint8_t st = *(uint8_t *)(uintptr_t)(o + g_scan_sm[i][j] + 0xd);
-            if (st != g_scan_last[i][j])
+            if (st != g_scan_last[i][j]) {
                 LOG("[mb-scan] f%llu actor %llx sm +%#llx: %u -> %u\n", (unsigned long long)frame, (unsigned long long)o,
                     (unsigned long long)g_scan_sm[i][j], g_scan_last[i][j], st);
+                if (ENV("LARECOMP_MB_DIFF") && j == 0) scan_diff(i, o);
+            }
             g_scan_last[i][j] = st;
         }
     }
