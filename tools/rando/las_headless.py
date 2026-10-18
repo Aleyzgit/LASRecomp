@@ -490,6 +490,11 @@ def main():
     if missing:
         print('SHUFFLE ERROR unbeatable seed', missing, file=sys.stderr)
         sys.exit(3)
+    if os.environ.get('LARECOMP_CHECK_ONLY'):  # (test: tools/rando/seed_sweep.py - placements + logic, no game files)
+        with open(os.path.join(out_dir, 'placements.json'), 'w') as f:
+            json.dump({'placements': {k: v for k, v in pl.items() if isinstance(v, str)},
+                       'access': {k: 1 for k, v in settings.items() if v is True}}, f)
+        sys.exit(0)
 
     if pot_locs or bush_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
         import pots as _pots
