@@ -1109,20 +1109,12 @@ void backend_present(NvnTexture *t) {
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, game_ms, win_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
-        bool reshape = shape != 1.0;
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
         float crop[4];  // uv origin and size
         widescreen_present_crop(total_frames, shape, crop, &vx, &vy, &vw, &vh);
         widescreen_set_factor((float)shape);
-        {   // (diagnostics) log output scale / drawable changes
-            static double psx, psy, pdw, pdh;
-            static int nlog;
-            if ((sx != psx || sy != psy || dw != pdw || dh != pdh) && nlog++ < 200)
-                LOG("[scale] frame %llu drawable %.0fx%.0f -> render scale %.3fx%.3f (reshape %d)\n",
-                    (unsigned long long)total_frames, dw, dh, sx, sy, reshape);
-            psx = sx, psy = sy, pdw = dw, pdh = dh;
-        }
+        output_scale_log((unsigned long long)total_frames, dw, dh, &os);  // (diagnostics: [scale] on a change)
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
         renderer_set_scale((float)sx, (float)sy);

@@ -23,7 +23,7 @@ with tempfile.TemporaryDirectory() as directory:
         print(r.stdout, end='')
         if verbose:
             for line in r.stderr.splitlines():
-                if any(k in line for k in ('reach', 'looking', 'ended', 'misses', 'would fit')):
+                if any(k in line for k in ('reach', 'looking', 'ended', 'misses', 'would fit', 'meet')):
                     print('   ', line)
             print()
         failed += r.returncode != 0

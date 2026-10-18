@@ -76,6 +76,7 @@ static bool g_probing;
 static double g_floor_g, g_ref_g;
 static bool g_ref_pending;
 static int g_hold_miss, g_hold_up_votes;  // held: decisions in a row over the hold's budget / with room for the next rate
+static int g_hold_met_votes;              // held at 20: decisions in a row whose frames already met 30 (with G + W in its budget)
 static double g_hold_up_at = -100;        // when the hold last stepped up (20 -> 30)
 
 static int hold_vsyncs(void) { return (int)lround(g_hold_dt * 60 / 1000); }
@@ -136,24 +137,35 @@ static void dyn_update(double now, double game_ms, double win_ms) {
     if (gpu) {
         if (g_hold_dt > 0 && fabs(W - g_hold_w) > fmax(1.0, 0.25 * g_hold_w)) {  // another upscaler / AA / window size
             LOG("[dynres] window step %.1f -> %.1f ms: hold at %.0f fps ended\n", g_hold_w, W, 1000 / g_hold_dt);
-            g_hold_dt = 0, g_probing = false, g_probe_wait = 10.0, g_hold_miss = g_hold_up_votes = 0;
+            g_hold_dt = 0, g_probing = false, g_probe_wait = 10.0, g_hold_miss = g_hold_up_votes = g_hold_met_votes = 0;
         }
+        // held at 20 while the frames already come at 30 (every 33.3 ms) with G + W inside the 30 hold's budget (10%
+        // to spare), 1 s in a row: it holds 30 again right away (no probe wait - unless the last step up was undone)
+        int hvs = g_hold_dt > 0 ? hold_vsyncs() : 0;
+        double faster = (hvs - 1) * 1000 / 60.0;
+        bool met = hvs > 2 && avg_dt <= 1.05 * faster && avg_gpu <= faster * 0.87 * DYN_RAISE_FIT;
+        g_hold_met_votes = met ? g_hold_met_votes + 1 : 0;
         if (g_hold_dt > 0 && g_ref_pending) g_ref_g = G, g_ref_pending = false;  // (the first measure at a new factor)
-        else if (g_hold_dt > 0 && g_ref_g > 0) {
+        if (g_hold_dt > 0 && g_ref_g > 0) {
             // the next faster rate: 20 -> 30 fps, 30 -> looking for 60; the floor must fit it with room, 2 s in a row
             double g_floor = g_floor_g * G / g_ref_g;
-            int vs = hold_vsyncs();
+            int vs = hvs;
             double up_budget = vs > 2 ? (vs - 1) * 1000 / 60.0 * 0.87 : DYN_BUDGET;
             bool room = g_floor + W <= up_budget * DYN_HOLD_UP_FIT;
             g_hold_up_votes = room ? g_hold_up_votes + 1 : 0;
-            if (room && g_hold_up_votes >= 4 && now >= g_probe_at) {
-                g_hold_up_votes = g_hold_miss = 0;
+            bool met_now = met && g_hold_met_votes >= 2 && (g_probe_wait <= 10.0 || now >= g_probe_at);
+            if ((room && g_hold_up_votes >= 4 && now >= g_probe_at) || met_now) {
+                g_hold_up_votes = g_hold_miss = g_hold_met_votes = 0;
                 if (vs > 2) {
                     g_hold_dt = (vs - 1) * 1000 / 60.0;
                     g_hold_up_at = now, g_probe_at = now + g_probe_wait;
                     double to = fmin(g_dyn, dyn_fit(G, W, g_hold_dt * 0.87 * DYN_RAISE_FIT));
-                    LOG("[dynres] the floor would fit %.0f fps now (game %.1f ms at %.2f: ~%.1f at %.2f, window %.1f): holding "
-                        "%.0f fps, %.2f -> %.2f\n", 1000 / g_hold_dt, G, g_dyn, g_floor, DYN_FLOOR, W, 1000 / g_hold_dt, g_dyn, to);
+                    if (met_now)
+                        LOG("[dynres] frames already meet %.0f fps (every %.1f ms, game %.1f + window %.1f ms at %.2f): holding "
+                            "%.0f fps\n", 1000 / g_hold_dt, avg_dt, G, W, g_dyn, 1000 / g_hold_dt);
+                    else
+                        LOG("[dynres] the floor would fit %.0f fps now (game %.1f ms at %.2f: ~%.1f at %.2f, window %.1f): holding "
+                            "%.0f fps, %.2f -> %.2f\n", 1000 / g_hold_dt, G, g_dyn, g_floor, DYN_FLOOR, W, 1000 / g_hold_dt, g_dyn, to);
                     if (to != g_dyn) g_floor_g *= G / g_ref_g, g_ref_pending = true, g_dyn = to;
                     hold_up = true;
                 } else {
@@ -174,7 +186,7 @@ static void dyn_update(double now, double game_ms, double win_ms) {
         if (held_back && votes >= 2) {
             g_hold_dt = vsyncs * 1000 / 60.0, g_hold_w = W;
             g_floor_g = g_ref_g = G, g_ref_pending = false;
-            g_hold_miss = g_hold_up_votes = 0;
+            g_hold_miss = g_hold_up_votes = g_hold_met_votes = 0;
             if (g_probing) g_probe_wait = fmin(g_probe_wait * 2, 160.0);
             g_probing = false;
             g_probe_at = now + g_probe_wait;
@@ -260,6 +272,15 @@ static void dyn_update(double now, double game_ms, double win_ms) {
 
 double output_scale_dynamic_factor(void) { return g_dyn; }
 double output_scale_dynamic_hold_fps(void) { return g_hold_dt > 0 ? 1000 / g_hold_dt : 0; }
+
+void output_scale_log(unsigned long long frame, double dw, double dh, const OutScale *o) {
+    static double psx, psy, pdw, pdh;
+    static int nlog;
+    if ((o->sx != psx || o->sy != psy || dw != pdw || dh != pdh) && nlog++ < 200)
+        LOG("[scale] frame %llu drawable %.0fx%.0f -> render scale %.3fx%.3f (reshape %d)\n", frame, dw, dh, o->sx, o->sy,
+            o->shape != 1.0);
+    psx = o->sx, psy = o->sy, pdw = dw, pdh = dh;
+}
 
 void output_scale(double dw, double dh, bool reshape_allowed, double now, double game_ms, double win_ms, OutScale *o) {
     double fit = fmin(dw / 1920.0, dh / 1080.0);

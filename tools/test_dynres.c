@@ -32,12 +32,13 @@ typedef struct {
     double f_end, fps_end, hold_end;  // hold_end: the frame rate the controller says it holds (0: none)
     int changes_last60, hold_changes;  // hold_changes: the held rate changed (30 <-> 20 <-> 60), the whole run
     double f_min_last60, f_max_last60;
+    double hold_t;  // when the held rate last changed (s)
 } Result;
 
 static Result run(const Case *c) {
     g_rng = 7;
     double now = 1.0, f = output_scale_dynamic_factor(), g_prev = -1, w_prev = -1;
-    double frames_end = 0, t_end = 0, last_f = f, f_min = 1, f_max = 0, last_hold = 0;
+    double frames_end = 0, t_end = 0, last_f = f, f_min = 1, f_max = 0, last_hold = 0, hold_t = 0;
     int changes = 0, hold_changes = 0;
     printf("%s\n  t=0s %.2f", c->name, f);
     int col = 0;
@@ -55,7 +56,7 @@ static Result run(const Case *c) {
         if (hold != last_hold) {
             printf(" | %.0fs hold %.0f", now, hold);
             if (++col % 8 == 0) printf("\n ");
-            hold_changes++, last_hold = hold;
+            hold_changes++, last_hold = hold, hold_t = now;
         }
         if (now > c->secs - 60) { f_min = fmin(f_min, f); f_max = fmax(f_max, f); }
         double scene = (1 + (c->wobble > 0 ? c->wobble : 0.03) * sin(now * 2 * M_PI / 20)) * (c->light_at > 0 && now > c->light_at ? 0.6 : 1.0);
@@ -67,7 +68,7 @@ static Result run(const Case *c) {
         now += p / 1000;
         if (now > c->secs - 10) frames_end++, t_end += p / 1000;
     }
-    Result r = {f, frames_end / t_end, last_hold, changes, hold_changes, f_min, f_max};
+    Result r = {f, frames_end / t_end, last_hold, changes, hold_changes, f_min, f_max, hold_t};
     printf("\n  end: factor %.2f, %.1f fps over the last 10 s (holding %.0f), %d change%s in the last 60 s (%.2f-%.2f)\n\n",
            r.f_end, r.fps_end, r.hold_end, changes, changes == 1 ? "" : "s", f_min, f_max);
     return r;
@@ -138,7 +139,8 @@ int main(int argc, char **argv) {
     case 11: check(near(r.hold_end, 20) && r.fps_end > 19 && r.changes_last60 <= 2 && r.hold_changes <= 2, "4K FSR 44 ms: hold 20"); break;
     case 12: check(near(r.hold_end, 30) && r.fps_end > 28 && r.changes_last60 <= 2, "G x1.44: hold 30 at a lower factor"); break;
     case 13: check(near(r.hold_end, 20) && r.fps_end > 19 && r.changes_last60 <= 2 && r.hold_changes <= 3, "G x2.2: hold steps down to 20"); break;
-    case 14: check(near(r.hold_end, 30) && r.fps_end > 28 && r.changes_last60 <= 2 && r.hold_changes <= 4, "G x2.2 then back: 20, then 30"); break;
+    case 14: check(near(r.hold_end, 30) && r.fps_end > 28 && r.changes_last60 <= 2 && r.hold_changes <= 4 && r.hold_t < 154,
+                   "G x1.8 then back: 20, then 30 within a few seconds"); break;
     case 15: check(near(r.hold_end, 20) && r.fps_end > 19 && r.hold_changes <= 3, "G x2.2 +-15%: 20, no hunting"); break;
     }
     // a hold is real: the frames come at least at the rate it says
