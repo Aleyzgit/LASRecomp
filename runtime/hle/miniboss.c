@@ -285,7 +285,7 @@ static void life_tick(uint64_t frame) {
     if (at < 0 || (long)frame != at || !scan_latest()) return;
     for (uint64_t o = 0x80; !off && o < 0x3000; o += 8) {  // (offset 0: the first member that is a life component)
         uint64_t q = LD64(scan_latest() + o);
-        if (q >= HEAP_BASE && q + 0x200 <= HEAP_BASE + HEAP_MAX && !(q & 7) && LD64(q) == MAIN_BASE + 0x1b5be00) off = o;
+        if (q >= HEAP_BASE && q + 0x200 <= HEAP_BASE + HEAP_MAX && !(q & 7) && LD64(q) == GA_ENEMY_LIFE_VTABLE) off = o;
     }
     LOG("[mb-life] component at +%#llx\n", off);
     uint64_t comp = LD64(scan_latest() + off);
