@@ -15,6 +15,8 @@
 #include "../output_scale.h"
 #include "../renderer.h"
 #include "../pace.h"
+#include "../shader_prep.h"
+#include <pthread.h>
 
 VkG g_vk;
 static SDL_Window *window;
@@ -172,6 +174,29 @@ void vk_log_memory(const char *why) {
             b[i].statistics.allocationCount);
 }
 
+// ---- pipeline cache file
+#define PCACHE_FILE "cache/vk_pipelines.bin"
+#define PCACHE_TAG "cache/vk_pipelines.bin.tag"
+static size_t pcache_saved;  // bytes of the last save (or load)
+void vk_pipeline_cache_save(void);
+
+static void pipeline_cache_tag(char *out, size_t n) {
+    char gpu[400], uuid[2 * VK_UUID_SIZE + 1];
+    for (int i = 0; i < VK_UUID_SIZE; i++) snprintf(uuid + 2 * i, 3, "%02x", g_vk.props.pipelineCacheUUID[i]);
+    snprintf(gpu, sizeof gpu, "%s, vendor %x device %x, driver %u, cache %s", g_vk.props.deviceName, g_vk.props.vendorID,
+             g_vk.props.deviceID, g_vk.props.driverVersion, uuid);
+    shader_cache_tag(out, n, gpu);
+}
+
+static void *pipeline_cache_saver(void *a) {  // every 3 minutes, when it grew
+    (void)a;
+    for (;;) {
+        SDL_Delay(180000);
+        vk_pipeline_cache_save();
+    }
+    return NULL;
+}
+
 static void create_device(void) {
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
@@ -265,10 +290,14 @@ static void create_device(void) {
                                   .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_vk.qfam};
     VK_CHECK(vkCreateCommandPool(g_vk.dev, &pi, NULL, &g_vk.pool));
 
-    // pipeline cache: cache/vk_pipelines.bin (written by vk_pipeline_cache_save)
+    // pipeline cache: cache/vk_pipelines.bin (written by vk_pipeline_cache_save), used only with its tag
+    // (vk_pipelines.bin.tag: this build, the translator, the GPU and its driver - another one starts it empty)
+    char tag[512];
+    pipeline_cache_tag(tag, sizeof tag);
     size_t sz = 0;
     void *data = NULL;
-    FILE *fp = fopen("cache/vk_pipelines.bin", "rb");
+    FILE *fp = shader_cache_tag_ok(PCACHE_TAG, tag) ? fopen(PCACHE_FILE, "rb") : NULL;
+    if (!fp && !access(PCACHE_FILE, F_OK)) LOG("[vk] pipeline cache from another build / GPU / driver: starting a new one\n");
     if (fp) {
         fseek(fp, 0, SEEK_END);
         sz = (size_t)ftell(fp);
@@ -284,22 +313,30 @@ static void create_device(void) {
         VK_CHECK(vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache));
     }
     free(data);
+    if (pc.initialDataSize) LOG("[vk] pipeline cache: loaded %zu bytes\n", pc.initialDataSize);
+    pcache_saved = pc.initialDataSize;
+    pthread_t t;  // (kept every few minutes while it grows, not only at a clean exit)
+    pthread_create(&t, NULL, pipeline_cache_saver, NULL);
+    pthread_detach(t);
 }
 
+// Saved atomically (temp file + rename: a crash mid-write leaves the previous one), with its tag; one save at a time
 void vk_pipeline_cache_save(void) {
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    pthread_mutex_lock(&lock);
     size_t sz = 0;
-    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
-    void *data = malloc(sz);
-    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
-        mkdir("cache", 0755);
-        FILE *f = fopen("cache/vk_pipelines.bin.tmp", "wb");
-        if (f) {
-            bool ok = fwrite(data, 1, sz, f) == sz;
-            fclose(f);
-            if (ok) { remove("cache/vk_pipelines.bin"); rename("cache/vk_pipelines.bin.tmp", "cache/vk_pipelines.bin"); }
+    if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) == VK_SUCCESS && sz && sz != pcache_saved) {
+        void *data = malloc(sz);
+        if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS && shader_cache_write(PCACHE_FILE, data, sz)) {
+            char tag[512];
+            pipeline_cache_tag(tag, sizeof tag);
+            if (!shader_cache_tag_ok(PCACHE_TAG, tag)) shader_cache_tag_write(PCACHE_TAG, tag);
+            pcache_saved = sz;
+            LOG("[vk] pipeline cache: saved %zu bytes\n", sz);
         }
+        free(data);
     }
-    free(data);
+    pthread_mutex_unlock(&lock);
 }
 
 // ================================================================== swapchain

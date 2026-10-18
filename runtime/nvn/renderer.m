@@ -1043,51 +1043,186 @@ static int rt_kind(uint32_t f) {
 #define PROG_TAB 4096
 static struct { uint64_t key; void *prog; } prog_tab[PROG_TAB];
 
-// Shader warm-up cache: every translated shader's MSL is kept in cache/shaders/ (v_/f_<hash>.metal). At startup
-// they're all compiled once on a background queue, which fills Metal's own on-disk shader cache so that a later
-// first use in-game costs ~0.1 ms instead of ~40 ms. Delete cache/ to reset it.
-static uint64_t fnv64(const char *t) {
-    uint64_t h = 0xcbf29ce484222325ull;
-    for (; *t; t++) { h ^= (uint8_t)*t; h *= 0x100000001B3ull; }
-    return h;
+// ------------------------------------------------------------------ binary archive (LARECOMP_METAL_ARCHIVE=0: none)
+// cache/shaders.metalarchive: the GPU code of every pipeline built here (prepared or at first use), kept across runs
+// (MTLBinaryArchive), used only with a matching cache/shaders.metalarchive.tag (shader_cache_tag: this build, the
+// translator, the GPU and the macOS build; another one, or an archive that doesn't load: a new one, silently). Saved
+// (temp file + rename) when the preparation ends and 10 s after the last pipeline added at first use.
+// What it holds is the cheap half (pipelines from compiled functions: ~1 s of CPU for all 895 variants on an M3 Max);
+// compiling the MSL source into functions (~300 s of CPU when macOS's shader cache lost them) still goes through
+// macOS's cache. It loads in the background (3-6 s for 43 MB).
+// The MSL text cache (cache/shaders/*.metal + a boot warm-up compile) is gone: the preparation on every start keeps
+// macOS's cache warm for the listed variants; that folder is removed.
+#define ARCHIVE_FILE "cache/shaders.metalarchive"
+#define ARCHIVE_TAG ARCHIVE_FILE ".tag"
+static id<MTLBinaryArchive> g_archive;
+static _Atomic bool g_archive_ready;  // (loaded in the background: archive_open)
+static id<MTLBinaryArchive> archive_get(void) { return g_archive_ready ? g_archive : nil; }
+static pthread_rwlock_t g_archive_lock = PTHREAD_RWLOCK_INITIALIZER;  // adds: read side (any number); save: write side
+static _Atomic int g_archive_dirty, g_archive_hits, g_archive_adds;
+static _Atomic uint64_t g_pipe_us, g_lib_us, g_archive_open_us;  // (preparation's log: time in pipeline builds, library
+                                                                  // compiles - summed over threads - and the archive's load)
+static _Atomic uint64_t g_archive_gen;
+
+static void archive_tag(char *out, size_t n) {
+    char gpu[400];
+    snprintf(gpu, sizeof gpu, "%s, %s", dev.name.UTF8String, NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
+    shader_cache_tag(out, n, gpu);
 }
 
-static void shader_cache_note(const char *vs, const char *fs) {
-    static int made;
-    if (!made) { made = 1; mkdir("cache", 0755); mkdir("cache/shaders", 0755); }
-    const char *src[2] = {vs, fs};
-    for (int i = 0; i < 2; i++) {
-        char path[96];
-        snprintf(path, sizeof path, "cache/shaders/%c_%016llx.metal", i ? 'f' : 'v', (unsigned long long)fnv64(src[i]));
-        if (access(path, F_OK) == 0) continue;
-        FILE *f = fopen(path, "w");
-        if (f) { fputs(src[i], f); fclose(f); }
+static void remove_old_text_cache(void) {  // (cache/shaders/*.metal: up to ~130 MB on players' machines)
+    DIR *d = opendir("cache/shaders");
+    if (!d) return;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        char path[300];
+        snprintf(path, sizeof path, "cache/shaders/%s", e->d_name);
+        n += unlink(path) == 0;
     }
+    closedir(d);
+    rmdir("cache/shaders");
+    LOG("[metal] removed the old shader text cache (%d files)\n", n);
 }
 
-void shader_cache_warm(void) {
-    static int started;
-    if (started++ || getenv("LARECOMP_NO_SHADER_WARM")) return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-        DIR *d = opendir("cache/shaders");
-        if (!d) return;
-        MTLCompileOptions *vopts = [MTLCompileOptions new];
-        vopts.preserveInvariance = YES;
+static void archive_save(bool at_exit) {
+    if (!archive_get() || !g_archive_dirty) return;
+    if (at_exit ? pthread_rwlock_trywrlock(&g_archive_lock) : pthread_rwlock_wrlock(&g_archive_lock)) return;
+    int adds = g_archive_dirty;
+    g_archive_dirty = 0;
+    double t0 = now_ms();
+    NSError *err = nil;
+    mkdir("cache", 0755);
+    remove(ARCHIVE_FILE ".tmp");
+    bool ok = [g_archive serializeToURL:[NSURL fileURLWithPath:@(ARCHIVE_FILE ".tmp")] error:&err];
+    pthread_rwlock_unlock(&g_archive_lock);
+    if (ok) ok = rename(ARCHIVE_FILE ".tmp", ARCHIVE_FILE) == 0;
+    if (!ok) { LOG("[metal] shader archive not saved: %s\n", err ? err.localizedDescription.UTF8String : "rename"); return; }
+    char tag[700];
+    archive_tag(tag, sizeof tag);
+    if (!shader_cache_tag_ok(ARCHIVE_TAG, tag)) shader_cache_tag_write(ARCHIVE_TAG, tag);
+    struct stat sb;
+    LOG("[metal] shader archive saved: %d new pipelines, %.1f MB, %.0f ms\n", adds,
+        stat(ARCHIVE_FILE, &sb) == 0 ? sb.st_size / 1048576.0 : 0.0, now_ms() - t0);
+}
+
+static void archive_exit(void) { archive_save(true); }
+
+// Loading a large archive takes seconds (3-5 s for ~900 pipelines, 43 MB, on an M3 Max) while macOS's own shader
+// cache usually still has them (~0.5 s for all): it loads in the background, and pipelines built before it's there
+// go through macOS's cache alone (the archive is for when that cache dropped them, ~20 s then).
+
+static void archive_publish(id<MTLBinaryArchive> a, double t0, bool loaded) {
+    g_archive = a;
+    g_archive_ready = a != nil;
+    g_archive_open_us = (uint64_t)((now_ms() - t0) * 1000);
+    struct stat sb;
+    if (loaded) LOG("[metal] shader archive loaded: %.1f MB in %.0f ms\n", stat(ARCHIVE_FILE, &sb) == 0 ? sb.st_size / 1048576.0 : 0.0,
+                    g_archive_open_us / 1e3);
+}
+
+static id<MTLBinaryArchive> archive_new(void) {
+    remove(ARCHIVE_FILE);
+    remove(ARCHIVE_TAG);
+    NSError *err = nil;
+    id<MTLBinaryArchive> a = [dev newBinaryArchiveWithDescriptor:[MTLBinaryArchiveDescriptor new] error:&err];
+    if (!a) LOG("[metal] no shader archive: %s\n", err.localizedDescription.UTF8String);
+    return a;
+}
+
+static void archive_open(void) {  // (at the first pipeline / preparation)
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
         double t0 = now_ms();
-        int n = 0;
-        struct dirent *e;
-        while ((e = readdir(d))) {
-            if (e->d_name[0] != 'v' && e->d_name[0] != 'f') continue;
-            char path[300];
-            snprintf(path, sizeof path, "cache/shaders/%s", e->d_name);
-            NSString *src = [NSString stringWithContentsOfFile:@(path) encoding:NSUTF8StringEncoding error:nil];
-            if (!src) continue;
-            @autoreleasepool { (void)[dev newLibraryWithSource:src options:e->d_name[0] == 'v' ? vopts : nil error:nil]; }
-            n++;
+        remove_old_text_cache();
+        remove(ARCHIVE_FILE ".tmp");  // (a save cut short: what it left - Metal writes <uuid>.metallib files beside it)
+        DIR *cd = opendir("cache");
+        if (cd) {
+            struct dirent *e;
+            while ((e = readdir(cd))) {
+                size_t l = strlen(e->d_name);
+                if (l == 36 + 9 && !strcmp(e->d_name + 36, ".metallib")) {
+                    char path[300];
+                    snprintf(path, sizeof path, "cache/%s", e->d_name);
+                    unlink(path);
+                }
+            }
+            closedir(cd);
         }
-        closedir(d);
-        LOG("[shader] warm-up: %d cached shaders compiled in %.0f ms\n", n, now_ms() - t0);
+        const char *on = getenv("LARECOMP_METAL_ARCHIVE");
+        if (on && !atoi(on)) return;
+        atexit(archive_exit);
+        char tag[700];
+        archive_tag(tag, sizeof tag);
+        bool have = access(ARCHIVE_FILE, F_OK) == 0;
+        if (!have || !shader_cache_tag_ok(ARCHIVE_TAG, tag)) {
+            if (have) LOG("[metal] shader archive from another build / GPU / macOS: a new one\n");
+            archive_publish(archive_new(), t0, false);
+            return;
+        }
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            MTLBinaryArchiveDescriptor *d = [MTLBinaryArchiveDescriptor new];
+            d.url = [NSURL fileURLWithPath:@(ARCHIVE_FILE)];
+            NSError *err = nil;
+            id<MTLBinaryArchive> a = [dev newBinaryArchiveWithDescriptor:d error:&err];
+            if (!a) LOG("[metal] shader archive unreadable (%s): a new one\n", err.localizedDescription.UTF8String);
+            archive_publish(a ? a : archive_new(), t0, a != nil);
+        });
     });
+}
+
+static void archive_added(void) {  // saved 10 s after the last add (first-use builds come in bursts)
+    g_archive_dirty++, g_archive_adds++;
+    uint64_t my = ++g_archive_gen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        if (g_archive_gen == my) archive_save(false);
+    });
+}
+
+// A render / compute pipeline through the archive: loaded from it when it's there, else compiled into it (saved
+// later) and loaded. Any thread.
+static id<MTLRenderPipelineState> archive_render_pipeline_(MTLRenderPipelineDescriptor *pd, NSError **err) {
+    archive_open();
+    id<MTLBinaryArchive> archive = archive_get();
+    if (!archive) return [dev newRenderPipelineStateWithDescriptor:pd error:err];
+    pd.binaryArchives = @[archive];
+    id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                                    reflection:nil error:nil];
+    if (ps) { g_archive_hits++; return ps; }
+    bool added = false;  // (not while a save runs: it can take a while - this one goes in a later run)
+    if (!pthread_rwlock_tryrdlock(&g_archive_lock)) {
+        added = [archive addRenderPipelineFunctionsWithDescriptor:pd error:nil];
+        pthread_rwlock_unlock(&g_archive_lock);
+    }
+    if (added) archive_added();
+    return [dev newRenderPipelineStateWithDescriptor:pd error:err];
+}
+
+static id<MTLRenderPipelineState> archive_render_pipeline(MTLRenderPipelineDescriptor *pd, NSError **err) {
+    double t0 = now_ms();
+    id<MTLRenderPipelineState> ps = archive_render_pipeline_(pd, err);
+    g_pipe_us += (uint64_t)((now_ms() - t0) * 1000);
+    return ps;
+}
+
+static id<MTLComputePipelineState> archive_compute_pipeline(id<MTLFunction> f, NSError **err) {
+    archive_open();
+    MTLComputePipelineDescriptor *cd = [MTLComputePipelineDescriptor new];
+    cd.computeFunction = f;
+    id<MTLBinaryArchive> archive = archive_get();
+    if (!archive) return [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionNone reflection:nil error:err];
+    cd.binaryArchives = @[archive];
+    id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionFailOnBinaryArchiveMiss
+                                                                      reflection:nil error:nil];
+    if (ps) { g_archive_hits++; return ps; }
+    bool added = false;  // (not while a save runs: it can take a while - this one goes in a later run)
+    if (!pthread_rwlock_tryrdlock(&g_archive_lock)) {
+        added = [archive addComputePipelineFunctionsWithDescriptor:cd error:nil];
+        pthread_rwlock_unlock(&g_archive_lock);
+    }
+    if (added) archive_added();
+    return [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionNone reflection:nil error:err];
 }
 
 static bool sync_shaders(void) {  // LARECOMP_SYNC_SHADERS: compile on first use, blocking (deterministic tests)
@@ -1108,6 +1243,7 @@ static void compile_program(Prog *pr) {
     if (!vl) { LOG("[shader] VS compile failed: %s\n%s\n", err.localizedDescription.UTF8String, pr->vi->msl); pr->failed = true; return; }
     id<MTLLibrary> fl = [dev newLibraryWithSource:[@(pr->fi->msl) stringByAppendingString:salt] options:nil error:&err];
     if (!fl) { LOG("[shader] FS compile failed: %s\n%s\n", err.localizedDescription.UTF8String, pr->fi->msl); pr->failed = true; return; }
+    g_lib_us += (uint64_t)((now_ms() - t0) * 1000);
     pr->vs = [vl newFunctionWithName:@"main0"];
     pr->fs = [fl newFunctionWithName:@"main0"];
     __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
@@ -1145,7 +1281,6 @@ static bool translate_program(Prog *pr, const uint8_t *vcode, size_t vmax, const
         snprintf(path, sizeof path, "build/msl/%llx_fs.metal", faddr);
         f = fopen(path, "w"); fputs(pr->fi->msl, f); fclose(f);
     }
-    shader_cache_note(pr->vi->msl, pr->fi->msl);
     return true;
 }
 
@@ -1179,7 +1314,6 @@ static Prog *prep_find_prog(uint64_t k) {
 }
 
 static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
-    shader_cache_warm();
     if (!(p->stage_mask & 1) || !(p->stage_mask & 2)) return nil;
     // fast path: hash of the code addresses and keys
     uint64_t h = 0xcbf29ce484222325ull;
@@ -1626,9 +1760,10 @@ static NSMutableDictionary *g_cs_progs;  // code address -> CsProg
 static void compile_compute(CsProg *cp) {
     NSError *err = nil;
     double t0 = now_ms();
-    id<MTLLibrary> lib = [dev newLibraryWithSource:@(cp->si->msl) options:nil error:&err];
+    NSString *salt = getenv("LARECOMP_SHADER_SALT") ? [NSString stringWithFormat:@"\n// %s\n", getenv("LARECOMP_SHADER_SALT")] : @"";
+    id<MTLLibrary> lib = [dev newLibraryWithSource:[@(cp->si->msl) stringByAppendingString:salt] options:nil error:&err];
     id<MTLFunction> f = lib ? [lib newFunctionWithName:@"main0"] : nil;
-    id<MTLComputePipelineState> pipe = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
+    id<MTLComputePipelineState> pipe = f ? archive_compute_pipeline(f, &err) : nil;
     @synchronized(cache) { stat_compile_ms += now_ms() - t0; }
     __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
     if (!pipe) {
@@ -2203,7 +2338,7 @@ static void draw(CmdRec *r, bool indexed) {
     if (!pobj) {
         if (sync_shaders()) {
             NSError *err;
-            pobj = TIMED_COMPILE([dev newRenderPipelineStateWithDescriptor:pd error:&err]);
+            pobj = TIMED_COMPILE(archive_render_pipeline(pd, &err));
             if (!pobj) {
                 static int n;
                 if (n++ < 10) LOG("[metal] pipeline failed: %s\n", err.localizedDescription.UTF8String);
@@ -2214,12 +2349,16 @@ static void draw(CmdRec *r, bool indexed) {
             cache[pk] = pending;
             NSString *k = [pk copy];
             double t0 = now_ms();
-            [dev newRenderPipelineStateWithDescriptor:pd completionHandler:^(id<MTLRenderPipelineState> ps, NSError *e) {
+            static dispatch_queue_t pq;  // (off the render thread; through the binary archive)
+            if (!pq) pq = dispatch_queue_create("larecomp.pipelines", DISPATCH_QUEUE_CONCURRENT);
+            dispatch_async(pq, ^{
+                NSError *e = nil;
+                id<MTLRenderPipelineState> ps = archive_render_pipeline(pd, &e);
                 if (!ps) { static int n; if (n++ < 10) LOG("[metal] pipeline failed: %s\n", e.localizedDescription.UTF8String); }
                 @synchronized(ready_pipes) { ready_pipes[k] = ps ? (id)ps : (id)[NSNull null]; }
                 @synchronized(cache) { stat_compile_ms += now_ms() - t0; }
                 __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
-            }];
+            });
             stat_skipped++;
             return;
         }
@@ -3143,7 +3282,12 @@ bool renderer_prepare_begin(void) {
 }
 
 int renderer_prepare_pending(void) { return g_prep_pending; }
-void renderer_prepare_end(void) {}  // (phase 2: keep the built pipelines in a binary archive)
+void renderer_prepare_end(void) {  // (the binary archive: saved now, off this thread - a PLAY waiting on the
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ archive_save(false); });  // preparation doesn't wait for it)
+    LOG("[metal] shader archive: %d pipelines loaded from it, %d added; ready after %.0f ms; library compiles %.0f ms, "
+        "pipeline builds %.0f ms (summed over threads)\n", (int)g_archive_hits, (int)g_archive_adds, g_archive_open_us / 1e3,
+        g_lib_us / 1e3, g_pipe_us / 1e3);
+}
 
 static void prep_run(void (^job)(void)) {
     dispatch_semaphore_wait(g_prep_slots, DISPATCH_TIME_FOREVER);
@@ -3199,7 +3343,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         NSString *body = pipeline_key(pd, pr);
         if (prep_find_pipe(body)) return;
         NSError *err = nil;
-        id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        id<MTLRenderPipelineState> ps = archive_render_pipeline(pd, &err);
         if (!ps) { static int n; if (n++ < 10) LOG("[shader] prepared pipeline failed: %s\n", err.localizedDescription.UTF8String); return; }
         pthread_mutex_lock(&g_prep_lock);
         g_prep_pipes[body] = ps;
