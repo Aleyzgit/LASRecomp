@@ -728,7 +728,108 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
 }
 
+// LARECOMP_LOG_SKIPS=1: the skipped draws and dispatches of each stats interval by reason, and the top offenders
+// (shader code addresses and content hashes, as in "[shader] slow build" / shader_variants.txt, and how long they
+// have been skipped without a break). "building" for tens of seconds is a build that never finishes.
+enum { SK_NO_PROGRAM, SK_NO_STAGES, SK_PROG_BUILDING, SK_PROG_FAILED, SK_PIPE_BUILDING, SK_PIPE_FAILED, SK_CS_BUILDING,
+       SK_CS_FAILED, SK_TOPOLOGY, SK_DEBUG_SKIP, SK_HIDDEN, SK_N };
+static const char *const skip_names[SK_N] = {
+    "no program", "program missing a stage", "program building", "program failed", "pipeline building", "pipeline failed",
+    "compute building", "compute failed", "topology", "debug skip list", "hidden on purpose"};
+static int log_skips = -1;  // (-1: not read yet: the first skip reads it)
+static uint64_t skip_n[SK_N];
+#define SKIP_TOP 32
+static struct { int why; uint64_t a, b, ha, hb, n, first_ns; } skip_top[SKIP_TOP];
+static int skip_ntop;
+static void skip_note(int why, bool compute) {
+    if (log_skips < 0) log_skips = getenv("LARECOMP_LOG_SKIPS") && atoi(getenv("LARECOMP_LOG_SKIPS")) != 0;
+    if (!log_skips) return;
+    skip_n[why]++;
+    const NvnProgram *p = st.program;
+    uint64_t a = p ? p->stages[compute ? 5 : 0].code_addr : 0, b = p && !compute ? p->stages[1].code_addr : 0;
+    int j = 0;
+    while (j < skip_ntop && !(skip_top[j].why == why && skip_top[j].a == a && skip_top[j].b == b)) j++;
+    if (j == skip_ntop) {
+        if (skip_ntop < SKIP_TOP) skip_ntop++;
+        else {  // (full: the entry skipped least this interval goes)
+            j = 0;
+            for (int i = 1; i < SKIP_TOP; i++) if (skip_top[i].n < skip_top[j].n) j = i;
+        }
+        skip_top[j].why = why; skip_top[j].a = a; skip_top[j].b = b; skip_top[j].n = 0;
+        skip_top[j].ha = p ? shader_stage_hash(&p->stages[compute ? 5 : 0]) : 0;
+        skip_top[j].hb = p && !compute ? shader_stage_hash(&p->stages[1]) : 0;
+        skip_top[j].first_ns = SDL_GetTicksNS();
+    }
+    skip_top[j].n++;
+}
+#define SKIP(why) do { stat_skipped++; if (log_skips) skip_note(why, false); } while (0)
+#define SKIP_CS(why) do { stat_skipped++; if (log_skips) skip_note(why, true); } while (0)
+static void skip_log(void) {
+    if (log_skips <= 0) return;
+    uint64_t total = 0;
+    for (int i = 0; i < SK_N; i++) total += skip_n[i];
+    if (total) {
+        LOG("[skips] %llu:", (unsigned long long)total);
+        for (int i = 0; i < SK_N; i++) if (skip_n[i]) LOG(" %s %llu", skip_names[i], (unsigned long long)skip_n[i]);
+        uint64_t now = SDL_GetTicksNS();
+        bool shown[SKIP_TOP] = {0};
+        for (int t = 0; t < 4; t++) {  // the top offenders of this interval
+            int best = -1;
+            for (int i = 0; i < skip_ntop; i++)
+                if (skip_top[i].n && !shown[i] && (best < 0 || skip_top[i].n > skip_top[best].n)) best = i;
+            if (best < 0) break;
+            shown[best] = true;
+            bool cs = skip_top[best].why == SK_CS_BUILDING || skip_top[best].why == SK_CS_FAILED;
+            LOG("%s %s: %s %llx (%016llx)", t ? "," : " | top", skip_names[skip_top[best].why], cs ? "cs" : "vs",
+                (unsigned long long)skip_top[best].a, (unsigned long long)skip_top[best].ha);
+            if (!cs) LOG(" fs %llx (%016llx)", (unsigned long long)skip_top[best].b, (unsigned long long)skip_top[best].hb);
+            LOG(" x%llu, for %llu s", (unsigned long long)skip_top[best].n,
+                (unsigned long long)((now - skip_top[best].first_ns) / 1000000000ull));
+        }
+        LOG("\n");
+    }
+    memset(skip_n, 0, sizeof skip_n);
+    int k = 0;  // (an offender not skipped this interval is dropped: its "for N s" starts again if it comes back)
+    for (int i = 0; i < skip_ntop; i++)
+        if (skip_top[i].n) { skip_top[k] = skip_top[i]; skip_top[k++].n = 0; }
+    skip_ntop = k;
+}
+
+// Builds in flight (programs, graphics / compute pipelines): one still running after 10 s is logged once, with its
+// shaders' code addresses. "[shader] slow build" only comes when a build finishes, so one that never does (its draws
+// or dispatches skipped for good, compile 0 in the stats) left no trace.
+#define BUILDS_MAX 64
+static pthread_mutex_t builds_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct { const char *what; uint64_t c0, c1, t0; bool logged; } builds[BUILDS_MAX];
+static int build_begin(const char *what, uint64_t c0, uint64_t c1) {
+    pthread_mutex_lock(&builds_lock);
+    int s = 0;
+    while (s < BUILDS_MAX && builds[s].what) s++;
+    if (s < BUILDS_MAX) { builds[s].what = what; builds[s].c0 = c0; builds[s].c1 = c1; builds[s].t0 = SDL_GetTicksNS(); builds[s].logged = false; }
+    pthread_mutex_unlock(&builds_lock);
+    return s < BUILDS_MAX ? s : -1;
+}
+static void build_end(int s) {
+    if (s < 0) return;
+    pthread_mutex_lock(&builds_lock);
+    builds[s].what = NULL;
+    pthread_mutex_unlock(&builds_lock);
+}
+static void builds_check(void) {
+    uint64_t now = SDL_GetTicksNS();
+    pthread_mutex_lock(&builds_lock);
+    for (int s = 0; s < BUILDS_MAX; s++) {
+        if (!builds[s].what || builds[s].logged || now - builds[s].t0 < 10000000000ull) continue;
+        builds[s].logged = true;
+        LOG("[shader] still building after %llu s: %s %llx %llx\n", (unsigned long long)((now - builds[s].t0) / 1000000000ull),
+            builds[s].what, (unsigned long long)builds[s].c0, (unsigned long long)builds[s].c1);
+    }
+    pthread_mutex_unlock(&builds_lock);
+}
+
 const char *renderer_stats(void) {
+    skip_log();
+    builds_check();
     static int dumps;
     if (dumps++ < 3) {
         LOG("[vk] command counts:");
@@ -1283,10 +1384,11 @@ static bool spirv_strip_early_tests(uint32_t *w, size_t *nwords) {
 static void compile_program(void *arg) {
     Prog *p = arg;
     uint64_t t0 = SDL_GetTicksNS();
+    int bs = build_begin("modules vs/fs", p->code[0] ? p->code[0] : p->prep_vh, p->code[1] ? p->code[1] : p->prep_fh);
     size_t nv = 0, nf = 0;
     uint32_t *sv = vk_glsl_to_spirv(p->vi->msl, STAGE_VERTEX, "vs", &nv);
     uint32_t *sf = sv ? vk_glsl_to_spirv(p->fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
-    if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
+    if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); build_end(bs); return; }
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
@@ -1296,7 +1398,9 @@ static void compile_program(void *arg) {
     free(sf);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_compiles, 1);
+    if (!p->vs || !p->fs) LOG("[shader] vs/fs %llx %llx: shader module creation failed\n", (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
+    build_end(bs);
     slow_build(t0, "modules vs/fs", p->code[0], p->code[1]);
 }
 
@@ -1747,7 +1851,10 @@ static void build_pipeline(void *arg) {
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout};
     uint64_t t0 = SDL_GetTicksNS();
+    int bs = build_begin("pipeline vs/fs", k->prog->code[0] ? k->prog->code[0] : k->prog->prep_vh,
+                         k->prog->code[1] ? k->prog->code[1] : k->prog->prep_fh);
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
+    build_end(bs);
     if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
@@ -3201,12 +3308,19 @@ typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; uin
 static void build_compute(void *arg) {
     CsProg *cp = arg;
     uint64_t t0 = SDL_GetTicksNS();
+    int bs = build_begin("pipeline cs", cp->code, 0);
     size_t n = 0;
     uint32_t *spv = vk_glsl_to_spirv(cp->si->msl, STAGE_COMPUTE, "cs", &n);
-    if (!spv) { atomic_store(&cp->p.state, 2); return; }
+    if (!spv) { atomic_store(&cp->p.state, 2); build_end(bs); return; }
     cp->p.nbinds = vk_reflect(spv, n, cp->p.binds, MAX_BIND);
     VkShaderModule m = vk_module(spv, n);
     free(spv);
+    if (!m) {
+        LOG("[compute] cs %llx: shader module creation failed\n", (unsigned long long)cp->code);
+        atomic_store(&cp->p.state, 2);
+        build_end(bs);
+        return;
+    }
     cp->p.layout = make_layout(&cp->p, 1, VK_SHADER_STAGE_COMPUTE_BIT, 0);
     VkSpecializationMapEntry me[3] = {{0, 0, 4}, {1, 4, 4}, {2, 8, 4}};
     VkSpecializationInfo spec = {3, me, 12, cp->local};
@@ -3218,7 +3332,8 @@ static void build_compute(void *arg) {
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
     atomic_fetch_add(&stat_compiles, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
-    if (r != VK_SUCCESS) LOG("[compute] pipeline failed: %d\n", r);
+    build_end(bs);
+    if (r != VK_SUCCESS) LOG("[compute] cs %llx: pipeline failed: %d\n", (unsigned long long)cp->code, r);
     slow_build(t0, "pipeline cs", cp->code, 0);
 }
 
@@ -3271,6 +3386,7 @@ static CsProg *compute_program(NvnProgram *np) {
     }
     shader_first_visit("compute", ch, 0, cs_content_key(ch, local));
     cp = calloc(1, sizeof *cp);
+    cp->code = ss->code_addr;  // (for the build logs)
     if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
     memcpy(cp->local, local, sizeof local);
     if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, ss->code_addr))
@@ -3340,6 +3456,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         uint64_t ck = cs_content_key(r->vs, r->local);
         if (PREP_GET(prep_cs, ck)) return true;
         CsProg *cp = calloc(1, sizeof *cp);
+        cp->code = r->vs;  // (prepared: its content hash, for the build logs)
         memcpy(cp->local, r->local, sizeof cp->local);
         if (!translate_compute(cp, vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000, 0)) return false;
         PREP_PUT(prep_cs, ck, cp);
@@ -3384,11 +3501,11 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
-    if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    if (!cp || atomic_load(&cp->p.state) != 1) { SKIP_CS(!cp ? SK_NO_STAGES : atomic_load(&cp->p.state) == 2 ? SK_CS_FAILED : SK_CS_BUILDING); return; }
     {   // LARECOMP_SKIP_CS=<code address hex> (debug): skip that compute shader's dispatches, to see what it does
         static uint64_t skip = ~0ull;
         if (skip == ~0ull) { const char *e = getenv("LARECOMP_SKIP_CS"); skip = e ? strtoull(e, NULL, 16) : 0; }
-        if (skip && st.program->stages[5].code_addr == skip) { stat_skipped++; return; }
+        if (skip && st.program->stages[5].code_addr == skip) { SKIP_CS(SK_DEBUG_SKIP); return; }
     }
     if (cp->si->uses_gmem && getenv("LARECOMP_LOG_CS_SBUF")) {  // (debug) the storage buffers bound to gmem dispatches
         static uint64_t seen_cs[16];
@@ -3577,7 +3694,7 @@ static void draw(CmdRec *r, bool indexed) {
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
-    if (!st.program) { stat_skipped++; return; }
+    if (!st.program) { SKIP(SK_NO_PROGRAM); return; }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
@@ -3585,7 +3702,7 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
     Prog *pr = get_program(st.program, &vkey, &fkey);
-    if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; return; }
+    if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
     g_mirror_w = 0;
     {   // mirror mode (runtime/hle/mirror.c; as renderer.m): the scene's composite into the window image is mirrored
         extern bool mirror_draw(bool composite);
@@ -3600,7 +3717,7 @@ static void draw_(CmdRec *r, bool indexed) {
         if (mirror_draw(composite)) {
             vkey.flip_x = fkey.flip_x = true;
             pr = get_program(st.program, &vkey, &fkey);
-            if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; return; }
+            if (!pr || atomic_load(&pr->state) != 1) { SKIP(!pr ? SK_NO_STAGES : atomic_load(&pr->state) == 2 ? SK_PROG_FAILED : SK_PROG_BUILDING); return; }
             g_mirror_w = (float)st.rt.color[0]->width;
         }
     }
@@ -3620,9 +3737,9 @@ static void draw_(CmdRec *r, bool indexed) {
                 while (*p == ',') p++;
             }
         }
-        for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
+        for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { SKIP(SK_DEBUG_SKIP); return; }
         extern bool pot_level_active(void);
-        if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { stat_skipped++; return; }
+        if (last_hash == 0xa2177dbb72197bd9ull && pot_level_active()) { SKIP(SK_HIDDEN); return; }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
         g_cur_fs_hash = last_hash;
         extern void widescreen_backdrop_seen(uint64_t hash);
@@ -3646,7 +3763,7 @@ static void draw_(CmdRec *r, bool indexed) {
     VkPrimitiveTopology topo;
     uint8_t cls;
     bool native = topology(mode, &topo, &cls);
-    if (!native && mode != 6 && mode != 7 && mode != 9) { stat_skipped++; return; }
+    if (!native && mode != 6 && mode != 7 && mode != 9) { SKIP(SK_TOPOLOGY); return; }
 
     uint64_t prof_tk_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_pre += prof_tk_ - prof_tp_;
@@ -3685,7 +3802,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
     }
-    if (atomic_load(&pp->state) != 1) { stat_skipped++; return; }
+    if (atomic_load(&pp->state) != 1) { SKIP(atomic_load(&pp->state) == 2 ? SK_PIPE_FAILED : SK_PIPE_BUILDING); return; }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
@@ -3766,7 +3883,7 @@ static void draw_(CmdRec *r, bool indexed) {
             for (int i = 0; i < pr->fi->ntex; i++) {
                 NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
                 const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-                if (b && b->tp > 0 && texpatch_is_item_cursor(b->tp - 1)) { stat_skipped++; return; }
+                if (b && b->tp > 0 && texpatch_is_item_cursor(b->tp - 1)) { SKIP(SK_HIDDEN); return; }
             }
     }
     float tint[8] = {0};
