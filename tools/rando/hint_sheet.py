@@ -8,13 +8,15 @@ Why the first bottle, not the second: LAS's fishing pond fix owns the second one
 into "take Bottle[1] away", and Fisherman.bfevfl adds / removes it around every fishing game), so a Hint Sheet there
 would vanish at the pond. The one real bottle left in the pool is always the second (las_headless.py).
 
-Generation (steps(), called right after the seed's playthrough check): the playthrough spheres (LAS's logic, the
-spoiler walkthrough's order) give every item in the order it can be found. A step is an item whose acquisition unlocks
-more: without that copy of it the playthrough reaches fewer logic nodes (checks, regions, the Wind Fish). Copies of
-one item that only matter together (e.g. any one of several) make the first copy the step. Each step gets its own
-message (System.msbt, every language: our own English text) and a Common.bfevfl entry showing it; hints.tsv lists them
-in order for the runtime, which shows the first step whose check the player hasn't collected yet (the check's event
-flag from tracker.tsv; for items the save shows directly, owning it counts too), or the closing message once all are.
+Generation (steps(), called right after the seed's playthrough check): a step is an item copy without which the
+playthrough (LAS's logic) reaches fewer real checks or not the Wind Fish. Order: by the sphere where the checks it
+opens become reachable (with whatever else they need), then by how many it opens, then playthrough order; steps for
+the Wind Fish alone last. Seashells and Golden Leaves are steps only on demand: the runtime shows them when the next
+real step's place can't be reached without them (hints.tsv `needs`: how many) and the player has fewer. Each step
+gets its own message (System.msbt, every language: our own English text) and a Common.bfevfl entry showing it;
+hints.tsv lists them for the runtime, which shows the first step whose check the player hasn't collected yet (the
+check's event flag from tracker.tsv; for items the save shows directly, owning it counts too), or the closing message
+once all are.
 
     steps(logic_defs, placements, settings, check, sph, out_dir) -> number of steps (writes hint_steps.json)
     apply(out_dir, romfs, settings) -> summary (flows, messages, item row, hints.tsv)
@@ -44,6 +46,9 @@ JUNK = re.compile(r'^((pot-|dig-)?rupee-\d+|pot-heart|pot-arrows|pot-bombs|pot-p
                   r'bombs?-\d+|powder-\d+|heart|fairy)$')
 
 
+GATED = ('seashell', 'golden-leaf')  # (steps shown only when the next real step needs them: steps())
+
+
 def step_entry(i):
     return f'HintSheet{i:02d}'
 
@@ -54,7 +59,7 @@ def base_item(item):
 
 # ------------------------------------------------------------------ generation: which items are steps
 def _reach_fn(logic_defs, settings, check):
-    """-> reach(placements): how much of the seed a playthrough gets to (real checks + the goal). The final state of
+    """-> reach(placements): (the real checks a playthrough gets to, how much of the goal). The final state of
     playthrough.spheres (the same nodes, enemies and item counts), found as one fixpoint driven by what each logic node
     reads: a node is checked again only when a token of its conditions changes (much faster than sphere by sphere)."""
     import playthrough
@@ -73,8 +78,10 @@ def _reach_fn(logic_defs, settings, check):
             readers.setdefault(t, []).append(k)
     keys = list(logic_defs)
 
-    def reach(pl):
+    def reach(pl, extra=None):
         access = {k: 1 for k, v in settings.items() if v is True}
+        for k, v in (extra or {}).items():
+            access[k] = access.get(k, 0) + v
         seen = set()
         todo, queued = list(reversed(keys)), set(keys)
 
@@ -119,57 +126,66 @@ def _reach_fn(logic_defs, settings, check):
                 b = base_item(item)
                 if b != item:
                     give(b)
-        return (sum(1 for k in seen if logic_defs[k].get('type') == 'item' and k not in junk) +
+        return (frozenset(k for k in seen if logic_defs[k].get('type') == 'item' and k not in junk),
                 sum(1 for g in goal if access.get(g)))
     return reach
 
 
 def steps(logic_defs, placements, settings, check, sph, out_dir):
-    """The progression steps of a seed in playthrough order -> hint_steps.json. `check(key, access)` and the starting
-    access (the seed's boolean settings) as in las_headless's playthrough check; `sph` = its spheres."""
+    """The progression steps of a seed in hint order -> hint_steps.json. `check(key, access)` and the starting access
+    (the seed's boolean settings) as in las_headless's playthrough check; `sph` = its spheres.
+
+    A step is an item copy without which the playthrough reaches fewer real checks (or the goal). Its effect = the
+    checks lost without it. Order (user 2026-10-18: the sheet points at what opens checks now): steps that open checks
+    first, by the sphere of the first check they open (ties: more checks first, then playthrough order); steps that
+    only matter for the Wind Fish (the Ballad, instruments) last, in playthrough order."""
     import time
     t0 = time.time()
     runs = [0]
     _reach = _reach_fn(logic_defs, settings, check)
-
-    def reach(pl):  # (counted: the generation log says what the steps cost)
-        runs[0] += 1
-        return _reach(pl)
+    memo = {}
 
     def without(locs):
-        pl = dict(placements)
-        for loc in locs:
-            pl[loc] = None
-        return reach(pl)
-    full = reach(placements)
+        key = tuple(sorted(locs))
+        if key not in memo:
+            pl = dict(placements)
+            for loc in locs:
+                pl[loc] = None
+            runs[0] += 1
+            memo[key] = _reach(pl)
+        return memo[key]
+    full = without(())
     if os.environ.get('LARECOMP_HINT_VERIFY'):  # (test: the fast fixpoint against the playthrough itself)
         import playthrough
         junk = set(settings.get('excluded-locations', ())) | set(settings.get('absent-locations', ()))
         acc = {k: 1 for k, v in settings.items() if v is True}
         _, acc, seen = playthrough.spheres(logic_defs, placements, acc, check)
-        slow = (sum(1 for k in seen if logic_defs[k].get('type') == 'item' and k not in junk) +
+        slow = (sum(1 for k in seen if logic_defs[k].get('type') == 'item' and k not in junk),
                 sum(1 for g in set(playthrough.INSTRUMENTS) | {'kill-nightmare'} if acc.get(g)))
-        print('hint sheet reach check:', full, 'fast vs', slow, 'playthrough', flush=True)
+        print('hint sheet reach check:', (len(full[0]), full[1]), 'fast vs', slow, 'playthrough', flush=True)
+    sphere_of = {loc: i for i, s in enumerate(sph) for loc, _ in s}
     order = [(loc, item) for s in sph for loc, item in s if not loc.startswith('starting-')]
     cand = [(loc, item) for loc, item in order if not JUNK.match(base_item(item))]
     groups = {}
     for loc, item in cand:
         groups.setdefault(base_item(item), []).append(loc)
-    # (an item no logic condition reads can't matter: no playthrough needed)
+    # (an item no logic condition reads can't matter: no playthrough needed - but the instruments open the egg)
+    import playthrough
+    goal_items = set(playthrough.INSTRUMENTS)
     read = set()
     word = re.compile(r'[A-Za-z0-9][A-Za-z0-9\-\[\]]*')
     for node in logic_defs.values():
         for ck, cv in node.items():
             if ck.startswith('condition-') and isinstance(cv, str):
                 read.update(re.sub(r'\[\d+\]$', '', w) for w in word.findall(cv))
-    keep = set()
+    effect = {}  # step location -> reach without it (or without it and the copies after it: copies that count together)
     for b, locs in groups.items():
-        if b not in read and not any(i in read for l in locs for i in [placements.get(l)]):
+        if b not in read and b not in goal_items and not any(i in read for l in locs for i in [placements.get(l)]):
             continue
         if without(locs) == full:  # (no copy of it matters: not progression)
             continue
         if len(locs) == 1:
-            keep.add(locs[0])
+            effect[locs[0]] = without(locs)
             continue
         if len(locs) > 12:  # (many copies - seashells, leaves: the first k found are the ones that count)
             lo, hi = 1, len(locs)
@@ -179,20 +195,60 @@ def steps(logic_defs, placements, settings, check, sph, out_dir):
                     hi = mid
                 else:
                     lo = mid + 1
-            keep.update(locs[:lo])
+            for i in range(lo):
+                effect[locs[i]] = without(locs[i:])
             continue
-        single = [loc for loc in locs if without([loc]) < full]
-        keep.update(single or locs[:1])  # (only together: the first copy found)
+        single = [loc for loc in locs if without([loc]) != full]
+        for loc in single:
+            effect[loc] = without([loc])
+        if not single:  # (only together: the first copy found)
+            effect[locs[0]] = without(locs)
     count, out = {}, []
-    for loc, item in order:
+    for i, (loc, item) in enumerate(order):
         b = base_item(item)
         count[b] = count.get(b, 0) + 1
-        if loc in keep:
-            out.append({'loc': loc, 'item': b, 'n': count[b], 'region': logic_defs.get(loc, {}).get('spoiler-region', '')})
+        if loc in effect:
+            lost = full[0] - effect[loc][0]
+            out.append({'loc': loc, 'item': b, 'n': count[b], 'region': logic_defs.get(loc, {}).get('spoiler-region', ''),
+                        'opens': len(lost), 'first': min((sphere_of.get(c, 999) for c in lost), default=None),
+                        'order': i, 'opens-example': sorted(lost, key=lambda c: sphere_of.get(c, 999))[:3]})
+    # Seashells / Golden Leaves (user 2026-10-18): shown only when the next real step is behind them (a Seashell
+    # Mansion reward, what Richard's leaves open) and the player still lacks some - the runtime decides from `needs`.
+    # They go last, in playthrough order; every other step lists the gated groups it can't be reached without.
+    for g in GATED:
+        locs = groups.get(g, [])
+        if not any(loc in effect for loc in locs):
+            continue
+        # (directly: with every other item already in hand, the step's place still can't be reached without them)
+        pl = dict(placements)
+        others = {}
+        for loc, item in order:
+            if base_item(item) != g:
+                pl[loc] = None
+                others[item] = others.get(item, 0) + 1
+                if base_item(item) != item:
+                    others[base_item(item)] = others.get(base_item(item), 0) + 1
+        for loc in locs:
+            pl[loc] = None
+        runs[0] += 1
+        reach_g = _reach(pl, others)[0]
+        for st in out:
+            if st['item'] not in GATED and st['loc'] in full[0] and st['loc'] not in reach_g:
+                lo, hi = 1, len(locs)  # (how many it takes)
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    runs[0] += 1
+                    if st['loc'] in _reach(pl, dict(others, **{g: others.get(g, 0) + mid}))[0]:
+                        hi = mid
+                    else:
+                        lo = mid + 1
+                st.setdefault('needs', []).append(f'{g}:{lo}')
+    out.sort(key=lambda st: (st['item'] in GATED, st['opens'] == 0, st['first'] if st['opens'] else 0,
+                             -st['opens'] if st['opens'] else 0, st['order']))
     with open(os.path.join(out_dir, 'hint_steps.json'), 'w') as f:
         json.dump({'steps': out, 'dungeon-entrances': dict(placements.get('dungeon-entrances') or {})}, f, indent=1)
-    print(f'hint sheet: {len(out)} steps from {len(order)} items, {runs[0]} playthroughs in {time.time() - t0:.1f}s',
-          flush=True)
+    print(f'hint sheet: {len(out)} steps ({sum(1 for st in out if not st["opens"])} for the goal only) from '
+          f'{len(order)} items, {runs[0]} playthroughs in {time.time() - t0:.1f}s', flush=True)
     return len(out)
 
 
@@ -583,10 +639,10 @@ def apply(out_dir, romfs, settings):
         with open(out, 'wb') as f:
             f.write(m.pack())
         nfiles += 1
-    # hints.tsv (runtime): S <entry> <location> <item> <copy n>, in order; D <entry>
+    # hints.tsv (runtime): S <entry> <location> <item> <copy n> <gated groups it needs, or ->, in order; D <entry>
     with open(os.path.join(out_dir, 'hints.tsv'), 'w') as f:
         for n, s in zip(names, steps_):
-            f.write(f"S\t{n}\t{s['loc']}\t{s['item']}\t{s['n']}\n")
+            f.write(f"S\t{n}\t{s['loc']}\t{s['item']}\t{s['n']}\t{','.join(s.get('needs', ())) or '-'}\n")
         f.write(f'D\t{DONE}\n')
     with open(os.path.join(out_dir, 'hints.txt'), 'w') as f:  # (readable: what each message says)
         for n, t in texts.items():

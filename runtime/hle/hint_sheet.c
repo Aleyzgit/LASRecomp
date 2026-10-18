@@ -6,8 +6,8 @@
 //
 // The use is caught like the Escape Bottle's, in the game's "may Link use this item now?" predicate for the slot
 // (tools/patches.py BOTTLE1_USE_SITE: only while Link is free to act), and never swings or catches anything.
-// The hints: rando/<seed>/hints.tsv lists the seed's progression steps in playthrough order (S <Common.bfevfl entry>
-// <location> <item> <copy n>) and the closing entry (D <entry>). The first step not yet collected is shown: a step is
+// The hints: rando/<seed>/hints.tsv lists the seed's progression steps in hint order (S <Common.bfevfl entry>
+// <location> <item> <copy n> <Seashells / Golden Leaves it needs>) and the closing entry (D <entry>). The first step not yet collected is shown: a step is
 // collected once its check's event flag is set (rando/<seed>/tracker.tsv), or once the save shows the item owned (at
 // least n copies; items the save shows directly). A step whose check has no known flag and whose item the save can't
 // show is passed over (never stuck on a hint the player already followed). All collected: the closing message.
@@ -64,7 +64,7 @@ bool hint_sheet_on(void) {
 }
 
 // ---- the seed's steps
-typedef struct { char entry[24], loc[64], item[40]; int n, flag; } Step;
+typedef struct { char entry[24], loc[64], item[40], needs[48]; int n, flag; } Step;
 static Step *g_steps;
 static int g_nsteps, g_loaded;
 static char g_done[24];
@@ -100,6 +100,7 @@ static void load(void) {
             strlcpy(st->loc, c[2], sizeof st->loc);
             strlcpy(st->item, c[3], sizeof st->item);
             st->n = atoi(c[4]);
+            if (k >= 6 && strcmp(c[5], "-")) strlcpy(st->needs, c[5], sizeof st->needs);
             st->flag = -1;
         } else if (k >= 2 && c[0][0] == 'D') strlcpy(g_done, c[1], sizeof g_done);
     }
@@ -196,17 +197,32 @@ static int owned(const char *item) {
     return -1;
 }
 
-// The entry to show now: the first step not collected, else the closing one
+// Seashells and Golden Leaves are shown only when the next real step needs them (hint_sheet.py GATED, `needs`)
+static bool gated(const Step *s) { return !strcmp(s->item, "seashell") || !strcmp(s->item, "golden-leaf"); }
+
+static bool collected(const Step *s) {
+    if (s->flag >= 0 && flag_set(s->flag)) return true;
+    int have = owned(s->item);
+    if (have >= s->n) return true;  // (owned, wherever it came from)
+    return s->flag < 0 && have < 0;  // (nothing tells: passed over)
+}
+
+// The entry to show now: the first real step not collected - or, when it can't be reached without Seashells / Golden
+// Leaves the player still lacks, the first of those missing - else the closing one
 static const char *next_entry(int *index) {
     if (!g_loaded) load();
     for (int i = 0; i < g_nsteps; i++) {
         Step *s = &g_steps[i];
-        int have = owned(s->item);
-        if (s->flag >= 0 && flag_set(s->flag)) continue;
-        if (have >= s->n) continue;  // (owned, wherever it came from)
-        if (s->flag < 0 && have < 0) continue;  // (nothing tells: passed over)
+        if (gated(s) || collected(s)) continue;
         *index = i;
-        return s->entry;
+        for (int j = 0; j < g_nsteps; j++) {  // (needs: "<item>:<count>,...")
+            Step *g = &g_steps[j];
+            const char *nd = gated(g) ? strstr(s->needs, g->item) : NULL;
+            if (!nd || nd[strlen(g->item)] != ':' || owned(g->item) >= atoi(nd + strlen(g->item) + 1) || collected(g)) continue;
+            *index = j;
+            break;
+        }
+        return g_steps[*index].entry;
     }
     *index = -1;
     return g_done[0] ? g_done : NULL;
