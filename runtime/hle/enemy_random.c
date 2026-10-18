@@ -7,10 +7,11 @@
 // rooms, one fly-bomb / blocking group per room, Stretchy Ghost / orb colours, the enemy table's parameters.
 //  - file loads (runtime/services/fs.c -> enemy_random_filter): a read of a listed room file from its first byte rolls
 //    its actor records before the bytes reach the game (type, parameters, rotation, scale, enemy flag);
-//  - spawns (rt_enemy_spawn): the game keeps recently loaded files, so a level entered again makes its actors without
-//    a new read - each visit to a level rolls a room again when its first actor is made (type and parameters).
+//  - spawns (rt_enemy_spawn): the game keeps recently loaded files, so a level entered again, an overworld area
+//    streamed back in or an enemy that comes back makes its actors without a new read - each actor made again gets
+//    a new pick of its own (type and parameters).
 // A dungeon, house or cave makes all its actors as Link enters it, the overworld as its areas load: enemies change
-// with each visit there, not between rooms of one visit (a killed enemy that comes back keeps that visit's type).
+// with each visit there and whenever the game makes an enemy again.
 // LARECOMP_ENEMY_RANDOM=0 turns it off (the seed's own roll), LARECOMP_ENEMY_RANDOM_SEED=<n> makes the rolls repeatable.
 #include <pthread.h>
 #include <stdint.h>
@@ -36,6 +37,7 @@ typedef struct {
     uint32_t off, empty;
     uint16_t seed_type, vtype;
     uint8_t cls, ve, vp_ok;
+    uint8_t fresh;     // (rolled by a file load, not spawned since: its next spawn takes that roll)
     float vrot, vscale[3];
     Param vp[8];
     uint64_t key;      // (the record's first 8 bytes)
@@ -47,7 +49,6 @@ typedef struct {
     int restr[16], nrestr, first, n;
     uint8_t rolled;
     char *host;           // the seed's file
-    uint64_t epoch;       // (the level visit its last roll is for)
 } RFile;
 
 static int g_pick[NCLS][MAXPICK], g_npick[NCLS];
@@ -82,16 +83,6 @@ static uint64_t rnd(void) {  // splitmix64
     return z ^ (z >> 31);
 }
 static int rnd_below(int n) { return n > 0 ? (int)(rnd() % (uint64_t)n) : 0; }
-
-// (a visit to a level: the level name changing starts the next one - see rt_enemy_spawn)
-static uint64_t g_visit = 1;
-static char g_visit_level[40];
-static uint64_t visit(void) {
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
-    const char *lv = ps ? (const char *)(uintptr_t)ps : "";
-    if (strncmp(lv, g_visit_level, sizeof g_visit_level - 1)) strlcpy(g_visit_level, lv, sizeof g_visit_level), g_visit++;
-    return g_visit;
-}
 
 static bool same_seed(void) {  // (the seed the table was loaded for is still the running one)
     const char *dir = rando_seed_dir();
@@ -252,68 +243,112 @@ static void put_params(uint8_t *rec, const Param *p, uint32_t empty) {
     }
 }
 
-// One load of a room file: roll its actors (enemies.py shuffleEnemyActors, types part) into their records.
-static void roll(RFile *rf, int fd, const char *why) {
-    int restr[96], nr = 0;
+// A pick for actor `s` among its terrain class's enemies that `restr` allows (enemies.py: the vanilla type comes off
+// the room's restrictions first, list.remove), then a fly-bomb / blocking pick restricts its whole group.
+static int pick_for(const Slot *s, int *restr, int *nr) {
+    for (int i = 0; i < *nr; i++)
+        if (restr[i] == s->vtype) { memmove(&restr[i], &restr[i + 1], sizeof(int) * (size_t)(*nr - i - 1)); (*nr)--; break; }
+    const int *pk = g_pick[s->cls];
+    int np = g_npick[s->cls], pick = -1, tries = 0;
+    do pick = np ? pk[rnd_below(np)] : -1;
+    while (in(restr, *nr, pick) && ++tries < 256);
+    if (pick < 0 || in(restr, *nr, pick)) pick = s->seed_type;  // (nothing fits: the seed's own)
+    if (in(g_fly, g_nfly, pick)) { for (int i = 0; i < g_nfly && *nr < 96; i++) restr[(*nr)++] = g_fly[i]; }
+    else if (in(g_block, g_nblock, pick)) { for (int i = 0; i < g_nblock && *nr < 96; i++) restr[(*nr)++] = g_block[i]; }
+    return pick;
+}
+
+// Actor `s`'s record = the seed's (`seed`) made into enemy `pick`.
+static void apply_pick(Slot *s, const uint8_t *seed, int pick) {
+    memcpy(s->rec, seed, REC);
+    int type = pick;
+    if (pick == 0x4A) type = 0x4A + rnd_below(3);       // Stretchy Ghosts: a colour
+    else if (pick == 0x4D) type = 0x4D + rnd_below(3);  // Color Dungeon orbs: a colour
+    uint8_t *r = s->rec;
+    if (pick == s->vtype) {  // (enemies.py leaves a vanilla pick untouched)
+        if (s->seed_type != s->vtype) {  // the seed changed it: back to the vanilla actor
+            uint16_t t = (uint16_t)s->vtype;
+            memcpy(r + 0xC, &t, 2);
+            const Enemy *en = enemy(s->vtype);
+            if (s->vp_ok) put_params(r, s->vp, s->empty);
+            else if (en) put_params(r, en->p, s->empty);
+            memcpy(r + 0x24, &s->vrot, 4);
+            memcpy(r + 0x2C, s->vscale, 12);
+            r[0x84] = s->ve;
+        }
+    } else if (type != s->seed_type) {  // (the seed's own pick: its record already is that enemy)
+        const Enemy *en = enemy(pick);
+        uint16_t t = (uint16_t)type;
+        memcpy(r + 0xC, &t, 2);
+        static const Param none[8];
+        put_params(r, en ? en->p : none, s->empty);
+        float zero = 0, one[3] = {1, 1, 1};
+        memcpy(r + 0x24, &zero, 4);
+        memcpy(r + 0x2C, one, 12);
+        r[0x84] = en ? en->e : 1;
+    }
+    if (s->cls != CLS_HOLE) {  // (spawns may change the type but not these: facing the screen, size 1, as enemies.py's)
+        float zero = 0, one[3] = {1, 1, 1};
+        memcpy(r + 0x24, &zero, 4);
+        memcpy(r + 0x2C, one, 12);
+    }
+    if (g_sizes) {  // (randomize-enemy-sizes)
+        float sc = 0.5f + (float)(rnd() >> 11) * (1.0f / 9007199254740992.0f), v[3] = {sc, sc, sc};
+        memcpy(r + 0x2C, v, 12);
+    }
+}
+
+static int restr_start(const RFile *rf, int *restr) {
+    int nr = 0;
     restr[nr++] = -1;  // (enemies.py: -1 starts the pick loop)
     for (int i = 0; i < rf->nrestr && nr < 96; i++) restr[nr++] = rf->restr[i];
+    return nr;
+}
+static const char *base(const RFile *rf) { return strrchr(rf->path, '/') ? strrchr(rf->path, '/') + 1 : rf->path; }
+static int rec_type(const Slot *s) { uint16_t t; memcpy(&t, s->rec + 0xC, 2); return t; }
+
+// One load of a room file: roll its actors (enemies.py shuffleEnemyActors, types part) into their records.
+static void roll(RFile *rf, int fd, const char *why) {
+    int restr[96], nr = restr_start(rf, restr);
     char log[1024];
     int ll = snprintf(log, sizeof log, "[enemyrand] f%llu %s %s:", (unsigned long long)renderer_present_count(), why,
-                      strrchr(rf->path, '/') ? strrchr(rf->path, '/') + 1 : rf->path);
+                      base(rf));
     for (int si = 0; si < rf->n; si++) {
         Slot *s = &g_slots[rf->first + si];
         uint8_t seed[REC];
         if (pread(fd, seed, REC, s->off) != REC) return;
-        memcpy(s->rec, seed, REC);
-        for (int i = 0; i < nr; i++)  // (list.remove: the first one)
-            if (restr[i] == s->vtype) { memmove(&restr[i], &restr[i + 1], sizeof(int) * (size_t)(nr - i - 1)); nr--; break; }
-        const int *pk = g_pick[s->cls];
-        int np = g_npick[s->cls], pick = -1, tries = 0;
-        do pick = np ? pk[rnd_below(np)] : -1;
-        while (in(restr, nr, pick) && ++tries < 256);
-        if (pick < 0 || in(restr, nr, pick)) pick = s->seed_type;  // (nothing fits: the seed's own)
-        if (in(g_fly, g_nfly, pick)) { for (int i = 0; i < g_nfly && nr < 96; i++) restr[nr++] = g_fly[i]; }
-        else if (in(g_block, g_nblock, pick)) { for (int i = 0; i < g_nblock && nr < 96; i++) restr[nr++] = g_block[i]; }
-        int type = pick;
-        if (pick == 0x4A) type = 0x4A + rnd_below(3);       // Stretchy Ghosts: a colour
-        else if (pick == 0x4D) type = 0x4D + rnd_below(3);  // Color Dungeon orbs: a colour
-        uint8_t *r = s->rec;
-        if (pick == s->vtype) {  // (enemies.py leaves a vanilla pick untouched)
-            if (s->seed_type != s->vtype) {  // the seed changed it: back to the vanilla actor
-                uint16_t t = (uint16_t)s->vtype;
-                memcpy(r + 0xC, &t, 2);
-                const Enemy *en = enemy(s->vtype);
-                if (s->vp_ok) put_params(r, s->vp, s->empty);
-                else if (en) put_params(r, en->p, s->empty);
-                memcpy(r + 0x24, &s->vrot, 4);
-                memcpy(r + 0x2C, s->vscale, 12);
-                r[0x84] = s->ve;
-            }
-        } else if (type != s->seed_type) {  // (the seed's own pick: its record already is that enemy)
-            const Enemy *en = enemy(pick);
-            uint16_t t = (uint16_t)type;
-            memcpy(r + 0xC, &t, 2);
-            static const Param none[8];
-            put_params(r, en ? en->p : none, s->empty);
-            float zero = 0, one[3] = {1, 1, 1};
-            memcpy(r + 0x24, &zero, 4);
-            memcpy(r + 0x2C, one, 12);
-            r[0x84] = en ? en->e : 1;
-        }
-        if (s->cls != CLS_HOLE) {  // (spawns may change the type but not these: facing the screen, size 1, as enemies.py's)
-            float zero = 0, one[3] = {1, 1, 1};
-            memcpy(r + 0x24, &zero, 4);
-            memcpy(r + 0x2C, one, 12);
-        }
-        if (g_sizes) {  // (randomize-enemy-sizes)
-            float sc = 0.5f + (float)(rnd() >> 11) * (1.0f / 9007199254740992.0f), v[3] = {sc, sc, sc};
-            memcpy(r + 0x2C, v, 12);
-        }
-        uint16_t now;
-        memcpy(&now, r + 0xC, 2);
-        if (ll < (int)sizeof log - 32) ll += snprintf(log + ll, sizeof log - (size_t)ll, " %#x>%#x", s->vtype, now);
+        apply_pick(s, seed, pick_for(s, restr, &nr));
+        s->fresh = 1;
+        if (ll < (int)sizeof log - 32) ll += snprintf(log + ll, sizeof log - (size_t)ll, " %#x>%#x", s->vtype, rec_type(s));
     }
     if (ENV("LARECOMP_ENEMY_RANDOM_QUIET") == NULL) LOG("%s\n", log);
+}
+
+// One actor of a room made again: a new pick for it alone, under the room's restrictions as enemies.py has them at
+// its place in the room, and the groups its room mates' current picks hold (one fly-bomb, one blocking enemy).
+static void roll_one(RFile *rf, int k, int fd) {
+    Slot *s = &g_slots[rf->first + k];
+    uint8_t seed[REC];
+    if (pread(fd, seed, REC, s->off) != REC) return;
+    int restr[96], nr = restr_start(rf, restr);
+    for (int si = 0; si < k; si++)  // (the earlier actors' vanilla types off the list, as in roll)
+        for (int i = 0; i < nr; i++)
+            if (restr[i] == g_slots[rf->first + si].vtype) {
+                memmove(&restr[i], &restr[i + 1], sizeof(int) * (size_t)(nr - i - 1));
+                nr--;
+                break;
+            }
+    for (int si = 0; si < rf->n; si++) {
+        int t = rec_type(&g_slots[rf->first + si]);
+        if (si == k) continue;
+        if (in(g_fly, g_nfly, t)) { for (int i = 0; i < g_nfly && nr < 96; i++) restr[nr++] = g_fly[i]; }
+        else if (in(g_block, g_nblock, t)) { for (int i = 0; i < g_nblock && nr < 96; i++) restr[nr++] = g_block[i]; }
+    }
+    int was = rec_type(s);
+    apply_pick(s, seed, pick_for(s, restr, &nr));
+    if (ENV("LARECOMP_ENEMY_RANDOM_QUIET") == NULL)
+        LOG("[enemyrand] f%llu spawn %s #%d: %#x>%#x (was %#x)\n", (unsigned long long)renderer_present_count(), base(rf),
+            k, s->vtype, rec_type(s), was);
 }
 
 // fs.c: `n` bytes of the seed's replacement file `host` (a host path) starting at file offset `off` were just read
@@ -336,7 +371,7 @@ void enemy_random_filter(const char *host, uint64_t off, uint8_t *dst, uint64_t 
     if (rf) {
         if (off == 0 || !rf->rolled) {
             int fd = open(host, O_RDONLY);
-            if (fd >= 0) { roll(rf, fd, "load"); close(fd); rf->rolled = 1; rf->epoch = visit(); }
+            if (fd >= 0) { roll(rf, fd, "load"); close(fd); rf->rolled = 1; }
         }
         for (int si = 0; si < rf->n; si++) {
             Slot *s = &g_slots[rf->first + si];
@@ -349,11 +384,12 @@ void enemy_random_filter(const char *host, uint64_t off, uint8_t *dst, uint64_t 
 
 
 // Every spawn of a listed actor (tools/patches.py BOSS_SPAWN_SITE, the actor factory; its spawn info: key +0, type
-// +8, the record's eight parameters +0x10, as in the room file). On each visit to a level (the level name changing
-// starts one) a room rolls again when the first of its actors is made; the rest of that visit's spawns of its actors
-// get the same roll (one-group / 2D rules hold). Rotation, scale and the enemy flag stay the file load's (facing the
-// screen, size 1); hole enemies (a spawn box vs a Pincer: different enemy flags) only change with a file load.
-
+// +8, the record's eight parameters +0x10, as in the room file). The game keeps loaded room files: a level entered
+// again, an overworld area streamed back in or a single enemy made again (they come back after a while) make actors
+// from the record it already has. So each actor made again gets a new pick of its own (roll_one: its room's
+// restrictions, one fly-bomb / blocking enemy with its room mates' current picks); the first spawn after a file roll
+// takes that roll. Rotation, scale and the enemy flag stay the file load's (facing the screen, size 1); hole enemies
+// (a spawn box vs a Pincer: different enemy flags) only change with a file load.
 static int slot_of(uint64_t key) {
     if (!g_keycap) {
         g_keycap = 1;
@@ -389,13 +425,14 @@ void rt_enemy_spawn(uint64_t info) {
     RFile *rf = NULL;
     for (int fi = 0; fi < g_nfiles && !rf; fi++)
         if (i >= g_files[fi].first && i < g_files[fi].first + g_files[fi].n) rf = &g_files[fi];
-    uint64_t v = visit();
     if (rf && s->cls != CLS_HOLE) {
-        if (!rf->rolled || rf->epoch != v) {
-            int fd = open(rf->host, O_RDONLY);
-            if (fd >= 0) { roll(rf, fd, "spawn"); close(fd); rf->rolled = 1; }
-            rf->epoch = v;
+        int fd = s->fresh && rf->rolled ? -1 : open(rf->host, O_RDONLY);
+        if (fd >= 0) {
+            if (!rf->rolled) roll(rf, fd, "spawn"), rf->rolled = 1;  // (no file roll yet: the whole room)
+            else roll_one(rf, i - rf->first, fd);
+            close(fd);
         }
+        s->fresh = 0;
         ST16(info + 8, LD16((uint64_t)(uintptr_t)(s->rec + 0xC)));
         memcpy((void *)(uintptr_t)(info + 0x10), s->rec + 0x38, 0x40);
     }
