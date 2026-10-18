@@ -1095,9 +1095,16 @@ void backend_present(NvnTexture *t) {
         // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution")
         extern uint64_t g_gpu_total_ns;
         static uint64_t gpu_prev;
-        uint64_t gpu_now = __atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED);
+        // the game's command buffers and the window image's (LARECOMP_DYNRES_COUNT_PRESENT=0: the game's only, as before)
+        static _Atomic uint64_t present_ns;
+        static int count_present = -1;
+        if (count_present < 0) count_present = !getenv("LARECOMP_DYNRES_COUNT_PRESENT") || atoi(getenv("LARECOMP_DYNRES_COUNT_PRESENT"));
+        uint64_t gpu_now = __atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED) + (count_present ? present_ns : 0);
         double gpu_ms = gpu_prev ? (gpu_now - gpu_prev) / 1e6 : -1;
         gpu_prev = gpu_now;
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {  // (the upscale / scaling draw and the menu)
+            present_ns += (uint64_t)((done.GPUEndTime - done.GPUStartTime) * 1e9);
+        }];
         OutScale os;
         output_scale(dw, dh, widescreen_allowed(), SDL_GetTicksNS() / 1e9, gpu_ms, &os);
         double sx = os.sx, sy = os.sy, vx = os.vx, vy = os.vy, vw = os.vw, vh = os.vh, shape = os.shape;
