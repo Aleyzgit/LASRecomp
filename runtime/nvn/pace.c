@@ -1,5 +1,6 @@
 // Frame pacing, shared by the Metal (metal.m) and Vulkan (vulkan/device.c) presents: each presented frame calls
 // pace_frame() on the presenting thread, and the backends pass the game's timing counters through pace_end_counter().
+#include <time.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -66,7 +67,23 @@ void pace_frame(void) {
     avg = avg ? avg + (busy - avg) * 0.05 : busy;
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
-    if (log) LOG("[pace] period %.2f blocked %.2f busy %.2f ms\n", p / 1e6, wt / 1e6, busy);
+    extern __thread uint64_t g_rq_wait_ns;  // rqueue.c: waits for the render thread (translation), counted as busy
+    static uint64_t last_rq;
+    uint64_t rqw = g_rq_wait_ns - last_rq;
+    last_rq = g_rq_wait_ns;
+    if (log) {  // (plus this thread's CPU time per frame and the render thread's: work, independent of waits)
+        extern uint64_t rq_render_cpu_ns(void);
+        static uint64_t last_cpu, last_rcpu;
+        uint64_t cpu = 0, rcpu = rq_render_cpu_ns();
+#ifndef _WIN32
+        struct timespec ts;
+        if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) cpu = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+        LOG("[pace] period %.2f blocked %.2f busy %.2f ms (queue wait %.2f, cpu %.2f, render cpu %.2f)\n", p / 1e6, wt / 1e6, busy,
+            rqw / 1e6, last_cpu ? (cpu - last_cpu) / 1e6 : 0.0, last_rcpu ? (rcpu - last_rcpu) / 1e6 : 0.0);
+        last_cpu = cpu;
+        last_rcpu = rcpu;
+    }
     int o = busy > 16.2;
     stat_pace_over += o;
     nover += o - over[idx];

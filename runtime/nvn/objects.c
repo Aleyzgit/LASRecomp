@@ -4,6 +4,7 @@
 
 #include "../kernel.h"
 #include "nvn.h"
+#include "rqueue.h"
 
 void renderer_sync(void);
 
@@ -120,10 +121,14 @@ NVN(nvnQueueResetMemoryUsageCounts) { (void)c; }
 NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
-    for (int i = 0; i < n; i++) backend_execute(handles[i]);
+    bool rq = rq_on();
+    for (int i = 0; i < n; i++) {
+        if (rq) rq_submit(handles[i]);  // the render thread translates it (rqueue.c)
+        else backend_execute(handles[i]);
+    }
 }
 NVN(nvnQueueFlush) { (void)c; }
-NVN(nvnQueueFinish) { (void)c; renderer_sync(); }
+NVN(nvnQueueFinish) { (void)c; if (rq_on()) rq_drain(); renderer_sync(); }
 
 static NvnSync *sync_of(uint64_t guest) {
     NvnSync *s = HOST(NvnSync, guest);
@@ -132,8 +137,14 @@ static NvnSync *sync_of(uint64_t guest) {
 }
 uint64_t renderer_fence_seq(void);
 void renderer_wait_seq(uint64_t seq);
-NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = renderer_fence_seq(); }
-void nvn_sync_set_seq(uint64_t guest, uint64_t seq) { NvnSync *s = sync_of(guest); s->signaled = 1; s->seq = seq; }
+// A fence's seq: the render thread's item number when it's on (rqueue.c), else the backend's submission number.
+NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = rq_on() ? rq_fence_seq() : renderer_fence_seq(); }
+void nvn_sync_set_seq(uint64_t guest, uint64_t seq) {
+    if (rq_on()) { uint64_t q = rq_current_item(); if (q) seq = q; }  // (set by the submit's pre-scan already)
+    NvnSync *s = sync_of(guest);
+    s->signaled = 1;
+    s->seq = seq;
+}
 NVN(nvnQueueWaitSync) { RET(1); }
 
 // ================================================================== sync / event
@@ -148,9 +159,13 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
-    if (flush) renderer_flush();
-    else if (whole) renderer_sync();
-    else renderer_wait_seq(sync_of(A(0))->seq);  // only the submission that holds this fence
+    if (flush) { if (rq_on()) rq_flush(); else renderer_flush(); }
+    else if (whole) { if (rq_on()) rq_drain(); renderer_sync(); }
+    else {  // only the submission that holds this fence
+        uint64_t seq = sync_of(A(0))->seq;
+        if (seq && rq_on()) seq = rq_wait_item(seq);  // translated and submitted; then its GPU work
+        renderer_wait_seq(seq);
+    }
     RET(0);
 }
 NVN(nvnSyncCreateGLSync) { RET(0); }
@@ -372,7 +387,10 @@ NVN(nvnTextureInitialize) {
 static void pool_entries_forget(NvnTexture *t);
 NVN(nvnTextureFinalize) {
     NvnTexture *t = HOST(NvnTexture, A(0));
-    if (t) { pool_entries_forget(t); backend_texture_destroyed(t); free(t); }
+    if (t) {
+        if (rq_on()) rq_destroy_texture(t);  // after the queued lists that refer to it
+        else { pool_entries_forget(t); backend_texture_destroyed(t); free(t); }
+    }
     SET_HOST(A(0), 0);
 }
 NVN(nvnTextureSetDebugLabel) {

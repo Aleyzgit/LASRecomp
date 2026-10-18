@@ -11,6 +11,7 @@
 #include "../../paths.h"
 #include "../../settings.h"
 #include "../../ui/menu.h"
+#include "../rqueue.h"
 #include "vk.h"
 #include "../output_scale.h"
 #include "../renderer.h"
@@ -583,13 +584,17 @@ static NvnTexture *g_last_presented;
 const float *vk_shot_crop(void) { return g_shot_crop; }
 
 void backend_present(NvnTexture *t);
+void *backend_pool_push(void) { return NULL; }
+void backend_pool_pop(void *p) { (void)p; }
 void backend_represent(void) {
-    if (g_last_presented) backend_present(g_last_presented);
-    else SDL_Delay(16);
+    if (!g_last_presented) { SDL_Delay(16); return; }
+    if (rq_on()) rq_present(g_last_presented, total_frames);
+    else backend_present_now(g_last_presented, total_frames);
 }
 
-void backend_present(NvnTexture *t) {
-    g_last_presented = t;
+// The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
+// frame: the number of this present (the game thread's frame when it was queued).
+void backend_present_now(NvnTexture *t, uint64_t frame) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
@@ -607,7 +612,7 @@ void backend_present(NvnTexture *t) {
     if (have) {
         double dw = g_vk.sc_extent.width, dh = g_vk.sc_extent.height;
         extern void widescreen_frame_end(uint64_t frame);
-        widescreen_frame_end(total_frames);
+        widescreen_frame_end(frame);
         extern void widescreen_set_factor(float f);
         extern bool widescreen_allowed(void);
         // render scale + placement in the window: runtime/nvn/output_scale.c (Video tab "Internal resolution");
@@ -642,7 +647,7 @@ void backend_present(NvnTexture *t) {
         // interiors / dungeons: their 16:9 centre, or the part inside a room wider than one screen
         extern void widescreen_present_crop(uint64_t, double, float *, double *, double *, double *, double *);
         float crop[4];  // uv origin and size
-        widescreen_present_crop(total_frames, shape, crop, &vx, &vy, &vw, &vh);
+        widescreen_present_crop(frame, shape, crop, &vx, &vy, &vw, &vh);
         widescreen_set_factor((float)shape);
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
@@ -653,19 +658,79 @@ void backend_present(NvnTexture *t) {
         vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
-        if (menu_at && (long)total_frames + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
+        if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
-        bool shot = win_shot && (long)total_frames + 1 == win_shot;
+        bool shot = win_shot && (long)frame + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
         if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
     } else {
         renderer_submit();
     }
     extern void vk_prof_frame(uint64_t frame, uint64_t present_ns);
-    vk_prof_frame(total_frames, SDL_GetTicksNS() - t0);
+    vk_prof_frame(frame, SDL_GetTicksNS() - t0);
     frames++;
+    static long shot_every = -1;
+    if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
+    {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
+        extern bool g_gpuprof_frame;
+        extern void vk_gpuprof_report(void);
+        if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
+        const char *e = getenv("LARECOMP_GPUPROF_AT");
+        for (const char *p = e; p && *p;) {
+            long at = strtol(p, (char **)&p, 10);
+            if (at == (long)frame) { g_gpuprof_frame = true; break; }
+            if (*p == ',') p++; else break;
+        }
+    }
+    if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)frame);
+    {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
+        static const char *next;
+        static int init;
+        if (!init) { init = 1; next = getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
+        while (next && *next) {
+            long at = strtol(next, (char **)&next, 10);
+            if ((long)frame < at) { while (next > getenv("LARECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
+            if ((long)frame == at) {
+                char path[256];
+                snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)frame);
+                renderer_save_texture_tex(b, path);
+            }
+            if (*next == ',') next++;
+        }
+    }
+    static long shot_from = -1;
+    if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
+    if (shot_every && frame % shot_every == 0 && (long)frame >= shot_from) {
+        char path[256];
+        if (shot_from) mkdir("build/frames", 0755);
+        snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png",
+                 (unsigned long long)frame);
+        renderer_save_texture_tex(b, path);
+        // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
+        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
+    }
+    double now = SDL_GetTicks() / 1000.0;
+    static double fps_iv = -1, prev_present, max_gap;
+    if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
+    if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
+    prev_present = now;
+    if (now - last_fps_time >= fps_iv) {
+        extern const char *game_level_name(void);
+        if (last_fps_time > 0)
+            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)frame,
+                frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
+        max_gap = 0;
+        frames = 0;
+        last_fps_time = now;
+    }
+    static double mem_at = 60.0;  // (memory in steady state: a minute in, then every 10 minutes)
+    if (now >= mem_at) { vk_log_memory("playing"); mem_at = now + 600.0; }
+}
+
+// The game thread's side of a present: the frame counters and the per-frame hooks (input, pacing, test hooks).
+static void present_hooks(void) {
     total_frames++;
     g_frame_counter++;
     pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
@@ -686,8 +751,6 @@ void backend_present(NvnTexture *t) {
     save_editor_frame(total_frames);
     extern void vk_level_change_check(void);
     vk_level_change_check();
-    static long shot_every = -1;
-    if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
     extern bool g_debug_frame;
     static long debug_at = -1;
     if (debug_at < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAME"); debug_at = e ? atol(e) : 0; }
@@ -697,60 +760,14 @@ void backend_present(NvnTexture *t) {
     static long debug_n = -1;
     if (debug_n < 0) { const char *e = getenv("LARECOMP_DEBUG_FRAMES"); debug_n = e && atol(e) > 1 ? atol(e) : 1; }
     g_debug_frame = debug_at && total_frames >= (uint64_t)debug_at && total_frames < (uint64_t)debug_at + (uint64_t)debug_n;
-    {   // LARECOMP_GPUPROF_AT=<frame>[,<frame>...]: GPU time per pass of those frames ("[gpuprof]" in the log)
-        extern bool g_gpuprof_frame;
-        extern void vk_gpuprof_report(void);
-        if (g_gpuprof_frame) { g_gpuprof_frame = false; vk_gpuprof_report(); }
-        const char *e = getenv("LARECOMP_GPUPROF_AT");
-        for (const char *p = e; p && *p;) {
-            long at = strtol(p, (char **)&p, 10);
-            if (at == (long)total_frames) { g_gpuprof_frame = true; break; }
-            if (*p == ',') p++; else break;
-        }
-    }
-    if (g_debug_frame) LOG("===== debug frame %llu =====\n", (unsigned long long)total_frames);
-    {   // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
-        static const char *next;
-        static int init;
-        if (!init) { init = 1; next = getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
-        while (next && *next) {
-            long at = strtol(next, (char **)&next, 10);
-            if ((long)total_frames < at) { while (next > getenv("LARECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
-            if ((long)total_frames == at) {
-                char path[256];
-                snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)total_frames);
-                renderer_save_texture_tex(b, path);
-            }
-            if (*next == ',') next++;
-        }
-    }
-    static long shot_from = -1;
-    if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
-    if (shot_every && total_frames % shot_every == 0 && (long)total_frames >= shot_from) {
-        char path[256];
-        if (shot_from) mkdir("build/frames", 0755);
-        snprintf(path, sizeof path, shot_from ? "build/frames/frame_%05llu.png" : "build/frame_%05llu.png",
-                 (unsigned long long)total_frames);
-        renderer_save_texture_tex(b, path);
-        // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
-        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
-    }
-    double now = SDL_GetTicks() / 1000.0;
-    static double fps_iv = -1, prev_present, max_gap;
-    if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
-    if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
-    prev_present = now;
-    if (now - last_fps_time >= fps_iv) {
-        extern const char *game_level_name(void);
-        if (last_fps_time > 0)
-            LOG("[vk] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)total_frames,
-                frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
-        max_gap = 0;
-        frames = 0;
-        last_fps_time = now;
-    }
-    static double mem_at = 60.0;  // (memory in steady state: a minute in, then every 10 minutes)
-    if (now >= mem_at) { vk_log_memory("playing"); mem_at = now + 600.0; }
+}
+
+void backend_present(NvnTexture *t) {
+    g_last_presented = t;
+    uint64_t frame = total_frames;
+    if (rq_on()) rq_present(t, frame);
+    else backend_present_now(t, frame);
+    present_hooks();
 }
 
 // ================================================================== UI thread
@@ -818,6 +835,7 @@ void backend_init(void) {
 // ---- in-place reboot (runtime/main.c teardown; main thread, guest threads stopped)
 void backend_reset(void) {
     if (!g_vk.dev) return;
+    rq_drain();  // (the render thread: everything queued ran; it idles while the game is down)
     vkDeviceWaitIdle(g_vk.dev);
     extern void vk_textures_reset(void);
     extern void vk_exec_reset(void);
@@ -827,6 +845,7 @@ void backend_reset(void) {
 }
 void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
 void backend_clear_window(void) {
+    rq_drain();
     static const float black[4] = {0, 0, 0, 1};
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
 }

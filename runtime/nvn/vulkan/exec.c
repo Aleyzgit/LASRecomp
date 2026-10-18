@@ -439,6 +439,13 @@ void renderer_flush(void) {
     vk_wait_seq(submit_seq);
 }
 
+uint64_t renderer_submit_seq(void) {
+    pthread_mutex_lock(&seq_lock);
+    uint64_t s = submit_seq;
+    pthread_mutex_unlock(&seq_lock);
+    return s;
+}
+
 void renderer_sync(void) {
     pthread_mutex_lock(&seq_lock);
     uint64_t s = submit_seq;

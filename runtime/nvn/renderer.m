@@ -440,6 +440,13 @@ void renderer_sync(void) {
     g_wait_kind = 0;
 }
 
+uint64_t renderer_submit_seq(void) {
+    pthread_mutex_lock(&cb_lock);
+    uint64_t q = submit_seq;
+    pthread_mutex_unlock(&cb_lock);
+    return q;
+}
+
 // Sequence number a fence placed now belongs to: the pending (uncommitted) work's submission, else the last one.
 uint64_t renderer_fence_seq(void) {
     pthread_mutex_lock(&cb_lock);
