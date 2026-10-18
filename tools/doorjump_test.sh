@@ -69,17 +69,21 @@ for lv, members in groups:
 print('[group] %d walls with several doorways, %d lead to more than one place' % (len(groups), bad))
 
 
-def floor(lv, cell, side, slot):  # the doorway's edge tile height in the seed's room (raised doorways: 1.5)
+def floor(lv, cell, side, slot):  # the floor in the doorway in the seed's room (raised doorways: 1.5)
     import struct
     from RandomizerCore.Tools import leb
-    p = os.path.join(seed_dir, 'romfs', 'region_common', 'level', lv, '%s_%s.leb' % (lv, cell))
-    if not os.path.exists(p):
-        p = rooms._leb_path('extracted/romfs', '%s_%s' % (lv, cell))
-    g = rooms._grid(leb.Room(open(p, 'rb').read()))[b'data'].data
+    room = '%s_%s' % (lv, cell)
+    p = rooms._leb_path(os.path.join(seed_dir, 'romfs'), room)
+    g = rooms._grid(leb.Room(open(p if os.path.exists(p) else rooms._leb_path('extracted/romfs', room), 'rb').read()))
+    g = g[b'data'].data
     a = int(slot) // 2
-    r, c = {'N': (0, a), 'S': (7, a), 'W': (min(a, 7), 0), 'E': (min(a, 7), 9)}[side]
-    h = struct.unpack_from('<f', g, 0x10 * (min(r, 7) * 10 + min(c, 9)) + 12)[0]
-    return h if h > 0.3 else 0.0
+    for i in range(4):  # the first walkable tile from the edge inward (as dungeon_gen.landing_depth, edge included)
+        r, c = {'N': (i, a), 'S': (7 - i, a), 'W': (min(a, 7), i), 'E': (min(a, 7), 9 - i)}[side]
+        o = 0x10 * (min(r, 7) * 10 + min(c, 9))
+        t, h = g[o:o + 3], struct.unpack_from('<f', g, o + 12)[0]
+        if not (t[0] & 2 and not t[2] & 8):
+            return h if h > 0.3 else 0.0
+    return 0.0
 
 
 with open(jobs_path, 'w') as f:
