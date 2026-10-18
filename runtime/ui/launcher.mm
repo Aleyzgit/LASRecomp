@@ -459,8 +459,8 @@ static void SDLCALL picked(void *, const char *const *files, int) {
 // with roughly how much, until Keep here (settings.onedrive_kept). Checked once per launch (plat_onedrive_synced); the
 // size in the background: the data root's own once set up, before that the picked game files (or a typical copy) plus
 // what the setup adds. LARECOMP_TEST_ONEDRIVE=1 (test): shown on any system.
-#define GAME_FILES_GB 5.9   // exefs + romfs, as players bring them
-#define SETUP_ADDS_GB 0.0   // the built game code, its kept pieces and the shader caches (measured: a beta_5 setup)
+#define GAME_FILES_GB 6.3   // exefs + romfs, as players bring them
+#define SETUP_ADDS_GB 0.4   // the built game code and its kept pieces (0.23, a beta_5 setup), shader caches
 static int g_onedrive = -1;                // -1: not checked yet
 static std::atomic<double> g_od_gb{-1};    // the estimate (-1: not known yet)
 static std::atomic<int> g_od_job;
@@ -483,8 +483,9 @@ static void *onedrive_size_thread(void *arg) {
     return NULL;
 }
 
-// The warning (upper right of the start screen); true once Keep here is pressed
-static bool onedrive_notice(float s, ImVec2 ds, bool ready) {
+// The warning, w wide at the cursor (the start screen's upper right; before the setup, under the Game Files rows); true
+// once Keep here is pressed
+static bool onedrive_notice(float s, float w, bool ready) {
     std::string src;
     pthread_mutex_lock(&g_lock);
     src = ready ? "" : g_src.empty() ? "\x01" : g_src;
@@ -496,8 +497,6 @@ static bool onedrive_notice(float s, ImVec2 ds, bool ready) {
     }
     double gb = g_od_gb;
     if (gb < 0) return false;
-    float w = fminf(ds.x * 0.42f, 560 * s);
-    ImGui::SetCursorPos(ImVec2(ds.x - w - 60 * s, 60 * s));
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.86f));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 18 * s));
@@ -514,6 +513,11 @@ static bool onedrive_notice(float s, ImVec2 ds, bool ready) {
     bool keep = ImGui::Button("Keep here", ImVec2(160 * s, 0));
     ImGui::EndChild();
     return keep;
+}
+static void onedrive_keep(void) {
+    g_settings.onedrive_kept = true;
+    settings_save();
+    fprintf(stderr, "[launcher] OneDrive warning: kept here\n");
 }
 
 // ------------------------------------------------------------------ the user's own Nintendo fonts (not shipped)
@@ -1689,6 +1693,10 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "%s", status_hint(status));
                     ImGui::PopTextWrapPos();
                 }
+                if (!ready && g_onedrive > 0 && !g_settings.onedrive_kept) {  // (before the copy is the time to move)
+                    ImGui::Dummy(ImVec2(0, 14 * sc));
+                    if (onedrive_notice(1.5f * sc, ImGui::GetContentRegionAvail().x, false)) onedrive_keep();
+                }
                 opt_end();
                 if (g_confirm_delete && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                                          ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
@@ -1730,10 +1738,10 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::SetCursorPosX(x0);
                 ImGui::TextDisabled("%s", busy ? "Set up the game files to play." : status_hint(status));
             }
-            if (g_onedrive > 0 && !g_settings.onedrive_kept && onedrive_notice(s, ds, status.empty())) {
-                g_settings.onedrive_kept = true;
-                settings_save();
-                fprintf(stderr, "[launcher] OneDrive warning: kept here\n");
+            if (g_onedrive > 0 && !g_settings.onedrive_kept) {
+                float w = fminf(ds.x * 0.42f, 560 * s);
+                ImGui::SetCursorPos(ImVec2(ds.x - w - 60 * s, 60 * s));
+                if (onedrive_notice(s, w, status.empty())) onedrive_keep();
             }
             if (const char *f = getenv("LARECOMP_LAUNCHER_FONT")) {  // (test) which typeface this window shows
                 const char *b = strrchr(f, '/');
