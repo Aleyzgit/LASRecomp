@@ -18,6 +18,8 @@ rando/<seed>/digs.tsv: screen, tile, ground height, item name, then for a check 
 seashell (1/0), scale and turn (degrees) ('-' on a tile that isn't a check), and what stands on the tile (grass / bush:
 the runtime keeps it from growing back once the tile is dug, so the hole stays).
 
+A buried Secret Seashell's tile is no digsanity check: it is LAS's own dig location (seashell_spots.py).
+
 Logic: the shovel AND the logic regions of the tile's screen (the same screen regions as bushsanity: bushes.py, with
 its POCKETS).
 Filler: what digging turns up in the original game - rupees and hearts mostly, a few refills.
@@ -27,6 +29,7 @@ import os
 
 import bushes
 import pots
+import seashell_spots
 import spoiler_view
 
 FLAG_BASE = 4096  # runtime/hle/digs.c DIG_FLAG_BASE: flag of tile g = FLAG_BASE + g
@@ -94,9 +97,12 @@ def scan(romfs, leb):
     out = []
     for name, screen, room in _rooms(romfs, leb):
         blocked = _blockers(room, screen)
+        row, col = screen
+        shells = {int((a.posZ - (row - 1) * 12.0) // 1.5) * 10 + int((a.posX - col * 15.0) // 1.5)
+                  for a in room.actors if a.type == seashell_spots.T_SHELL}
         for i, t in enumerate(room.grid.tilesdata):
             if t.flags3['isdigspot'] and not t.flags1['containscollision'] and not t.flags1['deepwaterlava']:  # (pits)
-                out.append({'room': name, 'tile': i, 'y': t.elevation, 'blocker': blocked.get(i)})
+                out.append({'room': name, 'tile': i, 'y': t.elevation, 'blocker': blocked.get(i), 'shell': i in shells})
     return out
 
 
@@ -131,7 +137,7 @@ def add_to_logic(digs, logic_defs, item_defs):
     locs = {}
     for d in digs:
         regs = sorted(r for r in regions.get(d['room'], ()) if r in logic_defs)
-        if not regs or d['blocker'] == 'other' or (proven is not None and tile_id(d) not in proven):
+        if not regs or d['blocker'] == 'other' or (proven is not None and tile_id(d) not in proven) or d.get('shell'):
             continue
         name = location_name(d)
         logic_defs[name] = {'type': 'item', 'subtype': 'standing', 'content': 'rupee-5', 'region': regs[0],
