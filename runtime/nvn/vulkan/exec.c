@@ -1341,6 +1341,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
             prog_tab[slot].prog = pp;
             return pp;
         }
+        shader_first_visit("program", vh, fh, ck);
     }
     Prog *p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
@@ -2732,6 +2733,7 @@ static CsProg *compute_program(NvnProgram *np) {
         if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
         return cp;
     }
+    shader_first_visit("compute", ch, 0, cs_content_key(ch, local));
     cp = calloc(1, sizeof *cp);
     if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
     memcpy(cp->local, local, sizeof local);
@@ -3059,6 +3061,7 @@ static void draw_(CmdRec *r, bool indexed) {
         pp = prep_pipes_n ? PREP_GET(prep_pipes, ph) : NULL;  // prepared before the game
         if (pp && memcmp(&pp->k, &k, sizeof k)) pp = NULL;
         if (!pp) {
+            shader_first_visit("pipeline", shader_stage_hash(&st.program->stages[0]), shader_stage_hash(&st.program->stages[1]), ph);
             pp = calloc(1, sizeof *pp);
             pp->k = k;
             run_job(build_pipeline, pp);

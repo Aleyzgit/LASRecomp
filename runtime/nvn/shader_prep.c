@@ -204,6 +204,40 @@ void shader_rec_note(const ShaderRec *r) {
     pthread_mutex_unlock(&rec_lock);
 }
 
+// ------------------------------------------------------------------ first visits
+// (once per program / pipeline / compute shader for the process: a reboot into another seed builds them again, from
+// the system's shader caches)
+void shader_first_visit(const char *what, uint64_t a, uint64_t b, uint64_t id) {
+    static _Atomic int n;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static uint64_t *seen;
+    static size_t cap, cnt;
+    uint64_t h = id ^ (uint64_t)(uint8_t)what[1] << 56;
+    if (!h) h = 1;
+    pthread_mutex_lock(&lock);
+    if (cnt * 2 >= cap) {
+        size_t nc = cap ? cap * 2 : 1024;
+        uint64_t *t = calloc(nc, sizeof *t);
+        for (size_t i = 0; i < cap; i++)
+            if (seen[i]) {
+                size_t j = seen[i] & (nc - 1);
+                while (t[j]) j = (j + 1) & (nc - 1);
+                t[j] = seen[i];
+            }
+        free(seen);
+        seen = t, cap = nc;
+    }
+    size_t j = h & (cap - 1);
+    while (seen[j] && seen[j] != h) j = (j + 1) & (cap - 1);
+    bool fresh = !seen[j];
+    if (fresh) seen[j] = h, cnt++;
+    pthread_mutex_unlock(&lock);
+    if (!fresh) return;
+    int k = ++n;
+    if (b) LOG("[shader] first visit %d: %s %016" PRIx64 " %016" PRIx64 "\n", k, what, a, b);
+    else LOG("[shader] first visit %d: %s %016" PRIx64 "\n", k, what, a);
+}
+
 // ------------------------------------------------------------------ index of the game files' shaders
 // Every shader in the player's game files, by code hash: the BNSH containers (nn::gfx shader files) in the shader
 // archives (*.bfsha), the effects (*.ptcl) and the UI archives (*.arc). Only locations are kept (file, offset).

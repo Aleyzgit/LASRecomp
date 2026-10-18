@@ -8,7 +8,7 @@
 // containers in the romfs' shader archives, effects and UI archives, and in the main module's data), and each backend
 // builds the variants on the player's machine through the same code its draws use. The objects are kept for the game,
 // which finds them by content at first use (code addresses differ from run to run). Anything the list misses still
-// compiles at first use (asynchronously, as before).
+// compiles at first use (asynchronously, as before) and is logged as a first visit.
 //
 // The start screen runs it once the game files are set up (runtime/ui/launcher.mm: a progress bar and Skip). Later
 // (phase 2): a Metal binary archive and periodic Vulkan pipeline cache saves (renderer_prepare_end), and a tag that
@@ -56,6 +56,10 @@ uint8_t shader_topo_class(uint32_t mode);                     // NVN draw mode -
 // (LARECOMP_RECORD_KEYS) note a variant the game builds; cheap when recording is off
 bool shader_rec_recording(void);
 void shader_rec_note(const ShaderRec *r);
+
+// First visits: a program / pipeline / compute program the game had to build itself (preparation didn't cover it).
+// what: "program", "pipeline", "compute"; a, b: its shaders' hashes; id: what it is (logged once per process)
+void shader_first_visit(const char *what, uint64_t a, uint64_t b, uint64_t id);
 
 // ---- preparation
 // Shader code found in the game files for a record's hash

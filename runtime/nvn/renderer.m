@@ -1104,6 +1104,7 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
         uint64_t vh = shader_stage_hash(&p->stages[0]), fh = shader_stage_hash(&p->stages[1]), ck = prog_content_key(vh, fh, vkey, fkey);
         pr = vh && fh ? prep_find_prog(ck) : nil;
         if (pr) cache[key] = pr;
+        else shader_first_visit("program", vh, fh, ck);
     }
     if (pr) {
         prog_tab[slot].key = h;
@@ -1587,6 +1588,7 @@ static CsProg *compute_program(NvnProgram *p) {
             pthread_mutex_unlock(&g_prep_lock);
         }
         if (pc) { progs[key] = [NSValue valueWithPointer:pc]; return pc->failed ? NULL : pc; }
+        shader_first_visit("compute", ch, 0, cs_content_key(ch, local));
     }
     CsProg *cp = calloc(1, sizeof *cp);
     progs[key] = [NSValue valueWithPointer:cp];
@@ -2099,6 +2101,7 @@ static void draw(CmdRec *r, bool indexed) {
         if (shader_rec_recording()) shader_rec_note(&rec);
         pobj = prep_find_pipe(body);  // prepared before the game
         if (pobj) cache[pk] = pobj;
+        else shader_first_visit("pipeline", rec.vs, rec.fs, shader_code_hash((const uint8_t *)body.UTF8String, body.length));
     }
     if (!pobj) {
         if (sync_shaders()) {
