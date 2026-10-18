@@ -52,6 +52,10 @@ jobs:
         run: make -j"$(nproc)" build/lasrecomp DEPS="$HOME/sdl3"
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: SIMD rounding and host-state regression
+        run: |
+          clang -std=gnu11 -O1 -mfma -pthread tools/test_simd_rounding.c -lm -o build/test-simd-rounding
+          build/test-simd-rounding
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
       - name: FP/SIMD lowering vs a CPU emulator (a sample)
@@ -67,6 +71,10 @@ jobs:
         run: brew install sdl3 ffmpeg
       - name: App builds
         run: make -j"$(sysctl -n hw.ncpu)" build/lasrecomp
+      - name: SIMD rounding and host-state regression
+        run: |
+          clang -std=gnu11 -O1 -pthread tools/test_simd_rounding.c -o build/test-simd-rounding
+          build/test-simd-rounding
       - name: Settings regression tests
         run: python3 tools/test_settings.py
       - name: Game address table tests
@@ -97,6 +105,10 @@ jobs:
         run: |
           clang -std=gnu11 -O1 tools/test_windows_thread_stack.c -lpsapi -o build/test-thread-stack.exe
           build/test-thread-stack.exe
+      - name: SIMD rounding and host-state regression
+        run: |
+          clang -std=gnu11 -O1 -mfma -pthread tools/test_simd_rounding.c -o build/test-simd-rounding.exe
+          build/test-simd-rounding.exe
       # (GLSL only: the script's MSL comparison needs a reference commit that isn't in the history any more; REF=HEAD
       # just satisfies it. The GLSL half - every fuzzed translation compiles and validates - is the check)
       - name: Shader translator fuzz (GLSL)
