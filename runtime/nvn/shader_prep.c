@@ -436,7 +436,16 @@ static double ms_now(void) {
     return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
 }
 
+static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel);
 bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
+    static pthread_mutex_t one = PTHREAD_MUTEX_INITIALIZER;  // (one run at a time: the index, the translator)
+    pthread_mutex_lock(&one);
+    bool ok = prep_run_locked(romfs, progress, cancel);
+    pthread_mutex_unlock(&one);
+    return ok;
+}
+
+static bool prep_run_locked(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
     double t0 = ms_now();
     char *list = NULL;
     if (getenv("LARECOMP_SHADER_LIST")) {

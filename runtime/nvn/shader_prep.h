@@ -10,7 +10,9 @@
 // which finds them by content at first use (code addresses differ from run to run). Anything the list misses still
 // compiles at first use (asynchronously, as before) and is logged as a first visit.
 //
-// The start screen runs it once the game files are set up (runtime/ui/launcher.mm: a progress bar and Skip). Later
+// The start screen runs it once the game files are set up or updated (runtime/ui/launcher.mm: a progress bar and
+// Skip), and on every later start in the background (warm system shader caches: well under a second here); a PLAY
+// before that is done shows the same bar. One run at a time. Later
 // (phase 2): a Metal binary archive and periodic Vulkan pipeline cache saves (renderer_prepare_end), and a tag that
 // invalidates them when the translator changes.
 //
