@@ -758,20 +758,26 @@ static void dec_release_output(Cpu *c) {
     c->x[0] = 0;
 }
 
-static void dec_dtor(Cpu *c) {
-    Decoder *d = self_state(c);
-    if (!d) { c->x[0] = 0; return; }
-    dec_stop(c);
-    pthread_mutex_lock(&d->lock);
+// Both destruction and a reboot release the host allocations. The HLE input/output buffers are separate:
+// destruction returns them to the pool; a reboot discards the whole HLE heap after guest threads have stopped.
+static void dec_free(Decoder *d) {
     if (d->ctx) avcodec_free_context(&d->ctx);
-    for (int i = 0; i < NIN; i++) buf_put(d->in_mem[i], d->in_cap), d->in_mem[i] = NULL;
-    for (int i = 0; i < NOUT; i++) buf_put(d->out_mem[i], d->out_cap), d->out_mem[i] = NULL;
     for (int i = 0; i < d->npending; i++) av_frame_free(&d->pending[i]);
     d->npending = d->nready = 0;
     av_frame_free(&d->frame);
     av_packet_free(&d->pkt);
     if (d->sws) sws_freeContext(d->sws), d->sws = NULL;
     free(d->rgba), d->rgba = NULL;
+}
+
+static void dec_dtor(Cpu *c) {
+    Decoder *d = self_state(c);
+    if (!d) { c->x[0] = 0; return; }
+    dec_stop(c);
+    pthread_mutex_lock(&d->lock);
+    dec_free(d);
+    for (int i = 0; i < NIN; i++) buf_put(d->in_mem[i], d->in_cap), d->in_mem[i] = NULL;
+    for (int i = 0; i < NOUT; i++) buf_put(d->out_mem[i], d->out_cap), d->out_mem[i] = NULL;
     pthread_mutex_unlock(&d->lock);
     movie_track(1, d, false);  // (d itself stays: the game's object may still point at it)
     c->x[0] = 0;
@@ -784,7 +790,7 @@ RT_ON_RESET(movie_reset) {
         if (e && e->pkt) av_packet_free(&e->pkt);
         if (e && e->fmt) avformat_close_input(&e->fmt);
         Decoder *d = g_movie_objs[1][i];
-        if (d && d->ctx) avcodec_free_context(&d->ctx);
+        if (d) dec_free(d);
         g_movie_objs[0][i] = g_movie_objs[1][i] = NULL;
     }
     g_ex_vt = g_dec_vt = 0;
