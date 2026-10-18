@@ -1271,6 +1271,12 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                             mine = openings(cat, room)[s]
                             if theirs and mine and [x[0] for x in mine] == [x[0] for x in theirs]:
                                 ok = False  # would join physically: keep it simple, not next to a matching doorway
+                            # a leftover never joins its neighbours: a wall across every doorway either way (an open
+                            # tile there, even another doorway's, and Link could walk on into the other room - plan()
+                            # checks this for the rooms it places: wall_behind)
+                            if (mine and not walls_off(cat, room, s, L[cell_name(lv, *n)])) or \
+                                    (theirs and not walls_off(cat, L[cell_name(lv, *n)], rooms.OPP[s], room)):
+                                ok = False
                             if theirs and not all(chaos_free(cat, L[cell_name(lv, *n)], rooms.OPP[s], x[0]) for x in theirs):
                                 ok = False
                     if ok:
