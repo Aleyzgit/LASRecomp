@@ -9,6 +9,7 @@
 #include <mach/mach_vm.h>
 #include <mach/thread_policy.h>
 #include <pthread.h>
+#include <pthread/qos.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../platform.h"
@@ -40,10 +42,23 @@ static void log_to_file_in_app(void) {
     mkdir(dir, 0755);
     snprintf(g_log_path, sizeof g_log_path, "%s/lasrecomp.log", dir);
     bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
-    if (!freopen(g_log_path, append ? "a" : "w", stderr)) { g_log_path[0] = 0; return; }
+    // A new session moves the last one's log aside (lasrecomp.prev.log) instead of truncating it in place: a copy
+    // started while another is still running or quitting can't empty that one's log (it keeps writing to the moved
+    // file), and the last session's log survives one more start. Opened for appending either way.
+    if (!append) {
+        char prev[1100];
+        snprintf(prev, sizeof prev, "%s/lasrecomp.prev.log", dir);
+        rename(g_log_path, prev);
+    }
+    if (!freopen(g_log_path, "a", stderr)) { g_log_path[0] = 0; return; }
     setvbuf(stderr, NULL, _IONBF, 0);
     dup2(STDERR_FILENO, STDOUT_FILENO);
     setenv("LASRECOMP_LOG_APPEND", "1", 1);
+    // (a first line: an empty log then means writing failed - e.g. a full disk - not another start)
+    time_t now = time(NULL);
+    char when[64];
+    strftime(when, sizeof when, "%Y-%m-%d %H:%M:%S", localtime(&now));
+    fprintf(stderr, "[log] %s, pid %d%s\n", when, (int)getpid(), append ? " (restarted)" : "");
 }
 
 void plat_init(void) { log_to_file_in_app(); }
@@ -96,6 +111,16 @@ void plat_thread_realtime(uint64_t period_ns) {
     };
     thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
                       THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+}
+
+// Guest threads start at the default QoS, and on a Mac with efficiency cores (an M1 Air: 4 + 4) the scheduler may run
+// the game's frame-critical threads there - the main thread (priority 44) builds and submits every frame. Priorities
+// 44 and more urgent get user-interactive (performance cores first), the rest user-initiated. LARECOMP_THREAD_QOS=0:
+// the default class as before.
+void plat_thread_guest(int prio) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_THREAD_QOS") || atoi(getenv("LARECOMP_THREAD_QOS")) != 0;
+    if (on) pthread_set_qos_class_self_np(prio <= 44 ? QOS_CLASS_USER_INTERACTIVE : QOS_CLASS_USER_INITIATED, 0);
 }
 
 bool plat_exe_path(char *buf, size_t size) {

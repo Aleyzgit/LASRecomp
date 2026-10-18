@@ -198,8 +198,8 @@ static void dump_largest_textures(const char *why) {
         TexBackend *b = g_reg[i] ? (TexBackend *)g_reg[i]->backend : NULL;
         if (!b || !b->tex) continue;
         uint64_t a = b->tex.allocatedSize;
-        int k = n < 16 ? n++ : 15;
-        if (k == 15 && n == 16 && a <= sz[15]) continue;
+        if (n == 16 && a <= sz[15]) continue;  // (full: smaller than the 16th. The check came after the 16th entry
+        int k = n < 16 ? n++ : 15;             //  was counted, against an unset sz[15] - an unset idx[15]: #102)
         while (k > 0 && sz[k - 1] < a) { sz[k] = sz[k - 1]; idx[k] = idx[k - 1]; k--; }
         sz[k] = a; idx[k] = i;
     }
@@ -1047,6 +1047,8 @@ void backend_represent(void) {
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
     extern void renderer_submit(void);
+    extern void renderer_texture_will_read(NvnTexture *t);
+    renderer_texture_will_read(t);  // (a recorded clear of the image becomes its pass first)
     renderer_submit();  // same queue: the present pass runs after the frame's work
     TexBackend *b = t->backend;
     if (b) b->presented = true;
@@ -1278,12 +1280,14 @@ int ui_run(void) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
-            if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+            input_rumble_poll();
+            if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); LOG("window closed\n"); exit(0); }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        input_rumble_poll();
         int w, h;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);

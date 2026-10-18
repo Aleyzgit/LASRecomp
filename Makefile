@@ -129,7 +129,7 @@ CXXFLAGS := -O2 -g -std=c++17 -I$(IMGUI) -I$(IMGUI)/backends -Iruntime -Iruntime
 
 all: $(EXE) $(if $(GEN_SRC),$(GAMELIB))
 
-$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h
+$(B)/obj/%.o: $(GEN)/%.c runtime/cpu.h runtime/simd.h runtime/simd_fp.h
 	@mkdir -p $(dir $@)
 	@$(CC) $(GENFLAGS) -c $< -o $@
 
@@ -156,6 +156,19 @@ $(B)/inc/smaa_hlsl.inc: third_party/smaa/SMAA.hlsl
 	LC_ALL=C tr -d '\r' < $< | LC_ALL=C tr '\200-\377' '?' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' > $@
 $(B)/rt/nvn/smaa_data.o: $(B)/inc/smaa_hlsl.inc
 $(B)/rt/nvn/smaa_data.o: RTFLAGS += -I$(B)/inc -Ithird_party/smaa/Textures
+
+# The shader preparation's variant list (runtime/nvn/shader_prep.h: no shader code, hashes and pipeline state only)
+# as a C string for runtime/nvn/shader_prep.c
+$(B)/inc/shader_variants.inc: runtime/nvn/shader_variants.txt
+	@mkdir -p $(dir $@)
+	(LC_ALL=C tr -d '\r' < $< | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/'; echo '""') > $@
+$(B)/rt/nvn/shader_prep.o: $(B)/inc/shader_variants.inc
+$(B)/rt/nvn/shader_prep.o: RTFLAGS += -I$(B)/inc
+# the shader translator's id: part of the shader caches' tag (shader_cache_tag), so a changed translator rebuilds them
+TRANSLATOR_SRCS := runtime/nvn/maxwell/translate.c runtime/nvn/maxwell/shader.h
+TRANSLATOR_ID := $(shell cat $(TRANSLATOR_SRCS) | (shasum -a 256 2>/dev/null || sha256sum) | cut -c1-12)
+$(B)/rt/nvn/shader_prep.o: $(TRANSLATOR_SRCS)
+$(B)/rt/nvn/shader_prep.o: RTFLAGS += -DSHADER_TRANSLATOR_ID='"$(TRANSLATOR_ID)"'
 
 $(B)/rt/%.o: runtime/%.cpp $(RT_HDRS)
 	@mkdir -p $(dir $@)
