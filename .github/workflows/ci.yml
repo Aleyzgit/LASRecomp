@@ -56,6 +56,8 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Vulkan fence sequence regression
+        run: python3 tools/test_fence_sequence.py
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
       - name: FP/SIMD lowering vs a CPU emulator (a sample)
@@ -96,7 +98,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: make git
+          install: make git python
           pacboy: clang:p lld:p binutils:p sdl3:p ffmpeg:p vulkan-devel:p shaderc:p spirv-tools:p pkgconf:p
             vulkan-memory-allocator:p
       - name: App builds
@@ -105,6 +107,8 @@ jobs:
         run: |
           clang -O2 -pthread tools/test_condvar.c -o build/test-condvar.exe
           build/test-condvar.exe
+      - name: Vulkan fence sequence regression
+        run: python tools/test_fence_sequence.py
       - name: Windows guest thread stack regression
         run: |
           clang -std=gnu11 -O1 tools/test_windows_thread_stack.c -lpsapi -o build/test-thread-stack.exe
