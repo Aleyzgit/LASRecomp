@@ -227,6 +227,8 @@ none of their files are used):
   (GPL 2.0; Python bindings BSD; runs small pieces of code to resolve jump tables) and
   [python-lz4](https://github.com/python-lz4/python-lz4) (BSD 3-clause, with the LZ4 library: BSD 2-clause)
 - [envytools](https://github.com/envytools/envytools) - NVIDIA GPU documentation used for the shader translator
+- **Dusklight** by the TwilitRealm team (https://github.com/TwilitRealm/dusklight) - design inspiration for the start
+  screen (Play / Settings / Game Files layout)
 - The Switch homebrew community's documentation ([Switchbrew](https://switchbrew.org))
 
 ## Legal
