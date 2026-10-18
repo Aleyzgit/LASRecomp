@@ -51,6 +51,10 @@ jobs:
           cmake --install sdl-build
       - name: App builds
         run: make -j"$(nproc)" build/lasrecomp DEPS="$HOME/sdl3"
+      - name: Build cache and resume tests
+        run: |
+          python3 tools/test_build_cache.py
+          python3 tools/test_gamebuild_resume.py
       - name: Movie extractor lifecycle regression
         run: |
           clang -std=gnu11 -O1 tools/test_movie_extractor.c $(pkg-config --cflags --libs libavformat libavcodec libavutil libswscale) -pthread -o build/test-movie-extractor
@@ -93,6 +97,10 @@ jobs:
         run: |
           clang -std=gnu11 -O1 -pthread tools/test_simd_rounding.c -o build/test-simd-rounding
           build/test-simd-rounding
+      - name: Build cache and resume tests
+        run: |
+          python3 tools/test_build_cache.py
+          python3 tools/test_gamebuild_resume.py
       - name: Movie extractor lifecycle regression
         run: |
           clang -std=gnu11 -O1 -I"$(brew --prefix ffmpeg)/include" -L"$(brew --prefix ffmpeg)/lib" tools/test_movie_extractor.c -lavformat -lavcodec -lavutil -lswscale -pthread -o build/test-movie-extractor
@@ -132,6 +140,11 @@ jobs:
             vulkan-memory-allocator:p
       - name: App builds
         run: make -j"$(nproc)" build/lasrecomp.exe
+      - name: Build cache and resume tests
+        run: |
+          python3 tools/test_build_cache.py
+          python3 tools/test_gamebuild_resume.py
+          python3 tools/test_windows_processes.py
       - name: Movie extractor lifecycle regression
         run: |
           clang -std=gnu11 -O1 tools/test_movie_extractor.c -lavformat -lavcodec -lavutil -lswscale -o build/test-movie-extractor.exe

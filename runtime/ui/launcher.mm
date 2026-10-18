@@ -38,6 +38,7 @@ extern "C" {
 #include "platform.h"
 #include "paths.h"
 #include "gamebuild.h"
+#include "build_cache.h"
 #include "gamelib.h"
 #include "romfs_build.h"
 #include "settings.h"
@@ -195,7 +196,14 @@ static int count_files(const std::string &dir, int depth = 0) {
 // The copied romfs' file count, counted once (the checks below run every frame): -1 = count again (game files set
 // up, deleted)
 static int g_romfs_count = -1;
-static void game_files_changed(void) { g_romfs_count = -1; }
+static std::atomic<bool> g_build_cache_changed{true};
+static void game_files_changed(void) { g_romfs_count = -1; g_build_cache_changed = true; }
+static bool resumable_build(void) {
+    // The setup page redraws every frame; read its disk marker only after the files/build state changes.
+    static bool resumable;
+    if (g_build_cache_changed.exchange(false)) resumable = build_cache_resumable(g_root.c_str());
+    return resumable;
+}
 
 static std::string incomplete(int have) {
     char b[96];
@@ -322,6 +330,8 @@ static std::atomic<unsigned long long> g_done, g_total;
 // The bar: copying is the first tenth, building the game code (runtime/gamebuild.c) the rest
 static unsigned long long g_phase_base;
 static std::atomic<float> g_build_frac{-1};  // -1: not building
+static std::atomic<bool> g_cancel_build{false};
+static bool build_cancelled(void) { return g_cancel_build.load(); }
 static bool g_copy_skipped;                  // (only the game code to build: the bar is all of that)
 static bool g_auto_update;                   // started by itself: game files there, game code from an older version
 static void setup_progress(uint64_t done, uint64_t) { g_done = g_phase_base + done; }
@@ -372,13 +382,14 @@ static float extract_progress(void) {
 // Builds the game code from the copied files (a few minutes); false = failed (the job line says so)
 static bool build_game_code(void) {
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
-    GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
+    GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1, build_cancelled};
     char why[256] = "";
     g_build_frac = 0;
     bool ok = gamebuild_run(g_root.c_str(), &o, why, sizeof why);
     if (!ok) {
         fprintf(stderr, "[launcher] game code: %s\n", why);
-        set_failure(FAIL_BUILD);
+        if (g_cancel_build) set_job("Compilation cancelled. Completed files are kept.");
+        else set_failure(FAIL_BUILD);
     }
     return ok;
 }
@@ -389,6 +400,7 @@ static void *extract_thread(void *) {
     pthread_mutex_lock(&g_lock);
     src = g_src;
     pthread_mutex_unlock(&g_lock);
+    g_cancel_build = false;
     g_done = 0, g_total = 0, g_phase_base = 0, g_build_frac = -1, g_copy_skipped = false;
     game_files_changed();
     std::string exefs, romfs;
@@ -428,6 +440,10 @@ static void *extract_thread(void *) {
             goto done;
         }
         g_phase_base = rbytes, g_done = rbytes;
+        // Retrying a cancelled compilation must use the copied files and their cache.
+        pthread_mutex_lock(&g_lock);
+        g_src.clear();
+        pthread_mutex_unlock(&g_lock);
         if (!build_game_code()) goto done;
     }
 check:
@@ -890,7 +906,7 @@ static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy,
         pw = fmaxf(pw, g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, notes[i]).x + 96 * sc);
     pw = fminf(fmaxf(pw, ts.x + 96 * sc), ds.x - 32 * sc);
     float ph = bar_y + 24 * sc + 26 * sc + line_h + (nnotes ? 14 * sc + nnotes * line_h : 0) + 40 * sc +
-               (preparing ? line_h + 28 * sc : 0);  // (Skip)
+               (preparing ? line_h + 28 * sc : recompiling ? 54 * sc : 0);  // (Skip / Cancel)
     ImVec2 a(o.x + (ds.x - pw) * 0.5f, o.y + (ds.y - ph) * 0.5f), b(a.x + pw, a.y + ph);
     fg->AddRectFilled(a, b, IM_COL32(15, 23, 20, 250), 14 * sc);
     fg->AddRect(a, b, IM_COL32(236, 194, 84, 140), 14 * sc, 0, 1.5f * sc);
@@ -908,6 +924,18 @@ static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy,
         ImVec2 ns = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, notes[i]);
         fg->AddText(g_font_small, sfs, ImVec2((a.x + b.x - ns.x) * 0.5f, bb.y + 26 * sc + (i + 1) * line_h + 14 * sc),
                     IM_COL32(150, 148, 140, 255), notes[i]);
+    }
+    if (recompiling) {  // Shader preparation has its own Skip action; cancellation only stops the game-code build.
+        ImVec2 ca((a.x + b.x) * 0.5f - 150 * sc, b.y - 66 * sc), cb(ca.x + 300 * sc, ca.y + 44 * sc);
+        bool hover = !g_cancel_build && ImGui::IsMouseHoveringRect(ca, cb, false);
+        fg->AddRectFilled(ca, cb, hover ? IM_COL32(80, 80, 55, 255) : IM_COL32(45, 55, 45, 255), 8 * sc);
+        const char *cancel = g_cancel_build ? "Cancelling..." : "Cancel (B / Esc)";
+        ImVec2 cs = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, cancel);
+        fg->AddText(g_font_small, sfs, ImVec2((ca.x + cb.x - cs.x) * 0.5f, (ca.y + cb.y - cs.y) * 0.5f),
+                    IM_COL32(236, 194, 84, 255), cancel);
+        if ((hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            g_cancel_build = true;
     }
     if (preparing) {  // Skip: the game then compiles what it needs as it goes (B / Esc too)
         const char *sk = g_prep_skip ? "Skipping..." : "Skip";
@@ -1237,6 +1265,7 @@ extern "C" void launcher_run(const char *root) {
         pthread_mutex_unlock(&g_lock);
         static bool was_busy;
         if (was_busy && !busy) {
+            g_build_cache_changed = true;
             status = check_game_files(g_root);
             if (status.empty()) { load_background(dev); page = MAIN; }
             if (status.empty() && ap && getenv("LARECOMP_LAUNCHER_PREPARE")) play = true;
@@ -1567,7 +1596,8 @@ extern "C" void launcher_run(const char *root) {
                     first_row();
                     opt_section("Set up");
                     if (busy || (src.empty() && !check_copied_files(g_root).empty())) opt_disable_next();
-                    if (opt_action("Set up game files", busy ? "Working..." : "", ex_d.c_str(), true)) {
+                    bool resume = !busy && src.empty() && resumable_build();
+                    if (opt_action(resume ? "Resume game code" : "Set up game files", busy ? "Working..." : "", ex_d.c_str(), true)) {
                         pthread_mutex_lock(&g_lock);
                         g_busy = true;
                         pthread_mutex_unlock(&g_lock);
@@ -1602,6 +1632,16 @@ extern "C" void launcher_run(const char *root) {
                             g_confirm_delete = false, files_gb = -1;
                         }
                         if (opt_action("Cancel", "", "Keeps the game files.", true)) g_confirm_delete = false;
+                    }
+                }
+                if (!busy) {
+                    opt_section("Build cache");
+                    if (opt_action("Clear build cache", "", "Removes generated source, finished objects and compiler caches. "
+                                   "The installed game library, game files and saves are kept. The next build starts over.", true)) {
+                        char why[512] = "";
+                        g_build_cache_changed = true;
+                        if (build_cache_clear(g_root.c_str(), why, sizeof why)) set_job("Build cache cleared.");
+                        else set_job("Could not clear the build cache.", true, why);
                     }
                 }
                 if (!job_line.empty()) {  // the current step / result
@@ -1639,6 +1679,7 @@ extern "C" void launcher_run(const char *root) {
                                                                          strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":preparing") ||
                                                                          strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":skipask"));
                 if (busy || test_busy) draw_busy_overlay(ds, job, test_busy);  // (everything dimmed, a bar in front)
+
             }
 
             // status (lower left) and version (lower right) - not under the Settings / Game Files windows
