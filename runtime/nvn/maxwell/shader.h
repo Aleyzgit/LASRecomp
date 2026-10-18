@@ -99,6 +99,9 @@ extern uint32_t maxwell_gmem_chunk_shift;
 extern bool maxwell_gmem_check;
 // (=2: stores and atomics also go through the whole heap, after the chunked one: if that mends the picture, the chunked store is at fault)
 extern bool maxwell_gmem_check_store;
+// One binding per chunk (GMEM_CHUNK_BINDING + k, GMiss after the last) and plain if-chains without the dummy / miss
+// logic: beta_5's form, for windows of one import (exec.c: LARECOMP_VK_GMEM_FORM=bindings)
+extern bool maxwell_gmem_bindings;
 #define GMEM_CHUNKS_MAX 256  // descriptors in the array (HEAP_MAX in 16 MB chunks is 208)
 #define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
 #define GMEM_CHUNK_BINDING 0  // GMem gmem_[chunks]

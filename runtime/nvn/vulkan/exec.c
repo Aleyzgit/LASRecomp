@@ -2130,6 +2130,7 @@ static struct {
 static int gc_n;             // chunks over HEAP_MAX
 static uint32_t gc_shift;    // 0: one buffer
 static bool gc_lazy;         // imports per chunk (else windows of gmem_buf)
+static bool gc_bindings;     // one binding per window, no dummy / miss logic (shader.h maxwell_gmem_bindings)
 static VkBuffer gc_dummy, gc_miss_buf;
 static VmaAllocation gc_dummy_mem, gc_miss_mem;
 static uint32_t *gc_miss;    // GMiss, host-visible: per chunk, shader accesses that found the dummy
@@ -2163,6 +2164,7 @@ static uint32_t gmem_chunk_shift(void) {
     if (e) { uint64_t b = strtoull(e, NULL, 10) << 20; if (b) shift = 63 - __builtin_clzll(b); }
     else if (gc_lazy) shift = 24;
     else if (HEAP_MAX > lim && lim) shift = 63 - __builtin_clzll(lim);
+    if (shift > 30) shift = 30;  // (1 GB at most: NVIDIA computes a block's length in signed 32 bits, a 2 GB range reads as negative)
     // The array holds GC_MAX chunks at most, and a stage's storage buffers (the chunks, GMiss, gfast, binding 17) its
     // limit (Intel: 200): a chunk size that doesn't fit grows until it does (4 MB asked for -> 16 MB; 16 MB on the UHD
     // 770 -> 32 MB). One buffer only where one buffer is within maxStorageBufferRange.
@@ -2187,6 +2189,9 @@ static uint32_t gmem_chunk_shift(void) {
     gc_n = shift ? n : 0;
     maxwell_gmem_check = shift && !gc_lazy && getenv("LARECOMP_VK_GMEM_CHECK") && atoi(getenv("LARECOMP_VK_GMEM_CHECK")) != 0;
     maxwell_gmem_check_store = maxwell_gmem_check && atoi(getenv("LARECOMP_VK_GMEM_CHECK")) >= 2;
+    gc_bindings = shift && !gc_lazy && getenv("LARECOMP_VK_GMEM_FORM") && !strcmp(getenv("LARECOMP_VK_GMEM_FORM"), "bindings");
+    maxwell_gmem_bindings = gc_bindings;
+    if (gc_bindings) LOG("[vk] guest heap windows as one binding each, plain branches (LARECOMP_VK_GMEM_FORM=bindings)\n");
     if (maxwell_gmem_check) LOG("[vk] guest heap chunks: every chunked read is checked against the whole heap (LARECOMP_VK_GMEM_CHECK)\n");
     if (shift) LOG("[vk] guest heap bound to shaders in %llu MB chunks%s (storage buffers up to %llu MB here)\n",
                    (unsigned long long)(1ull << shift) >> 20, gc_lazy ? ", imported as the game binds them" : "", (unsigned long long)lim >> 20);
@@ -2244,9 +2249,14 @@ static void gc_touch(uint64_t off, uint64_t size) {
 static VkDescriptorSetLayout gmem_chunk_layout(void) {
     if (gc_layout) return gc_layout;
     VkShaderStageFlags st_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
-    VkDescriptorSetLayoutBinding lb[2] = {{GMEM_CHUNK_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)gc_n, st_, NULL},
-                                          {GMEM_MISS_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, st_, NULL}};
-    VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = lb};
+    static VkDescriptorSetLayoutBinding lb[GC_MAX + 1];
+    uint32_t nb = 0;
+    if (gc_bindings) for (int k = 0; k < gc_n; k++) lb[nb++] = (VkDescriptorSetLayoutBinding){GMEM_CHUNK_BINDING + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, st_, NULL};
+    else {
+        lb[nb++] = (VkDescriptorSetLayoutBinding){GMEM_CHUNK_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)gc_n, st_, NULL};
+        lb[nb++] = (VkDescriptorSetLayoutBinding){GMEM_MISS_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, st_, NULL};
+    }
+    VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = nb, .pBindings = lb};
     VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &ci, NULL, &gc_layout));
     return gc_layout;
 }
@@ -2287,11 +2297,19 @@ static VkDescriptorSet gmem_chunk_set(void) {
     }
     bi[gc_n] = (VkDescriptorBufferInfo){gc_miss_buf, 0, sizeof(uint32_t) * 2 * GC_MAX};
     VkDescriptorSet set = vk_alloc_set(gmem_chunk_layout());
-    VkWriteDescriptorSet w[2] = {{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_CHUNK_BINDING,
-                                  .descriptorCount = (uint32_t)gc_n, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = bi},
-                                 {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_MISS_BINDING,
-                                  .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[gc_n]}};
-    vkUpdateDescriptorSets(g_vk.dev, 2, w, 0, NULL);
+    if (gc_bindings) {  // (one write per window, no GMiss)
+        static VkWriteDescriptorSet w[GC_MAX];
+        for (int k = 0; k < gc_n; k++)
+            w[k] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_CHUNK_BINDING + k,
+                                          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[k]};
+        vkUpdateDescriptorSets(g_vk.dev, (uint32_t)gc_n, w, 0, NULL);
+    } else {
+        VkWriteDescriptorSet w[2] = {{.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_CHUNK_BINDING,
+                                      .descriptorCount = (uint32_t)gc_n, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = bi},
+                                     {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_MISS_BINDING,
+                                      .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[gc_n]}};
+        vkUpdateDescriptorSets(g_vk.dev, 2, w, 0, NULL);
+    }
     gc_set = set; gc_set_seq = seq; gc_set_gen = gc_gen;
     return set;
 }

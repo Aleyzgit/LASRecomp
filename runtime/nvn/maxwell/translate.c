@@ -24,7 +24,7 @@
 
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
-bool maxwell_gmem_check, maxwell_gmem_check_store;
+bool maxwell_gmem_check, maxwell_gmem_check_store, maxwell_gmem_bindings;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -1823,6 +1823,28 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         if (c->uses_gmem_store)
             sp(&s, "#define GMW(i, v) gmem_.w[i] = (v)\n#define GMAND(i, m) atomicAnd(gmem_.w[i], m)\n"
                    "#define GMOR(i, m) atomicOr(gmem_.w[i], m)\n");
+    } else if (info->uses_gmem && maxwell_gmem_bindings) {  // the heap in windows, one binding each, plain branches (shader.h)
+        int n = maxwell_gmem_chunks(), ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
+        for (int k = 0; k < n; k++)
+            sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem%d { uint w[]; } gmem%d_;\n", cs, GMEM_CHUNK_BINDING + k,
+               c->uses_gmem_store ? "" : "readonly ", k, k);
+        sp(&s, "uint GMR_(uint i) { uint c = i >> %du, o = i & 0x%xu;\n", ws, (1u << ws) - 1);
+        for (int k = 0; k < n; k++) sp(&s, "  if (c == %du) return gmem%d_.w[o];\n", k, k);
+        sp(&s, "  return 0u; }\n#define GMR(i) GMR_(i)\n");
+        if (c->uses_gmem_store) {
+            static const char *const ops[3][2] = {{"GMW_", "gmem%d_.w[o] = v"}, {"GMAND_", "atomicAnd(gmem%d_.w[o], v)"},
+                                                  {"GMOR_", "atomicOr(gmem%d_.w[o], v)"}};
+            for (int op = 0; op < 3; op++) {
+                sp(&s, "void %s(uint i, uint v) { uint c = i >> %du, o = i & 0x%xu;\n", ops[op][0], ws, (1u << ws) - 1);
+                for (int k = 0; k < n; k++) {
+                    char body[64];
+                    snprintf(body, sizeof body, ops[op][1], k);
+                    sp(&s, "  if (c == %du) { %s; return; }\n", k, body);
+                }
+                sp(&s, "}\n");
+            }
+            sp(&s, "#define GMW(i, v) GMW_(i, v)\n#define GMAND(i, m) GMAND_(i, m)\n#define GMOR(i, m) GMOR_(i, m)\n");
+        }
     } else if (info->uses_gmem) {  // the heap in chunks: a descriptor array, one case per chunk (shader.h)
         int n = maxwell_gmem_chunks(), ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);  // (word index: chunk = i >> ws)
         sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GMem { uint w[]; } gmem_[%d];\n", cs, GMEM_CHUNK_BINDING,
