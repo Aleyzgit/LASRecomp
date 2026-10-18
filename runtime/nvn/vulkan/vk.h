@@ -29,6 +29,7 @@ typedef struct {
     VkDevice dev;
     VkQueue queue;
     uint32_t qfam;
+    uint32_t ts_bits;          // the queue's timestampValidBits (0: no timestamps)
     VmaAllocator vma;
     VkPhysicalDeviceProperties props;
     VkPipelineCache pcache;

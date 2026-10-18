@@ -34,7 +34,21 @@ uint64_t pace_frames_over(void) {
     return n;
 }
 
+// LARECOMP_SPIKE_MS=<ms> [LARECOMP_SPIKE_EVERY=<frames>, default 60]: the presenting (game) thread sleeps that long
+// every that many frames from frame 2700 on (in play after a scripted load): a CPU-side hitch with the GPU idle
+// (dynamic resolution tests).
+static void spike_test(void) {
+    static long ms = -1, every, frame;
+    if (ms < 0) {
+        ms = getenv("LARECOMP_SPIKE_MS") ? atol(getenv("LARECOMP_SPIKE_MS")) : 0;
+        every = getenv("LARECOMP_SPIKE_EVERY") ? atol(getenv("LARECOMP_SPIKE_EVERY")) : 60;
+        if (every < 1) every = 60;
+    }
+    if (ms > 0 && ++frame > 2700 && frame % every == 0) plat_sleep_until_ns(plat_now_ns() + (uint64_t)ms * 1000000);
+}
+
 void pace_frame(void) {
+    spike_test();
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_PACE"); on = !e || atoi(e) != 0; }
     static uint64_t last, last_wait;

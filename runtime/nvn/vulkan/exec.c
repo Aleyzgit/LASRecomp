@@ -28,7 +28,7 @@ static uint64_t stat_upload_bytes;
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
 static uint64_t prof_exec, prof_draw, prof_sets, prof_vtx, prof_submit, prof_pre, prof_key, prof_dyn, prof_tex, prof_up, prof_gpu;
-static VkQueryPool prof_qp;
+static VkQueryPool prof_qp;  // the GPU timer's timestamps (2 per ring slot)
 static uint64_t cum_exec, cum_wait, cum_draws, cum_submits;  // (profiling) never reset: hitch log
 static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
 uint64_t prof_views_created;  // textures.c vk_image_view cache misses
@@ -46,7 +46,8 @@ void vk_collect_dead(void);
 #define SUBS 8
 typedef struct {
     VkCommandBuffer main, upload;
-    bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (profiling)
+    bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (the GPU timer)
+    bool ts_skip;                       // (waits on the window image: not counted, see vk_gpu_total_ns)
     uint64_t seq;
     VkDescriptorPool pools[16];
     int npools, cur_pool;
@@ -158,17 +159,42 @@ static void cq_resolve_done(uint64_t done) {  // every slot whose submission is 
     pthread_mutex_unlock(&cq_lock);
 }
 
+// ---- GPU timer (dynamic resolution, runtime/nvn/output_scale.c; and LARECOMP_VK_PROF's "gpu"): a timestamp at the
+// start and the end of each submission's main command buffer, read when its ring slot comes round again (so a few
+// submissions late; the controller averages half a second). Submissions overlap a little (the next one's commands
+// may start before the previous one's end): their union is counted, the time the GPU was busy. The window image's
+// submission isn't counted - it waits for the image, which can be a vsync's wait - but the game's work is submitted
+// before it (device.c backend_present), so only the blit and the menu go uncounted.
+static uint64_t gpu_total_ns, gpu_last_end;  // ns counted; (ticks) the latest submission end seen
+static bool gpu_timer_on;
+
+static void gpu_timer_add(uint64_t t0, uint64_t t1, bool skip) {
+    double per = g_vk.props.limits.timestampPeriod;
+    if (g_vk.ts_bits < 64) { uint64_t m = (1ull << g_vk.ts_bits) - 1; t0 &= m, t1 &= m; }
+    if (t1 < t0 || (t1 - t0) * per > 1e9) return;  // (wrapped, or nonsense)
+    if (gpu_last_end > t0 && (gpu_last_end - t0) * per > 1e9) gpu_last_end = 0;  // (the counter wrapped)
+    uint64_t from = t0 > gpu_last_end ? t0 : gpu_last_end;
+    if (t1 > gpu_last_end) gpu_last_end = t1;
+    if (skip || t1 <= from) return;
+    uint64_t ns = (uint64_t)((double)(t1 - from) * per);
+    __atomic_add_fetch(&gpu_total_ns, ns, __ATOMIC_RELAXED);
+    if (prof) prof_gpu += ns;
+}
+
+// GPU time of all counted submissions so far (ns); -1: no GPU timer on this device
+int64_t vk_gpu_total_ns(void) { return gpu_timer_on ? (int64_t)__atomic_load_n(&gpu_total_ns, __ATOMIC_RELAXED) : -1; }
+
 static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
     if (s->seq != submit_seq + 1) {  // slot reused: its previous submission must be done
         wait_why = "ring slot";
         vk_wait_seq(s->seq);
         cq_resolve_done(s->seq);
-        if (s->ts) {  // (profiling) GPU time of that submission
+        if (s->ts) {  // GPU time of that submission
             uint64_t t[2];
-            if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)cur_sub * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS && t[1] > t[0])
-                prof_gpu += (uint64_t)((double)(t[1] - t[0]) * g_vk.props.limits.timestampPeriod);
-            s->ts = false;
+            if (vkGetQueryPoolResults(g_vk.dev, prof_qp, (uint32_t)cur_sub * 2, 2, sizeof t, t, 8, VK_QUERY_RESULT_64_BIT) == VK_SUCCESS)
+                gpu_timer_add(t[0], t[1], s->ts_skip);
+            s->ts = s->ts_skip = false;
         }
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
         s->cur_pool = 0;
@@ -210,7 +236,7 @@ VkCommandBuffer vk_cmd(void) {
             if (q->pool) vkCmdResetQueryPool(s->main, q->pool, 0, CQ_MAX);
         }
         gp_mark(s->main, "(submission start; includes GPU idle before it)");
-        if (prof && prof_qp) {
+        if (prof_qp) {
             vkCmdResetQueryPool(s->main, prof_qp, (uint32_t)cur_sub * 2, 2);
             vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_NONE, prof_qp, (uint32_t)cur_sub * 2);
             s->ts = true;
@@ -314,6 +340,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->upload};
     }
     vk_cmd();  // (an empty main buffer still carries the semaphores)
+    s->ts_skip = wait != VK_NULL_HANDLE;
     if (s->ts) vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, prof_qp, (uint32_t)cur_sub * 2 + 1);
     VK_CHECK(vkEndCommandBuffer(s->main));
     cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->main};
@@ -788,11 +815,15 @@ static void st_defaults(void) {
 
 void vk_exec_init(void) {
     prof = getenv("LARECOMP_VK_PROF") != NULL;
-    if (prof) {
-        prof_up_ns = 0;
+    if (prof) prof_up_ns = 0;
+    // the GPU timer (LARECOMP_VK_GPU_TIMER=0: off - dynamic resolution then goes by the frame times)
+    const char *gt = getenv("LARECOMP_VK_GPU_TIMER");
+    if (g_vk.ts_bits && g_vk.props.limits.timestampComputeAndGraphics && g_vk.props.limits.timestampPeriod > 0 && !(gt && !atoi(gt))) {
         VkQueryPoolCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO, .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = SUBS * 2};
         if (vkCreateQueryPool(g_vk.dev, &qi, NULL, &prof_qp) != VK_SUCCESS) prof_qp = VK_NULL_HANDLE;
     }
+    gpu_timer_on = prof_qp != VK_NULL_HANDLE;
+    LOG("[vk] GPU timer %s (dynamic resolution goes by %s)\n", gpu_timer_on ? "on" : "off", gpu_timer_on ? "GPU time" : "frame times");
     st_defaults();
 }
 
