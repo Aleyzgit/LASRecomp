@@ -20,6 +20,9 @@ FIELD_MINIBOSSES = {
     0x59: [],              # Master Stalfos (starts by himself)
     0x57: [],              # Lanmola (his rail from Field_13O; copies give no item: tools/rando/miniboss_guard.py)
     0x52: ['Bossblin'],    # Moblin Chief (his hideout's story check skipped on the Field: tools/patches.py)
+    0x55: [],              # Ball-and-chain Soldier (Dampe's chamber dungeons only; fights on his own)
+    0x21E: [],             # Shadow Link (Dampe's chamber, unlocked by an amiibo in the original; rises from a shadow and
+    #                        fights on his own; his defeat event only plays his fade - no flags, a rupee drops)
 }
 MINIBOSS_VARIANTS = {0x53: [['HinoxStart'], [2]]}  # (one picked per mini-boss: Hinox 2 = Turtle Rock's blue one)
 ANY_TERRAIN_MINIBOSSES = {0x58}  # (also on water / shallow water / air / tree / hole spots: Cue Ball, tested 2026-10-12)
