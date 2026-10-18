@@ -18,7 +18,7 @@ FIELD_MINIBOSSES = {
     0x51: ['RolaStart'],   # Rolling Bones (with its spike bar)
     0x5F: [],              # Blaino (his knock-out punch: Link falls back down - runtime)
     0x58: [1, 0],          # Cue Ball (circles a rail fitted to the room)
-    0x59: [],              # Master Stalfos (starts by himself)
+    0x59: [3],             # Master Stalfos (starts by himself; 3: his last fight - no escape, he dies: miniboss_guard)
     0x57: [],              # Lanmola (his rail from Field_13O; copies give no item: tools/rando/miniboss_guard.py)
     0x52: ['Bossblin'],    # Moblin Chief (his hideout's story check skipped on the Field: tools/patches.py)
     0x55: [],              # Ball-and-chain Soldier (Dampe's chamber dungeons only; fights on his own)
