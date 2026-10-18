@@ -30,6 +30,7 @@ static Uint32 duration;
 Uint64 SDL_GetTicks(void) { return ticks; }
 SDL_Window *SDL_GetKeyboardFocus(void) { return focus ? (SDL_Window *)1 : NULL; }
 bool menu_is_open(void) { return menu; }
+Settings g_settings = {.rumble = true, .rumble_strength = 100};  // (the Rumble settings: on, full, as by default)
 void SDL_LockSpinlock(SDL_SpinLock *p) { (void)p; }
 void SDL_UnlockSpinlock(SDL_SpinLock *p) { (void)p; }
 const char *SDL_GetError(void) { return "test: unsupported controller"; }
@@ -100,6 +101,11 @@ int main(void) {
     single(handles[0], (RumbleValue){.low_amp=1}); menu = true; input_rumble_poll(); assert(low == 0);
     menu = false; single(handles[0], (RumbleValue){.low_amp=1}); focus = false;
     input_rumble_poll(); assert(low == 0); focus = true;
+    g_settings.rumble = false; single(handles[0], (RumbleValue){.low_amp=1});
+    input_rumble_poll(); assert(low == 0); g_settings.rumble = true;  // Rumble setting off
+    g_settings.rumble_strength = 50; single(handles[0], (RumbleValue){.low_amp=1});
+    input_rumble_poll(); assert(low == 32767); g_settings.rumble_strength = 100;  // Intensity 50%
+    single(handles[0], (RumbleValue){0}); input_rumble_poll(); assert(low == 0);
     pad = NULL; single(handles[0], (RumbleValue){.low_amp=1}); before = calls;
     input_rumble_poll(); assert(calls == before); pad = (SDL_Gamepad *)1;
     input_rumble_poll(); assert(low == 0); // no replay on reconnect
