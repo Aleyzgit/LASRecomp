@@ -1582,7 +1582,9 @@ static void pipe_key_fill(PipeKey *k, Prog *pr, const PipeIn *in, const VkFormat
     memset(k, 0, sizeof *k);
     k->prog = pr;
     k->ncolor = ncolor;
-    memcpy(k->color, color, sizeof k->color);
+    // (only the pass's own slots: begin_pass leaves the slots past them as the last pass with more targets set them -
+    // a depth-only pass's key carried the previous pass's color formats, so prepared pipelines never matched it)
+    for (uint32_t i = 0; i < ncolor && i < 8; i++) k->color[i] = color[i];
     k->depth = depth;
     k->stencil = stencil;
     k->samples = samples;
