@@ -50,6 +50,10 @@ jobs:
           cmake --install sdl-build
       - name: App builds
         run: make -j"$(nproc)" build/lasrecomp DEPS="$HOME/sdl3"
+      - name: Kernel condition-variable regression
+        run: |
+          clang -O2 -pthread tools/test_condvar.c -o build/test-condvar
+          build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
       - name: SIMD rounding and host-state regression
@@ -75,6 +79,10 @@ jobs:
         run: |
           clang -std=gnu11 -O1 -pthread tools/test_simd_rounding.c -o build/test-simd-rounding
           build/test-simd-rounding
+      - name: Kernel condition-variable regression
+        run: |
+          clang -O2 -pthread tools/test_condvar.c -o build/test-condvar
+          build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
       - name: Game address table tests
@@ -101,6 +109,10 @@ jobs:
             vulkan-memory-allocator:p
       - name: App builds
         run: make -j"$(nproc)" build/lasrecomp.exe
+      - name: Kernel condition-variable regression
+        run: |
+          clang -O2 -pthread tools/test_condvar.c -o build/test-condvar.exe
+          build/test-condvar.exe
       - name: Windows guest thread stack regression
         run: |
           clang -std=gnu11 -O1 tools/test_windows_thread_stack.c -lpsapi -o build/test-thread-stack.exe
