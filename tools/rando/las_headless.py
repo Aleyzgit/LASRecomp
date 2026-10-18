@@ -95,7 +95,8 @@ def default_settings(seed):
         'seashells-important': True, 'trade-important': False, 'randomize-music': False, 'open-mabe': False,
         'boss-cutscenes': True, 'randomize-enemies': False, 'randomize-enemy-sizes': False, 'shuffle-dungeons': False,
         'blur-removal': False, 'OHKO': False, 'lv1-beam': False, 'nice-rod': True, 'nice-bombs': False,
-        'stealing': 'always', 'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
+        'stealing': 'always',  # never / normal (needs the sword, vanilla) / always: the Randomizer tab's Stealing rows
+        'fast-chests': True, 'fast-keys': True, 'keysanity': 'off', 'randomize-environments': False,
         'skip-story-events': True, 'tunic-color': 'default', 'enemy-minibosses': False, 'miniboss-frequency': 0, 'no-buff-drops': False,
         'enemy-mode': 'seeded',  # seeded (fixed in the level files) / random (re-rolled at every load: enemy_random.py)
         'bushes': False, 'boss-souls': False, 'miniboss-souls': False,
@@ -185,6 +186,8 @@ def main():
         else:
             settings[k] = v
     settings['excluded-locations'] = set(settings['excluded-locations'])
+    if settings['stealing'] not in rd.STEALING_REQUIREMENTS:
+        raise SystemExit(f"bad stealing setting {settings['stealing']!r}")
     # optional location groups (Randomizer tab): included = real checks with logic instead of junk
     groups = {'include-fishing': rd.FISHING_REWARDS, 'include-rapids': rd.RAPIDS_REWARDS,
               'include-dampe': rd.DAMPE_REWARDS, 'include-trade-gifts': rd.TRADE_GIFT_LOCATIONS,

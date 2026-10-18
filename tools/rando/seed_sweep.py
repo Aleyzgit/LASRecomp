@@ -8,7 +8,7 @@ actually be walked to from (field_reach.tile_regions): a seed the logic finishes
 the logic thinks is open too early - the circular dig-spot gates of #81 / #144. Seed IDs are encoded like
 runtime/ui/rando_tab.mm (seed_id_encode, request.json in start_generation): keep the two in step.
 
-usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir]
+usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir] [--stealing M] [--shopsanity N]
        (default: the fixed seed IDs below + 40 random option mixes with digsanity on, every logic level)
 Exit status 1 if any seed fails either check. Run it with the LAS venv's Python (third_party/LAS-Randomizer/venv).
 """
@@ -66,7 +66,8 @@ def decode(text):
     o = {'rng': get(36)}
     o.update((k, get(w)) for k, w in FIELDS)
     o.update((k, bool(get(1))) for k in FLAGS)
-    pos[0] = BITS - 8
+    pos[0] = BITS - 10  # (fixed places before the checksum: rando_tab.mm SEED_ID_STEALSWORD .. SEED_ID_MBFREQ)
+    o['steal_needs_sword'], o['no_stealing'] = bool(get(1)), bool(get(1))
     o['enemy_mode'], o['miniboss_freq'] = get(1), get(2)
     return o
 
@@ -83,7 +84,9 @@ def encode(o):
     for k in FLAGS:
         put(o.get(k, False), 1)
     bits.extend([0] * (BITS - 5 - len(bits)))
-    del bits[BITS - 8:]
+    del bits[BITS - 10:]
+    put(o.get('steal_needs_sword', False), 1)
+    put(o.get('no_stealing', False), 1)
     put(o.get('enemy_mode', 0), 1)
     put(o.get('miniboss_freq', 0), 2)
     put(_check(bits + [0] * 5), 5)
@@ -116,11 +119,17 @@ def request(sid, o, logic='basic'):
         'keysanity': ['off', 'keys', 'keys+nk', 'all'][o['keysanity']],
         'dungeon-room-shuffle': ['off', 'coherent', 'chaos', 'madness'][o['room_shuffle']],
         'shopsanity': ['off', 'vanilla', 'random'][o['shopsanity']], 'trendsanity': o['trendsanity'],
+        'stealing': stealing(o),
         'boss-souls': o['boss_souls'], 'miniboss-souls': o['miniboss_souls'], 'hookshot-anything': o['hookshot_any'],
         'entrance-tier': tier, 'entrance-decoupled': tier >= 2 and o['decoupled'],
         'pet-rooster': o['pet_rooster'], 'pet-ghost': o['pet_ghost'], 'open-desert': not o['pet_marin'],
         'include': [f'{s}-seashell-reward' for s in shells],
         'exclude': [f'{s}-seashell-reward' for s in shells[o['seashells']:]]}
+
+
+def stealing(o):
+    """LAS 'stealing' as rando_tab.mm writes it (stealing off only with shopsanity)."""
+    return 'never' if o['shopsanity'] and o['no_stealing'] else 'normal' if o['steal_needs_sword'] else 'always'
 
 
 def random_options(rng):
@@ -130,7 +139,7 @@ def random_options(rng):
     o.update(digs=True, skip_story=True, fast_songs=True, spoiler=True, seashells=rng.randrange(6),
              dungeon_items=rng.randrange(4), keysanity=rng.randrange(4), traps=rng.randrange(5),
              entrances=rng.choice([0, 0, 1, 2, 2]), room_shuffle=rng.choice([0, 0, 0, 1, 2]),
-             shopsanity=rng.randrange(3))
+             shopsanity=rng.randrange(3), steal_needs_sword=rng.random() < 0.5, no_stealing=rng.random() < 0.3)
     for k in ('bomb_bag', 'powder_bag', 'bushes', 'pots', 'open_mabe', 'decoupled', 'pet_rooster', 'pet_ghost',
               'pet_marin', 'trendsanity', 'boss_souls', 'miniboss_souls', 'hookshot_any', 'no_start_sword',
               'no_start_shield', 'no_start_ocarina', 'shuffle_instruments', 'shuffle_dungeons', 'inc_trade',
@@ -240,6 +249,9 @@ def main():
     ap.add_argument('--levels', default='basic,advanced,glitched,hell')
     ap.add_argument('--seed', type=int, default=144)
     ap.add_argument('--keep')
+    ap.add_argument('--stealing', choices=['never', 'normal', 'always'], help='every random mix with this stealing rule')
+    ap.add_argument('--shopsanity', type=int, choices=[0, 1, 2], help='every random mix with this shopsanity (off / '
+                    'vanilla / random prices)')
     args = ap.parse_args()
     romfs = os.path.abspath(args.romfs)
     if args.keep:
@@ -250,11 +262,19 @@ def main():
     jobs = [(sid, decode(sid), levels[0]) for sid in (args.id or FIXED)]
     for i in range(args.n if not args.id else 0):
         o = random_options(rng)
+        if args.shopsanity is not None:
+            o['shopsanity'] = args.shopsanity
+        if args.stealing:
+            o['no_stealing'], o['steal_needs_sword'] = args.stealing == 'never', args.stealing == 'normal'
+            if args.stealing == 'never' and not o['shopsanity']:
+                sys.exit('--stealing never needs shopsanity (stealing off is a shopsanity sub-option)')
         jobs.append((encode(o), o, levels[i % len(levels)]))
     bad = 0
     with concurrent.futures.ProcessPoolExecutor(args.j) as ex:
         for sid, level, res, lost in ex.map(run_one, [j + (romfs, args.keep, walk) for j in jobs]):
-            print(f'{sid} {level:9} {res}', flush=True)
+            d = decode(sid)
+            print(f"{sid} {level:9} shop {['off', 'vanilla', 'random'][d['shopsanity']]:7} steal {stealing(d):6} {res}",
+                  flush=True)
             for k, item, need in (lost or [])[:8]:
                 print(f'    {k}: {item} - walkable only from {need}')
             bad += res != 'ok'
