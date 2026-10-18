@@ -266,7 +266,7 @@ static void set_failure(int k, int have = -1) {
         "LAS Recomp needs version 1.0.0 of the game, without updates.",
         "Some of the game's files are missing - usually a copy or unzip that stopped partway. Copy the game files "
         "again so none are missing, then choose the folder again.",
-        "Make sure there's about 2 GB free and try again. If it keeps happening, report it on Discord or GitHub."};
+        "Make sure there's about 2 GB free and try again. If it keeps happening, report it on GitHub."};
     if (k < 1 || k > 6) return;
     if (k == FAIL_MISSING && have >= 0) {
         char b[320];
@@ -285,7 +285,7 @@ static bool is_dir(const std::string &p) {
 }
 
 // exefs: the folder with main and main.npdm; romfs: the folder with region_common (the game's data root). Found
-// in the picked folder or a few levels below it (dump tools nest them).
+// in the picked folder or a few levels below it (some folder layouts nest them).
 static void find_game(const std::string &dir, int depth, std::string &exefs, std::string &romfs, bool &unusable) {
     if (depth > 4 || (!exefs.empty() && !romfs.empty())) return;
     if (exefs.empty() && file_exists(dir + "/main") && file_exists(dir + "/main.npdm")) exefs = dir;
@@ -1012,7 +1012,7 @@ static void prelaunch_tab(float sc) {
                 fs ? "Nintendo font (imported)" : "substitute (this OS's, per language)",
                 fl ? "Nintendo font (imported)" : "substitute", fe ? "imported" : "substitute");
     ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("Fonts aren't included. For the original look, dump them from your own Switch and import "
+    ImGui::TextDisabled("Fonts aren't included. For the original look, import your own copies of "
                         "nintendo_udsg-r_std_003.bfttf (text), the same-named files for Chinese and Korean "
                         "(nintendo_udsg-r_org_zh-cn_003, nintendo_udsg-r_ext_zh-cn_003, nintendo_udjxh-db_zh-tw_003, "
                         "nintendo_udsg-r_ko_003) and nintendo_ext_003.bfttf (button icons). "
