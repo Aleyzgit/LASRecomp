@@ -5,7 +5,7 @@ from RandomizerCore.randomizer_data import ENEMY_DATA
 # the runtime, runtime/hle/miniboss.c). id -> leb parameters. Only replaces randomized 'land' enemies on the Field
 # (never the Excluded_Actors kept vanilla for logic / tricks, so no check needs one killed), with a chance per enemy
 # (setting 'enemy-minibosses', 'miniboss-frequency': MINIBOSS_CHANCES) - at most one per room, except with All, where
-# every enemy that has a mini-boss fitting its spot becomes one (as many as NEARBY_MAX allows). No switches: no defeat flag is ever written.
+# every enemy that has a mini-boss fitting its spot becomes one. No switches: no defeat flag is ever written.
 # Left out (2026-10-12): Moblin Chief 0x52 / Grim Creeper 0x5d (constructed, then deleted at once by the actor
 # manager - their init decides; runtime RE in notes), Lanmola 0x57 (sand only).
 FIELD_MINIBOSSES = {
@@ -55,28 +55,6 @@ def room_needed(mini):
     return 25 if mini in SMALL_MINIBOSSES else NEEDS_ROOM.get(mini, BIG_ROOM)
 
 
-# The Field keeps the screens around Link loaded, and every loaded mini-boss runs and draws (M3 Max, 2026-10-18: ~0.3 ms
-# of game thread each - Yarna Desert with 31 in its 3 x 3 screens went from 12 to 22 ms a frame). No 3 x 3 block of
-# screens gets more than NEARBY_MAX: each screen gets a quota (its enemy spots, cut down where a block has too many,
-# the fullest screen first), past it a spot keeps a normal enemy (frequency All: the dense desert, Tal Tal, the bay).
-NEARBY_MAX = 12
-
-
-def screen_quotas(spots):
-    """spots: Field screen (row, column) -> enemy spots. -> screen -> most mini-bosses, so that every 3 x 3 block of
-    screens holds at most NEARBY_MAX."""
-    q = dict(spots)
-    block = lambda r, c: [(r + a, c + b) for a in (-1, 0, 1) for b in (-1, 0, 1)]
-    while True:
-        over = [(sum(q.get(s, 0) for s in block(r, c)) - NEARBY_MAX, (r, c)) for r, c in {
-            (r + a, c + b) for r, c in q for a in (-1, 0, 1) for b in (-1, 0, 1)}]
-        excess, centre = max(over)
-        if excess <= 0:
-            return q
-        s = max(block(*centre), key=lambda s: (q.get(s, 0), s))
-        q[s] -= 1
-
-
 SOLID_OBJECTS = {0xB6, 0xB8, 0xCB, 0x21B}  # bushes, rocks, gravestones, wooden boxes (actors: not in the grid)
 
 
@@ -103,7 +81,7 @@ def roomy(room, act, most_blocked):
 # Chance per eligible enemy for frequency Normal / 2x / 3x / All. Normal, 2x and 3x keep one mini-boss per screen;
 # 2x / 3x are set so the seed gets about twice / three times Normal's count (8%: ~19 on the Field; 16% / 24% under
 # the one-per-screen limit gave only 1.9x / 2.7x, as many screens have 2 - 6 enemies). All: every enemy whose spot
-# fits one, up to the screen's quota (screen_quotas).
+# fits one (no limit per screen; user 2026-10-18: no performance cap either).
 MINIBOSS_CHANCES = (0.08, 0.17, 0.28, 1.0)
 import os as _os
 _ALL = bool(_os.environ.get('LARECOMP_ALL_MINIBOSSES'))  # (test: as frequency All)
@@ -243,23 +221,6 @@ def fit_rail(room_data, act, points, rail):
 OBJ_CLOSED_DOOR = 0xEF
 
 
-def field_quotas(enemy_settings, pool):
-    """screen_quotas of the Field's enemy spots (the ones this randomizer may change), worked out once per seed."""
-    if 'miniboss-quotas' not in enemy_settings:
-        spots = {}
-        for r in range(1, 17):
-            for c in range(16):
-                name = 'Field_%02d%s' % (r, chr(ord('A') + c))
-                try:
-                    room = enemy_settings['arena'](name)
-                except (OSError, KeyError):
-                    continue
-                skip = set(ENEMY_DATA['Excluded_Actors'].get(name, [])) | kill_linked(room, pool)
-                spots[(r, c)] = sum(a.type in pool and i not in skip for i, a in enumerate(room.actors))
-        enemy_settings['miniboss-quotas'] = screen_quotas(spots)
-    return enemy_settings['miniboss-quotas']
-
-
 def kill_linked(room_data, pool):
     out = set()
     if any(a.type == OBJ_CLOSED_DOOR and not any(sw[0] in (1, 2) for sw in a.switches) for a in room_data.actors):
@@ -319,10 +280,6 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
     
     room_has_miniboss = False
     placed = []  # (LARecomp: this room's mini-boss spots, x z)
-    counts = enemy_settings.setdefault('nearby-minibosses', {})  # (LARecomp: per Field screen, this seed - screen_quotas)
-    import re as _re
-    m = _re.match(r'Field_(\d\d)([A-P])', file) if folder == 'Field' else None
-    screen = (int(m.group(1)), ord(m.group(2)) - ord('A')) if m else None
     grid_room = []  # (the original room, for its grid: read once)
 
     # iterate through each actor
@@ -352,13 +309,9 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
             if not _ONLY and any((act.posX - x) ** 2 + (act.posZ - z) ** 2 < MB_GAP ** 2 for x, z in placed):
                 fits = [m for m in fits if m in SMALL_MINIBOSSES]  # (next to another mini-boss: only the small ones)
             if (enemy_settings.get('minibosses') and fits and folder == 'Field'
-                    and (_ONLY or (not (one_per_room and room_has_miniboss) and random.random() < miniboss_chance
-                                   and (screen is None or not enemy_settings.get('arena')
-                                        or counts.get(screen, 0) < field_quotas(enemy_settings, total_ids).get(screen, 0))))):
+                    and (_ONLY or (not (one_per_room and room_has_miniboss) and random.random() < miniboss_chance))):
                 mini = random.choice(fits)
                 room_has_miniboss = True
-                if screen:
-                    counts[screen] = counts.get(screen, 0) + 1
                 new_enemy = mini
 
             # keep shuffling each actor until it is a valid enemy
