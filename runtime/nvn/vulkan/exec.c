@@ -8,6 +8,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #ifdef __linux__
 #include <errno.h>
@@ -20,6 +21,7 @@
 #include "vk.h"
 #include "../renderer.h"
 #include "../pace.h"
+#include "../shader_prep.h"
 #include "../../settings.h"
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
@@ -1204,6 +1206,7 @@ typedef struct {
     VkPipelineLayout layout;
     bool vs_uses_vid;
     _Atomic int state;  // 0 building, 1 ready, 2 failed
+    uint64_t prep_vh, prep_fh;  // (prepared programs: their code hashes, for LARECOMP_PREP_CHECK)
 } Prog;
 
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
@@ -1242,8 +1245,8 @@ static void compile_program(void *arg) {
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
-static void translate_program(void *arg) {
-    Prog *p = arg;
+// Translates both stages (false: failed, logged). Holds the translator for the whole program.
+static bool translate_program_now(Prog *p) {
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     pthread_mutex_lock(&translate_lock);
@@ -1256,17 +1259,72 @@ static void translate_program(void *arg) {
     if (!p->vi->msl) {
         LOG("[shader] VS translate failed: %s (code %llx)\n", p->vi->error, (unsigned long long)p->code[0]);
         atomic_store(&p->state, 2);
-        return;
+        return false;
     }
     if (!p->fi->msl) {
         LOG("[shader] FS translate failed: %s\n", p->fi->error);
         atomic_store(&p->state, 2);
-        return;
+        return false;
     }
     p->vs_uses_vid = strstr(p->vi->msl, "gl_VertexIndex") != NULL;
+    return true;
+}
+
+static void translate_program(void *arg) {
+    Prog *p = arg;
+    if (!translate_program_now(p)) return;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
     run_job(compile_program, p);
+}
+
+// ================================================================== prepared objects (shader_prep.h)
+// Built before the game from the shipped variant list; found by content (code hashes + keys) at first use, as code
+// addresses differ from run to run. Kept for the whole process (reboots included). prep_lock guards the tables.
+static pthread_mutex_t prep_lock = PTHREAD_MUTEX_INITIALIZER;
+typedef struct { uint64_t key; void *obj; } PrepEnt;
+static PrepEnt *prep_progs, *prep_pipes, *prep_cs;  // program / pipeline / compute content key -> Prog / Pipe / CsProg
+static size_t prep_progs_cap, prep_pipes_cap, prep_cs_cap, prep_progs_n, prep_pipes_n, prep_cs_n;
+static _Atomic int prep_pending;
+
+static void *prep_get(PrepEnt *t, size_t cap, uint64_t key) {
+    if (!cap) return NULL;
+    if (!key) key = 1;
+    for (size_t j = key & (cap - 1); t[j].key; j = (j + 1) & (cap - 1))
+        if (t[j].key == key) return t[j].obj;
+    return NULL;
+}
+static void prep_put(PrepEnt **t, size_t *cap, size_t *n, uint64_t key, void *obj) {
+    if (!key) key = 1;
+    if (*n * 2 >= *cap) {
+        size_t nc = *cap ? *cap * 2 : 1024;
+        PrepEnt *nt = calloc(nc, sizeof *nt);
+        for (size_t i = 0; i < *cap; i++)
+            if ((*t)[i].key) {
+                size_t j = (*t)[i].key & (nc - 1);
+                while (nt[j].key) j = (j + 1) & (nc - 1);
+                nt[j] = (*t)[i];
+            }
+        free(*t);
+        *t = nt, *cap = nc;
+    }
+    size_t j = key & (*cap - 1);
+    while ((*t)[j].key && (*t)[j].key != key) j = (j + 1) & (*cap - 1);
+    if (!(*t)[j].key) (*n)++;
+    (*t)[j] = (PrepEnt){key, obj};
+}
+#define PREP_GET(tab, key) ({ pthread_mutex_lock(&prep_lock); void *o_ = prep_get(tab, tab##_cap, key); pthread_mutex_unlock(&prep_lock); o_; })
+#define PREP_PUT(tab, key, obj) do { pthread_mutex_lock(&prep_lock); prep_put(&tab, &tab##_cap, &tab##_n, key, obj); pthread_mutex_unlock(&prep_lock); } while (0)
+
+static uint64_t prog_content_key(uint64_t vh, uint64_t fh, const ShaderKey *vkey, const ShaderKey *fkey) {
+    uint64_t h = 0xcbf29ce484222325ull;
+    const uint64_t c[2] = {vh, fh};
+    const uint8_t *b = (const uint8_t *)c;
+    for (size_t i = 0; i < sizeof c; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+    b = (const uint8_t *)vkey;
+    for (size_t i = 0; i < sizeof *vkey; i++) { h ^= b[i]; h *= 0x100000001B3ull; }
+    for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
+    return h;
 }
 
 #define PROG_TAB 4096
@@ -1283,6 +1341,17 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
     if (prog_tab[slot].key) return prog_tab[slot].prog;
+    {   // prepared before the game (the same code and keys)
+        uint64_t vh = shader_stage_hash(&np->stages[0]), fh = shader_stage_hash(&np->stages[1]);
+        uint64_t ck = prog_content_key(vh, fh, vkey, fkey);
+        Prog *pp = vh && fh && prep_progs_n ? PREP_GET(prep_progs, ck) : NULL;
+        if (pp) {
+            prog_tab[slot].key = h;
+            prog_tab[slot].prog = pp;
+            return pp;
+        }
+        shader_first_visit("program", vh, fh, ck);
+    }
     Prog *p = calloc(1, sizeof *p);
     prog_tab[slot].key = h;
     prog_tab[slot].prog = p;
@@ -1502,6 +1571,66 @@ static uint64_t hmix(uint64_t h, const void *p, size_t n) {
 
 static VkPrimitiveTopology topo_class_base(uint8_t c) {
     return c == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : c == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+}
+
+// What a pipeline is built from, besides its program and the pass's attachment formats: the draw's state (draw_) or a
+// variant record (renderer_prepare)
+typedef struct {
+    const uint32_t *attrib; int nattrib;
+    const uint32_t (*stream)[2]; int nstream;
+    const uint32_t *rt_fmt;         // color target texture formats (0: none)
+    uint32_t channel_mask;
+    uint8_t blend_on;               // color state blend enables
+    const uint8_t (*blend)[8];
+    uint8_t a2c, topo_class, poly_fill;
+} PipeIn;
+
+static void pipe_key_fill(PipeKey *k, Prog *pr, const PipeIn *in, const VkFormat color[8], uint32_t ncolor, VkFormat depth,
+                          VkFormat stencil, uint32_t samples) {
+    memset(k, 0, sizeof *k);
+    k->prog = pr;
+    k->ncolor = ncolor;
+    // (only the pass's own slots: begin_pass leaves the slots past them as the last pass with more targets set them -
+    // a depth-only pass's key carried the previous pass's color formats, so prepared pipelines never matched it)
+    for (uint32_t i = 0; i < ncolor && i < 8; i++) k->color[i] = color[i];
+    k->depth = depth;
+    k->stencil = stencil;
+    k->samples = samples;
+    for (int i = 0; i < 32; i++) {
+        if (!(pr->vi->attr_mask & (1u << i))) continue;
+        k->attr_mask |= 1u << i;
+        uint32_t a = i < in->nattrib ? in->attrib[i] : 0x2E;
+        uint32_t fmt = a & 0xFF, stream = (a >> 8) & 0x1F, off = a >> 13;
+        if (i >= in->nattrib || fmt == 0 || stream >= 16) {  // unbound attribute: (0, 0, 0, 1) from a constant stream
+            k->attr_fmt[i] = VK_FORMAT_R32G32B32A32_SFLOAT;
+            k->attr_bind[i] = ZERO_BINDING;
+            k->used_streams |= 1u << ZERO_BINDING;
+            continue;
+        }
+        k->attr_fmt[i] = vertex_format_supported(vertex_format(fmt));
+        k->attr_off[i] = off;
+        k->attr_bind[i] = stream;
+        k->used_streams |= 1u << stream;
+    }
+    for (int s = 0; s < 16; s++) {
+        if (!(k->used_streams & (1u << s))) continue;
+        k->stride[s] = s < in->nstream ? in->stream[s][0] : 0;
+        k->divisor[s] = s < in->nstream && k->stride[s] ? in->stream[s][1] : 0;
+        if (k->divisor[s] > 1 && !g_vk.divisor) k->divisor[s] = 1;
+    }
+    for (uint32_t i = 0; i < k->ncolor && i < 8; i++) {
+        if (!in->rt_fmt[i] || k->color[i] == VK_FORMAT_UNDEFINED) continue;
+        // Targets the fragment shader doesn't output keep their contents on Metal, but are undefined in Vulkan
+        // (NVIDIA writes black): mask them. Foliage depth pre-passes left black silhouettes (user 2026-10-08).
+        k->write_mask[i] = ((pr->fi->out_mask >> (i * 4)) & 0xF) ? (in->channel_mask >> (i * 4)) & 0xF : 0;
+        if (((in->blend_on >> i) & 1) && !rt_kind(in->rt_fmt[i])) {
+            k->blend_on |= (uint8_t)(1u << i);
+            memcpy(k->blend[i], in->blend[i], 8);
+        }
+    }
+    k->a2c = in->a2c;
+    k->topo_class = in->topo_class;
+    k->poly_fill = in->poly_fill;
 }
 
 static void build_pipeline(void *arg) {
@@ -2571,34 +2700,159 @@ static void build_compute(void *arg) {
 
 static struct CsEnt { uint64_t addr; CsProg *cp; } g_cs_tab[256];  // compute programs by code address
 
+static uint64_t cs_content_key(uint64_t code_hash, const uint32_t local[3]) {
+    uint64_t h = code_hash;
+    for (int i = 0; i < 3; i++) { h ^= local[i]; h *= 0x100000001B3ull; }
+    return h;
+}
+
+static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max, uint64_t addr) {
+    maxwell_gmem_base = HEAP_BASE;
+    maxwell_gmem_size = HEAP_MAX;
+    ShaderKey k = {0};
+    k.glsl = 1;
+    pthread_mutex_lock(&translate_lock);
+    cp->si = maxwell_translate(code, max, STAGE_COMPUTE, &k);
+    pthread_mutex_unlock(&translate_lock);
+    cp->p.vi = cp->si;
+    if (!cp->si->msl) {
+        LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)addr);
+        atomic_store(&cp->p.state, 2);
+        return false;
+    }
+    return true;
+}
+
 static CsProg *compute_program(NvnProgram *np) {
     NvnShaderStage *ss = &np->stages[5];
     if (!ss->code_addr) return NULL;
     struct CsEnt *tab = g_cs_tab;
     int n = g_cs_n;
     for (int i = 0; i < n; i++) if (tab[i].addr == ss->code_addr) return tab[i].cp;
-    CsProg *cp = calloc(1, sizeof *cp);
-    if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
-    maxwell_gmem_base = HEAP_BASE;
-    maxwell_gmem_size = HEAP_MAX;
-    ShaderKey k = {0};
-    k.glsl = 1;
-    pthread_mutex_lock(&translate_lock);
-    cp->si = maxwell_translate((const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, STAGE_COMPUTE, &k);
-    pthread_mutex_unlock(&translate_lock);
-    cp->p.vi = cp->si;
-    if (!cp->si->msl) {
-        LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, (unsigned long long)ss->code_addr);
-        atomic_store(&cp->p.state, 2);
+    uint32_t local[3];
+    for (int i = 0; i < 3; i++) {
+        local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
+        if (!local[i]) local[i] = 1;
+    }
+    if (shader_rec_recording()) {
+        ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {local[0], local[1], local[2]}};
+        shader_rec_note(&rec);
+    }
+    uint64_t ch = shader_stage_hash(ss);
+    CsProg *cp = ch && prep_cs_n ? PREP_GET(prep_cs, cs_content_key(ch, local)) : NULL;  // prepared before the game
+    if (cp) {
+        if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
         return cp;
     }
-    for (int i = 0; i < 3; i++) {
-        cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
-        if (!cp->local[i]) cp->local[i] = 1;
-    }
+    shader_first_visit("compute", ch, 0, cs_content_key(ch, local));
+    cp = calloc(1, sizeof *cp);
+    if (n < 256) { tab[n].addr = ss->code_addr; tab[n].cp = cp; g_cs_n = n + 1; }
+    memcpy(cp->local, local, sizeof local);
+    if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000, ss->code_addr))
+        return cp;
     save_glsl(cp->si->msl, ss->code_addr, "cs");
     run_job(build_compute, cp);
     return cp;
+}
+
+// ================================================================== shader preparation (shader_prep.h)
+// Each record: translated here (one thread, the translator isn't re-entrant), compiled and built on the worker
+// threads (run_job), kept in the prep_* tables for the game.
+typedef struct { void (*fn)(void *); void *arg; } PrepJob;
+static void prep_job_run(void *a) {
+    PrepJob *j = a;
+    j->fn(j->arg);
+    free(j);
+    prep_pending--;
+}
+static void prep_job(void (*fn)(void *), void *arg) {
+    PrepJob *j = malloc(sizeof *j);
+    j->fn = fn, j->arg = arg;
+    prep_pending++;
+    run_job(prep_job_run, j);
+}
+
+bool renderer_prepare_begin(void) { return g_vk.dev != VK_NULL_HANDLE; }
+int renderer_prepare_pending(void) { return prep_pending; }
+void renderer_prepare_end(void) { vk_pipeline_cache_save(); }  // (otherwise only kept at exit)
+
+typedef struct { Pipe *pp; ShaderRec r; } PrepPipe;
+static void prep_pipeline(void *arg) {
+    PrepPipe *a = arg;
+    Prog *pr = a->pp->k.prog;
+    // its program's compile was queued before (the queue is first in, first out): wait for it to finish
+    while (atomic_load(&pr->state) == 0) { struct timespec ts = {0, 1000000}; nanosleep(&ts, NULL); }
+    if (atomic_load(&pr->state) != 1) { atomic_store(&a->pp->state, 2); free(a); return; }
+    const ShaderRec *r = &a->r;
+    // the pass's attachment formats as begin_pass makes them for these targets
+    VkFormat color[8] = {0}, depth = VK_FORMAT_UNDEFINED, stencil = VK_FORMAT_UNDEFINED;
+    uint32_t ncolor = r->ncolor;
+    for (uint32_t i = 0; i < ncolor && i < 8; i++) {
+        if (!r->color[i]) continue;
+        VkFormat b = vk_image_format(r->color[i], NULL);
+        color[i] = r->cview[i] && vk_format(r->color[i]) == b ? vk_format(r->cview[i]) : b;
+    }
+    while (ncolor && !r->color[ncolor - 1]) ncolor--;
+    if (r->depth && renderer_format_is_depth(r->depth)) {
+        VkImageAspectFlags asp;
+        VkFormat b = vk_image_format(r->depth, &asp);
+        if (asp & VK_IMAGE_ASPECT_DEPTH_BIT) depth = b;
+        if (asp & VK_IMAGE_ASPECT_STENCIL_BIT) stencil = b;
+    }
+    const PipeIn in = {r->attrib, r->nattrib, r->stream, r->nstream, r->color, r->channel_mask, r->blend_on, r->blend,
+                       r->a2c, r->topo, r->poly_fill};
+    pipe_key_fill(&a->pp->k, pr, &in, color, ncolor, depth, stencil, r->samples ? r->samples : 1);
+    uint64_t ph = hash_words(0xcbf29ce484222325ull, &a->pp->k, sizeof a->pp->k);
+    if (!ph) ph = 1;
+    if (PREP_GET(prep_pipes, ph)) { free(a->pp); free(a); return; }  // (another record makes the same pipeline)
+    build_pipeline(a->pp);
+    if (atomic_load(&a->pp->state) == 1) PREP_PUT(prep_pipes, ph, a->pp);
+    free(a);
+}
+
+bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlob *fsb) {
+    if (r->kind == 'C') {
+        uint64_t ck = cs_content_key(r->vs, r->local);
+        if (PREP_GET(prep_cs, ck)) return true;
+        CsProg *cp = calloc(1, sizeof *cp);
+        memcpy(cp->local, r->local, sizeof cp->local);
+        if (!translate_compute(cp, vsb->code, vsb->const_offset ? vsb->const_offset : 0x10000, 0)) return false;
+        PREP_PUT(prep_cs, ck, cp);
+        prep_job(build_compute, cp);
+        return true;
+    }
+    // the keys the draw path makes for this state (draw_)
+    ShaderKey vkey = {0}, fkey = {0};
+    vkey.glsl = fkey.glsl = 1;
+    vkey.flip_y = fkey.flip_y = (r->flags & SR_FLIP_Y) != 0;
+    vkey.depth_minus_one = (r->flags & SR_DEPTH_MINUS_ONE) != 0;
+    vkey.flip_x = fkey.flip_x = (r->flags & SR_FLIP_X) != 0;
+    for (int i = 0; i < r->nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(r->attrib[i] & 0xFF);
+    for (int i = 0; i < r->ncolor && i < 8; i++) if (r->color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(r->color[i]);
+    uint64_t ck = prog_content_key(r->vs, r->fs, &vkey, &fkey);
+    Prog *p = PREP_GET(prep_progs, ck);
+    if (!p) {
+        p = calloc(1, sizeof *p);
+        p->code[0] = (uintptr_t)vsb->code;
+        p->code[1] = (uintptr_t)fsb->code;
+        p->cmax[0] = vsb->const_offset ? vsb->const_offset : 0x10000;
+        p->cmax[1] = fsb->const_offset ? fsb->const_offset : 0x10000;
+        p->vkey = vkey;
+        p->fkey = fkey;
+        p->prep_vh = r->vs, p->prep_fh = r->fs;
+        bool ok = translate_program_now(p);
+        p->code[0] = p->code[1] = 0;  // (the game files' copies are gone after this call)
+        PREP_PUT(prep_progs, ck, p);  // (failed ones too: the game then skips them as it would its own)
+        if (!ok) return false;
+        prep_job(compile_program, p);
+    }
+    if (atomic_load(&p->state) == 2) return false;
+    PrepPipe *a = calloc(1, sizeof *a);
+    a->pp = calloc(1, sizeof *a->pp);
+    a->pp->k.prog = p;
+    a->r = *r;
+    prep_job(prep_pipeline, a);
+    return true;
 }
 
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
@@ -2680,6 +2934,112 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
     case 5: *t = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; *cls = 2; return true;
     default: *t = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; *cls = 2; return false;
     }
+}
+
+// The draw's state as a variant record (shader_prep.h; as renderer.m: both backends record the same lines)
+static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
+    memset(r, 0, sizeof *r);
+    r->kind = 'G';
+    r->vs = shader_stage_hash(&st.program->stages[0]);
+    r->fs = shader_stage_hash(&st.program->stages[1]);
+    r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0);
+    r->nattrib = (uint8_t)(st.nattrib < 16 ? st.nattrib : 16);
+    memcpy(r->attrib, st.attrib, sizeof r->attrib[0] * r->nattrib);
+    r->nstream = (uint8_t)(st.nstream < 16 ? st.nstream : 16);
+    memcpy(r->stream, st.stream, sizeof r->stream[0] * r->nstream);
+    r->ncolor = (uint8_t)(st.rt.ncolor < 8 ? st.rt.ncolor : 8);
+    r->samples = 1;
+    for (int i = 0; i < r->ncolor; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        r->color[i] = t->format;
+        if (st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4)) r->cview[i] = st.rt.cview[i].format;
+        if (t->samples > 1) r->samples = t->samples;
+        r->channel_mask |= st.channel_mask & (0xFu << (i * 4));
+        if (((st.color_state[0] >> i) & 1) && !rt_kind(t->format)) {
+            r->blend_on |= (uint8_t)(1u << i);
+            memcpy(r->blend[i], st.blend[i], 8);
+        }
+    }
+    if (st.rt.depth) {
+        r->depth = st.rt.depth->format;
+        if (!r->ncolor && st.rt.depth->samples > 1) r->samples = st.rt.depth->samples;
+    }
+    r->a2c = st.ms[0xC] != 0;
+    r->topo = shader_topo_class(mode);
+    r->poly_fill = st.poly[2] != 1;
+}
+
+// LARECOMP_PREP_CHECK=1 (diagnostics): a pipeline the game builds although its shaders were prepared - logs the
+// fields its key differs in from the closest prepared pipeline of the same shaders (and the draw's variant record)
+static bool prep_check_on(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("LARECOMP_PREP_CHECK") && atoi(getenv("LARECOMP_PREP_CHECK"));
+    return v;
+}
+
+// Fields of two pipeline keys that differ: their number, and (out) "field: prepared / draw" for each
+static int pk_diff(const PipeKey *a, const PipeKey *b, char *out, size_t n) {
+    int d = 0;
+    size_t o = 0;
+    if (out && n) out[0] = 0;
+#define PKD(cond, ...) do { if (cond) { d++; if (out && o < n) o += (size_t)snprintf(out + o, n - o, __VA_ARGS__); } } while (0)
+    PKD(a->prog != b->prog, " program %p/%p (ready %d/%d);", (void *)a->prog, (void *)b->prog, a->prog ? (int)a->prog->state : -1,
+        b->prog ? (int)b->prog->state : -1);
+    PKD(a->ncolor != b->ncolor, " ncolor %u/%u;", a->ncolor, b->ncolor);
+    for (int i = 0; i < 8; i++) PKD(a->color[i] != b->color[i], " color%d %d/%d;", i, a->color[i], b->color[i]);
+    PKD(a->depth != b->depth, " depth %d/%d;", a->depth, b->depth);
+    PKD(a->stencil != b->stencil, " stencil %d/%d;", a->stencil, b->stencil);
+    PKD(a->samples != b->samples, " samples %u/%u;", a->samples, b->samples);
+    PKD(a->attr_mask != b->attr_mask, " attr_mask %#x/%#x;", a->attr_mask, b->attr_mask);
+    for (int i = 0; i < 32; i++) {
+        PKD(a->attr_fmt[i] != b->attr_fmt[i], " attr%d fmt %u/%u;", i, a->attr_fmt[i], b->attr_fmt[i]);
+        PKD(a->attr_off[i] != b->attr_off[i], " attr%d off %u/%u;", i, a->attr_off[i], b->attr_off[i]);
+        PKD(a->attr_bind[i] != b->attr_bind[i], " attr%d bind %u/%u;", i, a->attr_bind[i], b->attr_bind[i]);
+    }
+    PKD(a->used_streams != b->used_streams, " streams %#x/%#x;", a->used_streams, b->used_streams);
+    for (int s = 0; s < 17; s++) {
+        PKD(a->stride[s] != b->stride[s], " stride%d %u/%u;", s, a->stride[s], b->stride[s]);
+        PKD(a->divisor[s] != b->divisor[s], " divisor%d %u/%u;", s, a->divisor[s], b->divisor[s]);
+    }
+    for (int i = 0; i < 8; i++) {
+        PKD(memcmp(a->blend[i], b->blend[i], 8), " blend%d differs;", i);
+        PKD(a->write_mask[i] != b->write_mask[i], " write_mask%d %#x/%#x;", i, a->write_mask[i], b->write_mask[i]);
+    }
+    PKD(a->blend_on != b->blend_on, " blend_on %#x/%#x;", a->blend_on, b->blend_on);
+    PKD(a->a2c != b->a2c, " a2c %u/%u;", a->a2c, b->a2c);
+    PKD(a->topo_class != b->topo_class, " topo %u/%u;", a->topo_class, b->topo_class);
+    PKD(a->poly_fill != b->poly_fill, " fill %u/%u;", a->poly_fill, b->poly_fill);
+    if (!d && memcmp(a, b, sizeof *a)) {  // (no field differs: other bytes - padding)
+        const uint8_t *x = (const uint8_t *)a, *y = (const uint8_t *)b;
+        for (size_t i = 0; i < sizeof *a; i++) PKD(x[i] != y[i], " byte %zu %02x/%02x;", i, x[i], y[i]);
+    }
+#undef PKD
+    return d;
+}
+
+static void prep_check(const PipeKey *k, uint64_t vh, uint64_t fh, const ShaderRec *rec) {
+    char line[2048], diff[2048] = "";
+    shader_rec_format(rec, line, sizeof line);
+    int nprep = 0, best_d = 1 << 30, progs = 0;
+    pthread_mutex_lock(&prep_lock);
+    for (size_t i = 0; i < prep_progs_cap; i++) {
+        Prog *q = prep_progs[i].obj;
+        if (prep_progs[i].key && q && q->prep_vh == vh && q->prep_fh == fh) progs++;
+    }
+    const Pipe *best = NULL;
+    for (size_t i = 0; i < prep_pipes_cap; i++) {
+        const Pipe *p = prep_pipes[i].obj;
+        if (!prep_pipes[i].key || !p || p->k.prog->prep_vh != vh || p->k.prog->prep_fh != fh) continue;
+        nprep++;
+        int d = pk_diff(&p->k, k, NULL, 0);
+        if (d < best_d) best_d = d, best = p;
+    }
+    if (best) pk_diff(&best->k, k, diff, sizeof diff);
+    pthread_mutex_unlock(&prep_lock);
+    LOG("[prepcheck] %016llx %016llx: program %s (%d prepared with these shaders), %d prepared pipelines, closest "
+        "differs (prepared/draw) in:%s\n[prepcheck]   draw: %s\n", (unsigned long long)vh, (unsigned long long)fh,
+        k->prog->prep_vh ? "prepared" : "not prepared", progs, nprep, best ? diff : " (none)", line);
 }
 
 static void draw_(CmdRec *r, bool indexed);
@@ -2765,60 +3125,39 @@ static void draw_(CmdRec *r, bool indexed) {
     uint64_t prof_tk_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_pre += prof_tk_ - prof_tp_;
     // ---- pipeline
+    uint32_t rt_fmt[8] = {0};
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++) rt_fmt[i] = st.rt.color[i] ? st.rt.color[i]->format : 0;
+    const PipeIn in = {st.attrib, st.nattrib, (const uint32_t (*)[2])st.stream, st.nstream, rt_fmt, st.channel_mask,
+                       st.color_state[0], (const uint8_t (*)[8])st.blend, st.ms[0xC] != 0, cls, st.poly[2] != 1};
     PipeKey k;
-    memset(&k, 0, sizeof k);
-    k.prog = pr;
-    k.ncolor = pass_ncolor;
-    memcpy(k.color, pass_color, sizeof k.color);
-    k.depth = pass_depth;
-    k.stencil = pass_stencil;
-    k.samples = pass_samples;
-    for (int i = 0; i < 32; i++) {
-        if (!(pr->vi->attr_mask & (1u << i))) continue;
-        k.attr_mask |= 1u << i;
-        uint32_t a = i < st.nattrib ? st.attrib[i] : 0x2E;
-        uint32_t fmt = a & 0xFF, stream = (a >> 8) & 0x1F, off = a >> 13;
-        if (i >= st.nattrib || fmt == 0 || stream >= 16) {  // unbound attribute: (0, 0, 0, 1) from a constant stream
-            k.attr_fmt[i] = VK_FORMAT_R32G32B32A32_SFLOAT;
-            k.attr_bind[i] = ZERO_BINDING;
-            k.used_streams |= 1u << ZERO_BINDING;
-            continue;
-        }
-        k.attr_fmt[i] = vertex_format_supported(vertex_format(fmt));
-        k.attr_off[i] = off;
-        k.attr_bind[i] = stream;
-        k.used_streams |= 1u << stream;
-    }
-    for (int s = 0; s < 16; s++) {
-        if (!(k.used_streams & (1u << s))) continue;
-        k.stride[s] = s < st.nstream ? st.stream[s][0] : 0;
-        k.divisor[s] = s < st.nstream && k.stride[s] ? st.stream[s][1] : 0;
-        if (k.divisor[s] > 1 && !g_vk.divisor) k.divisor[s] = 1;
-    }
-    for (uint32_t i = 0; i < k.ncolor && i < 8; i++) {
-        if (!st.rt.color[i] || k.color[i] == VK_FORMAT_UNDEFINED) continue;
-        // Targets the fragment shader doesn't output keep their contents on Metal, but are undefined in Vulkan
-        // (NVIDIA writes black): mask them. Foliage depth pre-passes left black silhouettes (user 2026-10-08).
-        k.write_mask[i] = ((pr->fi->out_mask >> (i * 4)) & 0xF) ? (st.channel_mask >> (i * 4)) & 0xF : 0;
-        if (((st.color_state[0] >> i) & 1) && !rt_kind(st.rt.color[i]->format)) {
-            k.blend_on |= (uint8_t)(1u << i);
-            memcpy(k.blend[i], st.blend[i], 8);
-        }
-    }
-    k.a2c = st.ms[0xC] != 0;
-    k.topo_class = cls;
-    k.poly_fill = st.poly[2] != 1;
+    pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples);
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
     if (!ph) ph = 1;
     uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
     while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
     Pipe *pp = pipe_tab[pslot].pipe;
     if (!pp) {
-        pp = calloc(1, sizeof *pp);
-        pp->k = k;
+        if (shader_rec_recording()) {
+            ShaderRec rec;
+            rec_from_state(&rec, vkey.flip_x, mode);
+            shader_rec_note(&rec);
+        }
+        pp = prep_pipes_n ? PREP_GET(prep_pipes, ph) : NULL;  // prepared before the game
+        if (pp && memcmp(&pp->k, &k, sizeof k)) pp = NULL;
+        if (!pp) {
+            uint64_t vh = shader_stage_hash(&st.program->stages[0]), fh = shader_stage_hash(&st.program->stages[1]);
+            shader_first_visit("pipeline", vh, fh, ph);
+            if (prep_check_on()) {
+                ShaderRec rec;
+                rec_from_state(&rec, vkey.flip_x, mode);
+                prep_check(&k, vh, fh, &rec);
+            }
+            pp = calloc(1, sizeof *pp);
+            pp->k = k;
+            run_job(build_pipeline, pp);
+        }
         pipe_tab[pslot].key = ph;
         pipe_tab[pslot].pipe = pp;
-        run_job(build_pipeline, pp);
     }
     if (atomic_load(&pp->state) != 1) { stat_skipped++; return; }
     ss_enabled();
