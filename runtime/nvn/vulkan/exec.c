@@ -1008,9 +1008,15 @@ static void begin_pass(void) {
         // list and waits for its fence early in the next frame, so with one submission per list the GPU sat idle
         // while the list was translated, and the game's wait covered translation + GPU time - with the render thread
         // the translation left the game thread but came back as that wait. LARECOMP_CHUNK_PASSES=<n>: a submission
-        // every n render passes (off by default here until measured on Windows; Metal's default is 8).
+        // every n render passes (0 = one per list). Default 8 with the render thread (RTX 3080 Ti + i9, Field_11C:
+        // gpu wait 0.6 -> 0.25 ms, game thread busy 3.4-3.5 ms vs 4.9 without the render thread); without it,
+        // off (chunks cost that thread 0.1-0.3 ms there).
         static int chunk = -1;
-        if (chunk < 0) { const char *e = getenv("LARECOMP_CHUNK_PASSES"); chunk = e ? atoi(e) : 0; }
+        if (chunk < 0) {
+            extern bool rq_on(void);
+            const char *e = getenv("LARECOMP_CHUNK_PASSES");
+            chunk = e ? atoi(e) : rq_on() ? 8 : 0;
+        }
         if (chunk > 0 && ++passes_in_sub >= chunk) renderer_submit();
     }
     st.rt_dirty = false;

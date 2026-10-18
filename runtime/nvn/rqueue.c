@@ -454,9 +454,10 @@ static void watchdog_dump(const char *why) {
     if (nw > NWATCH) nw = NWATCH;
     for (int i = 0; i < nw; i++) {
         const char *w = atomic_load(&watches[i].what);
+        uint64_t since = atomic_load(&watches[i].since);
         if (w) LOG("[rq-watchdog] %s: waiting on %s (%llu) for %llu ms\n", watches[i].name, w,
                    (unsigned long long)atomic_load(&watches[i].arg),
-                   (unsigned long long)((now - atomic_load(&watches[i].since)) / 1000000));
+                   (unsigned long long)(since < now ? (now - since) / 1000000 : 0));
         else LOG("[rq-watchdog] %s: no noted wait\n", watches[i].name);
     }
     extern void kernel_dump_threads(const char *prefix);
@@ -486,10 +487,12 @@ static void *watchdog(void *arg) {
         }
         int nw = atomic_load(&nwatch);
         if (nw > NWATCH) nw = NWATCH;
+        now = plat_now_ns();  // (after the loads below can't see a newer start: since <= now)
         for (int i = 0; i < nw; i++) {
             const char *w = atomic_load(&watches[i].what);
             uint64_t since = atomic_load(&watches[i].since);
-            if (w && now - since > limit && reported_since[i] != since) {
+            // (a wait that started after `now` was read, or a slot rewritten between the two loads: not stale)
+            if (w && since < now && now - since > limit && reported_since[i] != since) {
                 reported_since[i] = since;
                 if (dumped) continue;
                 dumped = true;
