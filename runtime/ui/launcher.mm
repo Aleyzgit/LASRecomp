@@ -42,6 +42,7 @@ extern "C" {
 #include "romfs_build.h"
 #include "settings.h"
 #include "input_bind.h"
+#include "nvn/shader_prep.h"
 void controls_bindings_draw(float scale);  // ui/controls_ui.mm
 void ui_window_init(void);
 SDL_Window *ui_window(void);
@@ -328,7 +329,19 @@ static void build_progress(double f, const char *step) {
     static const char *last;
     if (step != last) last = step, set_job(step);
 }
+// Shader preparation, after the game files are ready (runtime/nvn/shader_prep.h): its own bar, and Skip
+static std::atomic<float> g_prep_frac{-1};  // -1: not preparing
+static volatile int g_prep_skip;
+static void prep_progress(int done, int total) { g_prep_frac = total ? (float)done / (float)total : 0.0f; }
+static void prepare_shaders(void) {
+    g_prep_skip = 0, g_prep_frac = 0;
+    set_job("Preparing shaders");
+    shader_prep_run((g_root + "/romfs").c_str(), prep_progress, &g_prep_skip);
+    g_prep_frac = -1;
+}
+
 static float extract_progress(void) {
+    if (float p = g_prep_frac; p >= 0) return p > 1 ? 1 : p;
     unsigned long long t = g_total, d = g_done;
     float b = g_build_frac, f = b >= 0 ? (g_copy_skipped ? b : 0.1f + 0.9f * b) : t ? 0.1f * (float)((double)d / (double)t) : 0;
     return f < 0 ? 0 : f > 0.99f ? 0.99f : f;
@@ -398,6 +411,7 @@ check:
     {
         game_files_changed();
         std::string why = check_game_files(g_root);
+        if (why.empty()) prepare_shaders();  // (the GPU device is up: the start screen draws with it)
         if (why.empty()) set_job("Game files ready.");
         else if (why.find("version") != std::string::npos) set_failure(FAIL_VERSION);
         else set_failure(FAIL_MISSING, g_romfs_count);
@@ -980,7 +994,7 @@ extern "C" void launcher_run(const char *root) {
         if (seeds[i] == g_settings.rando_seed) choice = (int)i + 1;
     Page page = status.empty() ? MAIN : SETUP;
     bool play = false;
-    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] / askdelete / setup
+    // LARECOMP_LAUNCHER_SHOT=<frame>[:<page>] (test): save build/launcher.png at that frame and exit; page: settings[:<tab>] / askdelete / setup / extracting / preparing
     long shot_at = getenv("LARECOMP_LAUNCHER_SHOT") ? atol(getenv("LARECOMP_LAUNCHER_SHOT")) : 0, frame = 0;
     if (shot_at) {
 #ifdef __APPLE__
@@ -989,6 +1003,7 @@ extern "C" void launcher_run(const char *root) {
         const char *pg = strchr(getenv("LARECOMP_LAUNCHER_SHOT"), ':');
         if (pg && (!strncmp(pg + 1, "settings", 8) || !strcmp(pg + 1, "askdelete"))) page = SETTINGS, menu_tabs_focus(true);
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
+        if (pg && !strcmp(pg + 1, "preparing")) page = SETUP, g_prep_frac = 0.42f, set_job("Preparing shaders");
         if (pg && !strncmp(pg + 1, "fail", 4)) page = SETUP, set_failure(atoi(pg + 5));  // (the failure messages)
         if (pg && !strncmp(pg + 1, "settings", 8) && pg[9] == ':') g_tab_request_ext = atoi(pg + 10);  // settings:<tab>
         if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
@@ -999,6 +1014,20 @@ extern "C" void launcher_run(const char *root) {
     static int runs;  // (test: =once - only the first time, so a "Title screen" reboot lands on the start screen)
     const char *ap = getenv("LARECOMP_LAUNCHER_AUTOPLAY");
     if (ap && status.empty() && !(runs && !strcmp(ap, "once"))) play = true;  // (test: PLAY at once)
+    if (getenv("LARECOMP_LAUNCHER_PREPARE") && status.empty() && !runs) {  // (test) the setup's shader preparation
+        g_busy = true;                                                      // alone, then PLAY with AUTOPLAY
+        page = SETUP, play = false;
+        pthread_t th;
+        pthread_create(&th, NULL, [](void *) -> void * {
+            prepare_shaders();
+            set_job("Game files ready.");
+            pthread_mutex_lock(&g_lock);
+            g_busy = false;
+            pthread_mutex_unlock(&g_lock);
+            return NULL;
+        }, NULL);
+        pthread_detach(th);
+    }
     runs++;
     if (const char *t = getenv("LARECOMP_LAUNCHER_EXTRACT")) {  // (test) <folder>: set the game files up, log, exit
         g_src = t;
@@ -1072,6 +1101,7 @@ extern "C" void launcher_run(const char *root) {
         if (was_busy && !busy) {
             status = check_game_files(g_root);
             if (status.empty()) { load_background(dev); page = MAIN; }
+            if (status.empty() && ap && getenv("LARECOMP_LAUNCHER_PREPARE")) play = true;
             g_auto_update = false;
         }
         was_busy = busy;
@@ -1464,16 +1494,17 @@ extern "C" void launcher_run(const char *root) {
                     g_confirm_delete = false;
                     page = MAIN, g_refocus = SETUP;
                 }
-                static bool test_busy = getenv("LARECOMP_LAUNCHER_SHOT") && strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":extracting");
+                static bool test_busy = getenv("LARECOMP_LAUNCHER_SHOT") && (strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":extracting") ||
+                                                                         strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":preparing"));
                 if (busy || test_busy) {  // extracting: everything dimmed, a progress bar in front (input waits)
                     ImDrawList *fg = ImGui::GetForegroundDrawList();
                     ImVec2 o = ImGui::GetMainViewport()->Pos;
                     fg->AddRectFilled(o, ImVec2(o.x + ds.x, o.y + ds.y), IM_COL32(0, 0, 0, 170));
-                    float f = test_busy ? 0.42f : extract_progress();
+                    float f = test_busy && g_prep_frac < 0 ? 0.42f : extract_progress();
                     // (while the game code is built: what's happening, on whose files - runtime/gamebuild.c)
-                    bool recompiling = g_build_frac >= 0;
-                    const char *title = g_auto_update ? "Updating the game" : recompiling ? "Recompiling the game"
-                                                                                         : "Setting up the game files";
+                    bool preparing = g_prep_frac >= 0, recompiling = g_build_frac >= 0 && !preparing;
+                    const char *title = preparing ? "Preparing shaders" : g_auto_update ? "Updating the game"
+                                      : recompiling ? "Recompiling the game" : "Setting up the game files";
                     static const char *const notes[] = {"This only needs to be done once and may take a while."};
                     int nnotes = recompiling && !g_auto_update ? 1 : 0;
                     float tfs = g_font_menu->FontSize * 0.75f, sfs = g_font_small->FontSize * 0.85f;
@@ -1483,7 +1514,8 @@ extern "C" void launcher_run(const char *root) {
                     for (int i = 0; i < nnotes; i++)  // (wide enough for its text, within the window)
                         pw = fmaxf(pw, g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, notes[i]).x + 96 * sc);
                     pw = fminf(fmaxf(pw, ts.x + 96 * sc), ds.x - 32 * sc);
-                    float ph = bar_y + 24 * sc + 26 * sc + line_h + (nnotes ? 14 * sc + nnotes * line_h : 0) + 40 * sc;
+                    float ph = bar_y + 24 * sc + 26 * sc + line_h + (nnotes ? 14 * sc + nnotes * line_h : 0) + 40 * sc +
+                               (preparing ? line_h + 28 * sc : 0);  // (Skip)
                     ImVec2 a(o.x + (ds.x - pw) * 0.5f, o.y + (ds.y - ph) * 0.5f), b(a.x + pw, a.y + ph);
                     fg->AddRectFilled(a, b, IM_COL32(15, 23, 20, 250), 14 * sc);
                     fg->AddRect(a, b, IM_COL32(236, 194, 84, 140), 14 * sc, 0, 1.5f * sc);
@@ -1492,14 +1524,28 @@ extern "C" void launcher_run(const char *root) {
                     fg->AddRectFilled(ba, bb, IM_COL32(255, 255, 255, 25), 12 * sc);
                     if (f > 0) fg->AddRectFilled(ba, ImVec2(ba.x + (bb.x - ba.x) * f, bb.y), IM_COL32(236, 194, 84, 255), 12 * sc);
                     char line[200];
-                    snprintf(line, sizeof line, "%s   %d%%", test_busy ? "Setting up the game files..." : job.c_str(),
-                             (int)(f * 100));
+                    if (preparing) snprintf(line, sizeof line, "%d%%", (int)(f * 100));  // (the title says it)
+                    else snprintf(line, sizeof line, "%s   %d%%", test_busy ? "Setting up the game files..." : job.c_str(),
+                                  (int)(f * 100));
                     ImVec2 ls = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, line);
                     fg->AddText(g_font_small, sfs, ImVec2((a.x + b.x - ls.x) * 0.5f, bb.y + 26 * sc), IM_COL32(220, 216, 205, 255), line);
                     for (int i = 0; i < nnotes; i++) {
                         ImVec2 ns = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, notes[i]);
                         fg->AddText(g_font_small, sfs, ImVec2((a.x + b.x - ns.x) * 0.5f, bb.y + 26 * sc + (i + 1) * line_h + 14 * sc),
                                     IM_COL32(150, 148, 140, 255), notes[i]);
+                    }
+                    if (preparing) {  // Skip: the game then compiles what it needs as it goes (B / Esc too)
+                        const char *sk = g_prep_skip ? "Skipping..." : "Skip";
+                        ImVec2 ks = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, sk);
+                        ImVec2 ka((a.x + b.x - ks.x) * 0.5f - 22 * sc, b.y - 40 * sc - line_h - 10 * sc);
+                        ImVec2 kb(ka.x + ks.x + 44 * sc, ka.y + line_h + 16 * sc);
+                        bool hover = !g_prep_skip && ImGui::IsMouseHoveringRect(ka, kb, false);
+                        fg->AddRect(ka, kb, IM_COL32(236, 194, 84, hover ? 255 : 140), 8 * sc, 0, 1.5f * sc);
+                        fg->AddText(g_font_small, sfs, ImVec2(ka.x + 22 * sc, ka.y + 8 * sc),
+                                    hover ? IM_COL32(236, 194, 84, 255) : IM_COL32(220, 216, 205, 255), sk);
+                        if ((hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
+                            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+                            g_prep_skip = 1;
                     }
                 }
             }

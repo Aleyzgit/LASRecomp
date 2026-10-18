@@ -2,13 +2,17 @@
 // before the game starts, so a first visit anywhere has no compile hitch or pop-in. The approach follows
 // SuperMarioWonderRecomp's ahead-of-time shaders (github.com/BelmanteGu/SuperMarioWonderRecomp).
 //
-// What ships is only a list of variant records (runtime/nvn/shader_keys.txt): pipeline / compute state in NVN terms
+// What ships is only a list of variant records (runtime/nvn/shader_variants.txt): pipeline / compute state in NVN terms
 // (formats, vertex layout, blend state, ...) plus each shader's identity as a one-way hash of its code bytes. No
-// shader code ships in any form: the code is found by that hash in the player's own game files
-// (romfs/region_common/shader/*.bfsha, BNSH containers), and each backend builds the variants on the player's
-// machine through the same code its draws use. The objects are kept for the game, which finds them by content at
-// first use (code addresses differ from run to run). Anything the list misses still compiles at first use
-// (asynchronously, as before) and is logged as a first visit.
+// shader code ships in any form: the code is found by that hash in the player's own game files (the BNSH shader
+// containers in the romfs' shader archives, effects and UI archives, and in the main module's data), and each backend
+// builds the variants on the player's machine through the same code its draws use. The objects are kept for the game,
+// which finds them by content at first use (code addresses differ from run to run). Anything the list misses still
+// compiles at first use (asynchronously, as before).
+//
+// The start screen runs it once the game files are set up (runtime/ui/launcher.mm: a progress bar and Skip). Later
+// (phase 2): a Metal binary archive and periodic Vulkan pipeline cache saves (renderer_prepare_end), and a tag that
+// invalidates them when the translator changes.
 //
 // LARECOMP_RECORD_KEYS=<file> (dev): every program / pipeline / compute variant the game builds is appended to <file>
 // (one line each, deduplicated), e.g. during a shader tour (LARECOMP_SHADER_TOUR, runtime/ui/shader_tour.mm).
@@ -52,3 +56,28 @@ uint8_t shader_topo_class(uint32_t mode);                     // NVN draw mode -
 // (LARECOMP_RECORD_KEYS) note a variant the game builds; cheap when recording is off
 bool shader_rec_recording(void);
 void shader_rec_note(const ShaderRec *r);
+
+// ---- preparation
+// Shader code found in the game files for a record's hash
+typedef struct {
+    const uint8_t *code;     // the stage's code (graphics: with the 0x30-byte NVN header and the program header)
+    uint32_t size;           // bytes up to the end of its constants
+    const uint8_t *control;  // its control section (NULL: not needed - the record holds the compute local size)
+    uint32_t const_offset, const_size;
+} ShaderBlob;
+
+// Backend (runtime/nvn/renderer.m, runtime/nvn/vulkan/exec.c): build what the record describes through the draw
+// path's own code and keep it for the game. Called on one thread, while no game runs; builds may finish later
+// (renderer_prepare_pending). false: not built (the backend can't, or the translation failed).
+bool renderer_prepare_begin(void);
+bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vs, const ShaderBlob *fs);
+int renderer_prepare_pending(void);
+void renderer_prepare_end(void);  // all builds done (e.g. keep the pipeline cache)
+
+// Prepares every record of the shipped list (LARECOMP_SHADER_LIST=<file>: that list instead) from the game files in
+// romfs (the extracted romfs folder). progress(done, total) is called now and then; *cancel (any thread) stops it
+// early (builds already started finish in the background). Logs "[shader] prepared N, not found M". Returns false
+// when it couldn't start (no list, no GPU device).
+bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel);
+// (LARECOMP_SHADER_PREP=1, tests) the same at game start, before the game's first frame: runtime/nvn/objects.c
+void shader_prep_boot(const char *romfs);

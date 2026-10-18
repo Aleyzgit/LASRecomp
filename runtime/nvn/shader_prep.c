@@ -1,9 +1,12 @@
 // Shader variant records, the recorder and first-visit counts (see shader_prep.h).
+#include <dirent.h>
 #include <inttypes.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #include "nvn.h"
 #include "shader_prep.h"
@@ -199,4 +202,267 @@ void shader_rec_note(const ShaderRec *r) {
         if (f) { fprintf(f, "%s\n", line); fclose(f); }
     }
     pthread_mutex_unlock(&rec_lock);
+}
+
+// ------------------------------------------------------------------ index of the game files' shaders
+// Every shader in the player's game files, by code hash: the BNSH containers (nn::gfx shader files) in the shader
+// archives (*.bfsha), the effects (*.ptcl) and the UI archives (*.arc). Only locations are kept (file, offset).
+typedef struct { uint64_t hash; uint32_t file, off, size, const_offset, const_size; } IdxEnt;
+static IdxEnt *idx_tab;
+static size_t idx_cap, idx_n;
+typedef struct { char *path; uint8_t *mem; } IdxSrc;  // a game file, or (the main module's read-only data) memory
+static IdxSrc *idx_files;
+static int idx_nfiles;
+
+static void idx_add(uint64_t h, uint32_t file, uint32_t off, uint32_t size, uint32_t coff, uint32_t csize) {
+    if (!h) return;
+    if (idx_n * 2 >= idx_cap) {
+        size_t cap = idx_cap ? idx_cap * 2 : 16384;
+        IdxEnt *t = calloc(cap, sizeof *t);
+        for (size_t i = 0; i < idx_cap; i++)
+            if (idx_tab[i].hash) {
+                size_t j = idx_tab[i].hash & (cap - 1);
+                while (t[j].hash) j = (j + 1) & (cap - 1);
+                t[j] = idx_tab[i];
+            }
+        free(idx_tab);
+        idx_tab = t, idx_cap = cap;
+    }
+    size_t j = h & (idx_cap - 1);
+    while (idx_tab[j].hash) {
+        if (idx_tab[j].hash == h) return;
+        j = (j + 1) & (idx_cap - 1);
+    }
+    idx_tab[j] = (IdxEnt){h, file, off, size, coff, csize};
+    idx_n++;
+}
+
+static const IdxEnt *idx_find(uint64_t h) {
+    if (!idx_cap || !h) return NULL;
+    for (size_t j = h & (idx_cap - 1); idx_tab[j].hash; j = (j + 1) & (idx_cap - 1))
+        if (idx_tab[j].hash == h) return &idx_tab[j];
+    return NULL;
+}
+
+static uint32_t rd32(const uint8_t *d, size_t o) { uint32_t v; memcpy(&v, d + o, 4); return v; }
+static uint64_t rd64(const uint8_t *d, size_t o) { uint64_t v; memcpy(&v, d + o, 8); return v; }
+
+// Code offsets seen in the current file
+static uint64_t *off_tab;
+static size_t off_cap, off_n;
+static void off_reset(void) { if (off_tab) memset(off_tab, 0, off_cap * sizeof *off_tab); off_n = 0; }
+static bool off_add(uint64_t o) {  // false: seen
+    o++;  // (0 = empty)
+    if (off_n * 2 >= off_cap) {
+        size_t cap = off_cap ? off_cap * 2 : 4096;
+        uint64_t *t = calloc(cap, sizeof *t);
+        for (size_t i = 0; i < off_cap; i++)
+            if (off_tab[i]) {
+                size_t j = (off_tab[i] * 0x9E3779B97F4A7C15ull >> 20) & (cap - 1);
+                while (t[j]) j = (j + 1) & (cap - 1);
+                t[j] = off_tab[i];
+            }
+        free(off_tab);
+        off_tab = t, off_cap = cap;
+    }
+    size_t j = (o * 0x9E3779B97F4A7C15ull >> 20) & (off_cap - 1);
+    while (off_tab[j]) {
+        if (off_tab[j] == o) return false;
+        j = (j + 1) & (off_cap - 1);
+    }
+    off_tab[j] = o;
+    off_n++;
+    return true;
+}
+
+// One BNSH container at d[b..]: its shader programs' stage codes. Every offset is checked against the container.
+static void idx_bnsh(const uint8_t *d, size_t n, size_t b, uint32_t file) {
+    if (b + 0x20 > n || memcmp(d + b + 0xC, "\xff\xfe", 2)) return;
+    size_t fsz = rd32(d, b + 0x1C), first;
+    if (fsz < 0x40 || b + fsz > n) return;
+    first = (size_t)d[b + 0x16] | (size_t)d[b + 0x17] << 8;
+    if (first + 0x28 > fsz || memcmp(d + b + first, "grsc", 4)) return;
+    size_t c = first + 0x10;                      // container data: variation count +0xC, variations +0x10
+    uint32_t nvar = rd32(d, b + c + 0xC);
+    uint64_t pvar = rd64(d, b + c + 0x10);
+    if (pvar >= fsz || nvar > (fsz - pvar) / 0x40) return;
+    for (uint32_t v = 0; v < nvar; v++) {
+        uint64_t pbin = rd64(d, b + pvar + (uint64_t)v * 0x40 + 0x10);  // variation: binary program
+        if (!pbin || pbin + 0x38 > fsz) continue;
+        for (int s = 0; s < 6; s++) {                                     // program: stage codes +8 (VS..CS)
+            uint64_t pc = rd64(d, b + pbin + 8 + 8 * (uint64_t)s);
+            if (!pc || pc + 0x20 > fsz) continue;
+            uint64_t pctl = rd64(d, b + pc + 8), pcode = rd64(d, b + pc + 0x10);
+            uint32_t csz = rd32(d, b + pc + 0x18);
+            if (pctl + 0x750 > fsz || pcode >= fsz || csz > fsz - pcode) continue;
+            uint32_t coff = rd32(d, b + pctl + 0x700), cs = rd32(d, b + pctl + 0x6FC);
+            if (!coff || coff > csz || cs > csz - coff) continue;
+            uint32_t len = coff + cs;
+            if (!off_add(b + pcode)) continue;  // (variations share code: hash each once)
+            idx_add(shader_code_hash(d + b + pcode, len), file, (uint32_t)(b + pcode), len, coff, cs);
+        }
+    }
+}
+
+static void idx_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *d = n > 0 && n < 0x7FFFFFFF ? malloc((size_t)n) : NULL;
+    if (d && fread(d, 1, (size_t)n, f) == (size_t)n) {
+        uint32_t file = (uint32_t)idx_nfiles;
+        bool any = false;
+        off_reset();
+        for (size_t i = 0; i + 8 <= (size_t)n; i += 8)  // (containers are aligned)
+            if (!memcmp(d + i, "BNSH\0\0\0\0", 8)) { any = true; idx_bnsh(d, (size_t)n, i, file); }
+        if (any) {
+            idx_files = realloc(idx_files, sizeof *idx_files * (size_t)(idx_nfiles + 1));
+            idx_files[idx_nfiles++] = (IdxSrc){strdup(path), NULL};
+        }
+    }
+    free(d);
+    fclose(f);
+}
+
+// The main module (exefs/main, an NSO) holds a few shaders of its own in its data (LZ4-compressed in the file): its
+// read-only and read-write data segments are kept decompressed for the run when they have any
+size_t rt_lz4_decompress(const uint8_t *src, size_t srclen, uint8_t *dst, size_t dstlen);
+static void idx_nso(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *raw = n > 0x100 && n < 0x7FFFFFFF ? malloc((size_t)n) : NULL;
+    if (raw && fread(raw, 1, (size_t)n, f) == (size_t)n && !memcmp(raw, "NSO0", 4)) {
+        uint32_t flags = rd32(raw, 0xC);
+        for (int sg = 1; sg < 3; sg++) {  // header: segment {file offset, memory offset, size} at 0x10 + 16 * i,
+            uint32_t foff = rd32(raw, 0x10 + 16 * sg), size = rd32(raw, 0x18 + 16 * sg), csize = rd32(raw, 0x60 + 4 * sg);
+            uint8_t *seg = size && size < (256u << 20) ? malloc(size) : NULL;  // file sizes at 0x60 + 4 * i
+            bool ok = seg && (uint64_t)foff + csize <= (uint64_t)n;
+            if (ok && (flags & (1u << sg))) ok = rt_lz4_decompress(raw + foff, csize, seg, size) == size;
+            else if (ok) ok = csize >= size, memcpy(seg, raw + foff, ok ? size : 0);
+            bool any = false;
+            uint32_t file = (uint32_t)idx_nfiles;
+            off_reset();
+            for (size_t i = 0; ok && i + 8 <= size; i += 8)
+                if (!memcmp(seg + i, "BNSH\0\0\0\0", 8)) { any = true; idx_bnsh(seg, size, i, file); }
+            if (any) {
+                idx_files = realloc(idx_files, sizeof *idx_files * (size_t)(idx_nfiles + 1));
+                idx_files[idx_nfiles++] = (IdxSrc){NULL, seg};
+            } else free(seg);
+        }
+    }
+    free(raw);
+    fclose(f);
+}
+
+static void idx_dir(const char *dir, int depth) {
+    DIR *dd = depth < 8 ? opendir(dir) : NULL;
+    if (!dd) return;
+    struct dirent *e;
+    while ((e = readdir(dd))) {
+        if (e->d_name[0] == '.') continue;
+        char p[1024];
+        snprintf(p, sizeof p, "%s/%s", dir, e->d_name);
+        size_t l = strlen(e->d_name);
+        const char *ext = l > 5 ? e->d_name + l - 5 : "";
+        if (!strcmp(ext, "bfsha") || !strcmp(ext, ".ptcl") || (l > 4 && !strcmp(e->d_name + l - 4, ".arc"))) idx_file(p);
+        else {
+            struct stat sb;
+            if (stat(p, &sb) == 0 && S_ISDIR(sb.st_mode)) idx_dir(p, depth + 1);
+        }
+    }
+    closedir(dd);
+}
+
+// The shader's code (+ its constants), read from the game files; NULL: not there
+static uint8_t *blob_read(const IdxEnt *e, ShaderBlob *b, FILE **files) {
+    uint8_t *d = calloc(1, (size_t)e->size + 0x100);  // (zero padding past the constants)
+    if (idx_files[e->file].mem) memcpy(d, idx_files[e->file].mem + e->off, e->size);
+    else {
+        FILE **f = &files[e->file];
+        if (!*f && !(*f = fopen(idx_files[e->file].path, "rb"))) { free(d); return NULL; }
+        if (fseek(*f, (long)e->off, SEEK_SET) || fread(d, 1, e->size, *f) != e->size) { free(d); return NULL; }
+    }
+    *b = (ShaderBlob){d, e->size, NULL, e->const_offset, e->const_size};
+    return d;
+}
+
+// ------------------------------------------------------------------ the run
+static const char shipped_list[] =
+#include "shader_variants.inc"
+    ;
+
+static double ms_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6;
+}
+
+bool shader_prep_run(const char *romfs, void (*progress)(int done, int total), const volatile int *cancel) {
+    double t0 = ms_now();
+    char *list = NULL;
+    if (getenv("LARECOMP_SHADER_LIST")) {
+        FILE *f = fopen(getenv("LARECOMP_SHADER_LIST"), "rb");
+        if (f) {
+            fseek(f, 0, SEEK_END);
+            long n = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            list = calloc(1, (size_t)(n > 0 ? n : 0) + 1);
+            if (n > 0 && fread(list, 1, (size_t)n, f) != (size_t)n) list[0] = 0;
+            fclose(f);
+        }
+    } else list = strdup(shipped_list);
+    if (!list || !*list) { free(list); LOG("[shader] preparation: no variant list\n"); return false; }
+    if (!renderer_prepare_begin()) { free(list); LOG("[shader] preparation: no GPU device yet\n"); return false; }
+    int total = 0;
+    for (char *p = list; *p; p++) total += *p == '\n';
+    if (progress) progress(0, total + 1);
+    if (!idx_n) {
+        idx_dir(romfs, 0);
+        char main_nso[1100];  // (<game files>/exefs/main, next to romfs/)
+        snprintf(main_nso, sizeof main_nso, "%s/../exefs/main", romfs);
+        idx_nso(main_nso);
+    }
+    double t_idx = ms_now() - t0;
+    FILE **files = calloc((size_t)idx_nfiles + 1, sizeof *files);
+    int done = 0, prepared = 0, missing = 0, failed = 0;
+    for (char *line = list, *next; *line && !(cancel && *cancel); line = next) {
+        next = strchr(line, '\n');
+        if (next) *next++ = 0;
+        else next = line + strlen(line);
+        ShaderRec r;
+        if (!shader_rec_parse(line, &r)) continue;
+        const IdxEnt *ev = idx_find(r.vs), *ef = r.kind == 'G' ? idx_find(r.fs) : NULL;
+        ShaderBlob bv = {0}, bf = {0};
+        uint8_t *dv = ev ? blob_read(ev, &bv, files) : NULL, *df = ef ? blob_read(ef, &bf, files) : NULL;
+        if (!dv || (r.kind == 'G' && !df)) missing++;
+        else if (renderer_prepare(&r, &bv, &bf)) prepared++;
+        else failed++;
+        free(dv);
+        free(df);
+        if (progress && (++done & 7) == 0) progress(done - renderer_prepare_pending(), total + 1);
+    }
+    while (!(cancel && *cancel) && renderer_prepare_pending()) {  // (the last builds)
+        if (progress) progress(done - renderer_prepare_pending(), total + 1);
+        struct timespec ts = {0, 5000000};
+        nanosleep(&ts, NULL);
+    }
+    if (!(cancel && *cancel)) renderer_prepare_end();
+    if (progress) progress(total + 1, total + 1);
+    for (int i = 0; i < idx_nfiles; i++) if (files[i]) fclose(files[i]);
+    free(files);
+    free(list);
+    LOG("[shader] prepared %d, not found %d%s%s (%d failed; index %zu shaders in %.0f ms, total %.0f ms)\n", prepared,
+        missing, cancel && *cancel ? ", " : "", cancel && *cancel ? "skipped" : "", failed, idx_n, t_idx, ms_now() - t0);
+    return true;
+}
+
+void shader_prep_boot(const char *romfs) {
+    const char *e = getenv("LARECOMP_SHADER_PREP");
+    if (!e || !atoi(e)) return;
+    shader_prep_run(romfs, NULL, NULL);
 }
