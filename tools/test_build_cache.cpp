@@ -129,6 +129,14 @@ int main(int argc, char **argv) {
     assert(!fs::exists(fs::u8path(game) / ".zigcache"));
     assert(read(fs::u8path(game) / "lasgame.dll") == "old library");
     assert(read(fs::u8path(game) / "lasgame.dll.id") == "old id");
+    assert(!build_cache_present(game.c_str())); // only the lock and owner remain: nothing left to clear
+    std::string fresh = (root / "fresh").u8string();
+    fs::create_directories(fs::u8path(fresh));
+    assert(!build_cache_present(fresh.c_str()) && build_cache_clear(fresh.c_str(), why, sizeof why));
+    assert(!fs::exists(fs::u8path(fresh) / ".gamebuild")); // clearing never creates the cache folder
+    write(fs::u8path(fresh) / ".zigcache" / "temporary", "legacy compiler cache");
+    assert(build_cache_present(fresh.c_str()) && build_cache_clear(fresh.c_str(), why, sizeof why));
+    assert(!fs::exists(fs::u8path(fresh) / ".zigcache") && !fs::exists(fs::u8path(fresh) / ".gamebuild"));
     std::error_code ec;
     fs::create_directory_symlink(root / "extracted", root / "linked", ec);
     if (!ec) {

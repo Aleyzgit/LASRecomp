@@ -15,6 +15,8 @@ void build_cache_close(BuildCache *cache);
 // Leave the in-progress marker on cancellation/crash, but clear it for a reported build failure.
 void build_cache_failed(BuildCache *cache);
 bool build_cache_resumable(const char *game_dir);
+// Anything Clear would remove (a .gamebuild beyond its lock/owner, or an old .zigcache). Never creates the folder.
+bool build_cache_present(const char *game_dir);
 // Explicit user cleanup; takes the same lock and keeps the installed library and game data.
 bool build_cache_clear(const char *game_dir, char *why, size_t cap);
 bool build_cache_generation(BuildCache *cache, const char *module, int *chunks);

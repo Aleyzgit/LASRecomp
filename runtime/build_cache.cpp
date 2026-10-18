@@ -272,6 +272,18 @@ extern "C" bool build_cache_resumable(const char *game_dir) {
         return read(root / "owner", 64) == "LASBUILD3\n" && read(root / "in-progress", 64) == "LASBUILD3\n";
     } catch (...) { return false; }
 }
+extern "C" bool build_cache_present(const char *game_dir) {
+    try {
+        auto game = fs::weakly_canonical(fs::absolute(fs::u8path(game_dir)));
+        if (fs::exists(game / ".zigcache")) return true;
+        std::error_code ec;
+        for (auto &e : fs::directory_iterator(game / ".gamebuild", ec)) {
+            auto name = e.path().filename();
+            if (name != ".lock" && name != "owner") return true;
+        }
+        return false;
+    } catch (...) { return false; }
+}
 extern "C" bool build_cache_generation(BuildCache *c, const char *module, int *chunks) {
     try {
         need(!strcmp(module, "main") || !strcmp(module, "sdk"), "Invalid module name.");
@@ -375,6 +387,12 @@ extern "C" bool build_cache_publish(BuildCache *c, const char *name, const char 
 
 extern "C" bool build_cache_clear(const char *game_dir, char *why, size_t cap) {
     try {
+        auto game = fs::weakly_canonical(fs::absolute(fs::u8path(game_dir)));
+        if (!fs::exists(game / ".gamebuild")) {  // (nothing to lock: don't create the cache just to clear it)
+            auto old = game / ".zigcache";
+            if (fs::exists(old)) { plain_tree(old); fs::remove_all(old); }
+            return true;
+        }
         auto c = acquire(game_dir);
         // Finish rollback before deleting the only copy of a previously working library.
         recover(c.get());
