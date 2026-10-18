@@ -9,9 +9,10 @@ into "take Bottle[1] away", and Fisherman.bfevfl adds / removes it around every 
 would vanish at the pond. The one real bottle left in the pool is always the second (las_headless.py).
 
 Generation (steps(), called right after the seed's playthrough check): a step is an item copy without which the
-playthrough (LAS's logic) reaches fewer real checks or not the Wind Fish. Order: by the sphere where the checks it
-opens become reachable (with whatever else they need), then by how many it opens, then playthrough order; steps for
-the Wind Fish alone last. Seashells and Golden Leaves are steps only on demand: the runtime shows them when the next
+playthrough (LAS's logic) reaches fewer real checks or not the Wind Fish, and only when what it opens holds more
+progression (another step's item) or it is needed for the Wind Fish. Order: by the sphere where the first
+progression it opens can be reached, then by how much progression it opens, then playthrough order; steps for the
+Wind Fish alone last. Seashells and Golden Leaves are steps only on demand: the runtime shows them when the next
 real step's place can't be reached without them (hints.tsv `needs`: how many) and the player has fewer. Each step
 gets its own message (System.msbt, every language: our own English text) and a Common.bfevfl entry showing it;
 hints.tsv lists them for the runtime, which shows the first step whose check the player hasn't collected yet (the
@@ -210,8 +211,7 @@ def steps(logic_defs, placements, settings, check, sph, out_dir):
         if loc in effect:
             lost = full[0] - effect[loc][0]
             out.append({'loc': loc, 'item': b, 'n': count[b], 'region': logic_defs.get(loc, {}).get('spoiler-region', ''),
-                        'opens': len(lost), 'first': min((sphere_of.get(c, 999) for c in lost), default=None),
-                        'order': i, 'opens-example': sorted(lost, key=lambda c: sphere_of.get(c, 999))[:3]})
+                        'opens': len(lost), 'goal': effect[loc][1] < full[1], 'order': i, '_lost': lost})
     # Seashells / Golden Leaves (user 2026-10-18): shown only when the next real step is behind them (a Seashell
     # Mansion reward, what Richard's leaves open) and the player still lacks some - the runtime decides from `needs`.
     # They go last, in playthrough order; every other step lists the gated groups it can't be reached without.
@@ -243,11 +243,33 @@ def steps(logic_defs, placements, settings, check, sph, out_dir):
                     else:
                         lo = mid + 1
                 st.setdefault('needs', []).append(f'{g}:{lo}')
-    out.sort(key=lambda st: (st['item'] in GATED, st['opens'] == 0, st['first'] if st['opens'] else 0,
-                             -st['opens'] if st['opens'] else 0, st['order']))
+    # Worth a hint (user 2026-10-18: "if something only opens ONE check, that one check better be the next thing they
+    # need"): a step whose lost checks hold another kept step's item (progression), or that the Wind Fish needs.
+    # Dropping one can leave another without progression behind it: repeat until nothing changes. Seashells / leaves
+    # count while a kept real step needs them.
+    keep = {st['loc'] for st in out}
+    while True:
+        needed = {n.split(':')[0] for st in out if st['loc'] in keep and st['item'] not in GATED for n in st.get('needs', ())}
+        prog = {st['loc'] for st in out if st['loc'] in keep and (st['item'] not in GATED or st['item'] in needed)}
+        new_keep = {st['loc'] for st in out if st['loc'] in prog and (st['goal'] or (st['_lost'] & prog) - {st['loc']})}
+        if new_keep == keep:
+            break
+        keep = new_keep
+    dropped = [st for st in out if st['loc'] not in keep]
+    out = [st for st in out if st['loc'] in keep]
+    for st in out:  # what it opens that matters: the progression behind it, and when the first of it can be reached
+        behind = sorted((st['_lost'] & keep) - {st['loc']}, key=lambda c: (sphere_of.get(c, 999), c))
+        st['unlocks'] = len(behind)
+        st['first'] = sphere_of.get(behind[0], 999) if behind else 999
+        st['unlocks-example'] = behind[:3]
+        del st['_lost']
+    out.sort(key=lambda st: (st['item'] in GATED, not st['unlocks'], st['first'], -st['unlocks'], st['order']))
+    if dropped:
+        print('hint sheet: no hint for', ', '.join(f"{st['item']} ({st['loc']})" for st in dropped[:12]) +
+              (' ...' if len(dropped) > 12 else ''), flush=True)
     with open(os.path.join(out_dir, 'hint_steps.json'), 'w') as f:
         json.dump({'steps': out, 'dungeon-entrances': dict(placements.get('dungeon-entrances') or {})}, f, indent=1)
-    print(f'hint sheet: {len(out)} steps ({sum(1 for st in out if not st["opens"])} for the goal only) from '
+    print(f'hint sheet: {len(out)} steps ({sum(1 for st in out if not st["unlocks"])} for the goal only) from '
           f'{len(order)} items, {runs[0]} playthroughs in {time.time() - t0:.1f}s', flush=True)
     return len(out)
 
