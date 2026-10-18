@@ -1198,6 +1198,7 @@ typedef struct {
     VkPipelineLayout layout;
     bool vs_uses_vid;
     _Atomic int state;  // 0 building, 1 ready, 2 failed
+    uint64_t prep_vh, prep_fh;  // (prepared programs: their code hashes, for LARECOMP_PREP_CHECK)
 } Prog;
 
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
@@ -2828,6 +2829,7 @@ bool renderer_prepare(const ShaderRec *r, const ShaderBlob *vsb, const ShaderBlo
         p->cmax[1] = fsb->const_offset ? fsb->const_offset : 0x10000;
         p->vkey = vkey;
         p->fkey = fkey;
+        p->prep_vh = r->vs, p->prep_fh = r->fs;
         bool ok = translate_program_now(p);
         p->code[0] = p->code[1] = 0;  // (the game files' copies are gone after this call)
         PREP_PUT(prep_progs, ck, p);  // (failed ones too: the game then skips them as it would its own)
@@ -2958,6 +2960,78 @@ static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
     r->poly_fill = st.poly[2] != 1;
 }
 
+// LARECOMP_PREP_CHECK=1 (diagnostics): a pipeline the game builds although its shaders were prepared - logs the
+// fields its key differs in from the closest prepared pipeline of the same shaders (and the draw's variant record)
+static bool prep_check_on(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("LARECOMP_PREP_CHECK") && atoi(getenv("LARECOMP_PREP_CHECK"));
+    return v;
+}
+
+// Fields of two pipeline keys that differ: their number, and (out) "field: prepared / draw" for each
+static int pk_diff(const PipeKey *a, const PipeKey *b, char *out, size_t n) {
+    int d = 0;
+    size_t o = 0;
+    if (out && n) out[0] = 0;
+#define PKD(cond, ...) do { if (cond) { d++; if (out && o < n) o += (size_t)snprintf(out + o, n - o, __VA_ARGS__); } } while (0)
+    PKD(a->prog != b->prog, " program %p/%p (ready %d/%d);", (void *)a->prog, (void *)b->prog, a->prog ? (int)a->prog->state : -1,
+        b->prog ? (int)b->prog->state : -1);
+    PKD(a->ncolor != b->ncolor, " ncolor %u/%u;", a->ncolor, b->ncolor);
+    for (int i = 0; i < 8; i++) PKD(a->color[i] != b->color[i], " color%d %d/%d;", i, a->color[i], b->color[i]);
+    PKD(a->depth != b->depth, " depth %d/%d;", a->depth, b->depth);
+    PKD(a->stencil != b->stencil, " stencil %d/%d;", a->stencil, b->stencil);
+    PKD(a->samples != b->samples, " samples %u/%u;", a->samples, b->samples);
+    PKD(a->attr_mask != b->attr_mask, " attr_mask %#x/%#x;", a->attr_mask, b->attr_mask);
+    for (int i = 0; i < 32; i++) {
+        PKD(a->attr_fmt[i] != b->attr_fmt[i], " attr%d fmt %u/%u;", i, a->attr_fmt[i], b->attr_fmt[i]);
+        PKD(a->attr_off[i] != b->attr_off[i], " attr%d off %u/%u;", i, a->attr_off[i], b->attr_off[i]);
+        PKD(a->attr_bind[i] != b->attr_bind[i], " attr%d bind %u/%u;", i, a->attr_bind[i], b->attr_bind[i]);
+    }
+    PKD(a->used_streams != b->used_streams, " streams %#x/%#x;", a->used_streams, b->used_streams);
+    for (int s = 0; s < 17; s++) {
+        PKD(a->stride[s] != b->stride[s], " stride%d %u/%u;", s, a->stride[s], b->stride[s]);
+        PKD(a->divisor[s] != b->divisor[s], " divisor%d %u/%u;", s, a->divisor[s], b->divisor[s]);
+    }
+    for (int i = 0; i < 8; i++) {
+        PKD(memcmp(a->blend[i], b->blend[i], 8), " blend%d differs;", i);
+        PKD(a->write_mask[i] != b->write_mask[i], " write_mask%d %#x/%#x;", i, a->write_mask[i], b->write_mask[i]);
+    }
+    PKD(a->blend_on != b->blend_on, " blend_on %#x/%#x;", a->blend_on, b->blend_on);
+    PKD(a->a2c != b->a2c, " a2c %u/%u;", a->a2c, b->a2c);
+    PKD(a->topo_class != b->topo_class, " topo %u/%u;", a->topo_class, b->topo_class);
+    PKD(a->poly_fill != b->poly_fill, " fill %u/%u;", a->poly_fill, b->poly_fill);
+    if (!d && memcmp(a, b, sizeof *a)) {  // (no field differs: other bytes - padding)
+        const uint8_t *x = (const uint8_t *)a, *y = (const uint8_t *)b;
+        for (size_t i = 0; i < sizeof *a; i++) PKD(x[i] != y[i], " byte %zu %02x/%02x;", i, x[i], y[i]);
+    }
+#undef PKD
+    return d;
+}
+
+static void prep_check(const PipeKey *k, uint64_t vh, uint64_t fh, const ShaderRec *rec) {
+    char line[2048], diff[2048] = "";
+    shader_rec_format(rec, line, sizeof line);
+    int nprep = 0, best_d = 1 << 30, progs = 0;
+    pthread_mutex_lock(&prep_lock);
+    for (size_t i = 0; i < prep_progs_cap; i++) {
+        Prog *q = prep_progs[i].obj;
+        if (prep_progs[i].key && q && q->prep_vh == vh && q->prep_fh == fh) progs++;
+    }
+    const Pipe *best = NULL;
+    for (size_t i = 0; i < prep_pipes_cap; i++) {
+        const Pipe *p = prep_pipes[i].obj;
+        if (!prep_pipes[i].key || !p || p->k.prog->prep_vh != vh || p->k.prog->prep_fh != fh) continue;
+        nprep++;
+        int d = pk_diff(&p->k, k, NULL, 0);
+        if (d < best_d) best_d = d, best = p;
+    }
+    if (best) pk_diff(&best->k, k, diff, sizeof diff);
+    pthread_mutex_unlock(&prep_lock);
+    LOG("[prepcheck] %016llx %016llx: program %s (%d prepared with these shaders), %d prepared pipelines, closest "
+        "differs (prepared/draw) in:%s\n[prepcheck]   draw: %s\n", (unsigned long long)vh, (unsigned long long)fh,
+        k->prog->prep_vh ? "prepared" : "not prepared", progs, nprep, best ? diff : " (none)", line);
+}
+
 static void draw_(CmdRec *r, bool indexed);
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
@@ -3061,7 +3135,13 @@ static void draw_(CmdRec *r, bool indexed) {
         pp = prep_pipes_n ? PREP_GET(prep_pipes, ph) : NULL;  // prepared before the game
         if (pp && memcmp(&pp->k, &k, sizeof k)) pp = NULL;
         if (!pp) {
-            shader_first_visit("pipeline", shader_stage_hash(&st.program->stages[0]), shader_stage_hash(&st.program->stages[1]), ph);
+            uint64_t vh = shader_stage_hash(&st.program->stages[0]), fh = shader_stage_hash(&st.program->stages[1]);
+            shader_first_visit("pipeline", vh, fh, ph);
+            if (prep_check_on()) {
+                ShaderRec rec;
+                rec_from_state(&rec, vkey.flip_x, mode);
+                prep_check(&k, vh, fh, &rec);
+            }
             pp = calloc(1, sizeof *pp);
             pp->k = k;
             run_job(build_pipeline, pp);
