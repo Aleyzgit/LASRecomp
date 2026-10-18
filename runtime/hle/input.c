@@ -82,11 +82,15 @@ void input_rumble_poll(void) {
     // Renew SDL's 250 ms effect every 100 ms while frames are progressing.
     // A stalled render/UI thread therefore cannot leave an infinite effect.
     // This watchdog is a host policy, not a duration supplied by the game.
-    bool suppress = (now > last_frame && now - last_frame > 250) || !pad || host_test || menu_is_open() ||
+    bool suppress = (now > last_frame && now - last_frame > 250) || !pad || host_test || !g_settings.rumble || menu_is_open() ||
                     !SDL_GetKeyboardFocus();
     SDL_LockSpinlock(&rumble_lock);
     if (suppress) memset(rumble_values, 0, sizeof rumble_values);
-    else if (rumble_allowed) rumble_mix(rumble_values, &lo, &hi);
+    else if (rumble_allowed) {
+        rumble_mix(rumble_values, &lo, &hi);
+        int pct = g_settings.rumble_strength;  // (Controls tab: Intensity)
+        if (pct > 0 && pct < 100) lo = (uint16_t)(lo * pct / 100), hi = (uint16_t)(hi * pct / 100);
+    }
     SDL_UnlockSpinlock(&rumble_lock);
     if (pad && (lo != rumble_last_lo || hi != rumble_last_hi ||
                 ((lo || hi) && now - rumble_last_ms >= 100))) {
