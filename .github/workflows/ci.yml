@@ -63,6 +63,8 @@ jobs:
         run: python3 tools/test_settings.py
       - name: Vulkan fence sequence regression
         run: python3 tools/test_fence_sequence.py
+      - name: Vulkan validation failure regression
+        run: python3 tools/test_vulkan_validation.py
       - name: SIMD rounding and host-state regression
         run: |
           clang -std=gnu11 -O1 -mfma -pthread tools/test_simd_rounding.c -lm -o build/test-simd-rounding
@@ -132,6 +134,8 @@ jobs:
           build/test-condvar.exe
       - name: Vulkan fence sequence regression
         run: python tools/test_fence_sequence.py
+      - name: Vulkan validation failure regression
+        run: python tools/test_vulkan_validation.py
       - name: Windows guest thread stack regression
         run: |
           clang -std=gnu11 -O1 tools/test_windows_thread_stack.c -lpsapi -o build/test-thread-stack.exe
