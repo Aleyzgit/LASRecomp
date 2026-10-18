@@ -33,9 +33,8 @@ int main(int argc, char **argv) {
     log_to_file_without_console();
     if (!strcmp(argv[1], "reject")) return g_log_path[0] ? 3 : 0;
     if (console ? g_log_path[0] != 0 : g_log_path[0] == 0) return 4;
-    fprintf(stdout, "stdout:%s\n", argv[1]);
-    fflush(stdout);
-    fprintf(stderr, "stderr:%s\n", argv[1]);
+    if (fprintf(stdout, "stdout:%s\n", argv[1]) < 0 || fflush(stdout)) return 9;
+    if (fprintf(stderr, "stderr:%s\n", argv[1]) < 0 || fflush(stderr)) return 10;
     if (!strcmp(argv[1], "parent")) {
         char exe[MAX_PATH], command[MAX_PATH + 20];
         if (!GetModuleFileNameA(NULL, exe, sizeof exe)) return 5;
@@ -93,7 +92,8 @@ with tempfile.TemporaryDirectory(prefix='windows-logs-', dir=build) as directory
     for i, process in enumerate(processes):
         log, = temporary.glob(f'lasrecomp-backup-*-{process.pid}.log')
         assert log.exists(), 'Independent GUI launches did not get separate logs'
-        assert log.read_text().splitlines() == [f'stdout:independent-{i}', f'stderr:independent-{i}']
+        lines = log.read_text().splitlines()
+        assert lines == [f'stdout:independent-{i}', f'stderr:independent-{i}'], (log.name, lines)
 
     parent = start('parent'); finish(parent)
     parent_log, = temporary.glob(f'lasrecomp-backup-*-{parent.pid}.log')
@@ -116,7 +116,8 @@ with tempfile.TemporaryDirectory(prefix='windows-logs-', dir=build) as directory
                             creationflags=subprocess.CREATE_NO_WINDOW)
     finish(bare)
     bare_log, = temporary.glob(f'lasrecomp-backup-*-{bare.pid}.log')
-    assert bare_log.read_text().splitlines() == ['stdout:bare-gui', 'stderr:bare-gui']
+    lines = bare_log.read_text().splitlines()
+    assert lines == ['stdout:bare-gui', 'stderr:bare-gui'], (bare_log.name, lines)
     assert (temporary/'lasrecomp.log').read_bytes() == bare_log.read_bytes()
 
     # The alias is live while the newest session runs; pruning leaves older active
