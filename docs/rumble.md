@@ -31,16 +31,14 @@ host watchdog policy, not durations decoded from the game.
 
 The game's vibration graph uses a 5 ms TimerEvent. The kernel must return
 WaitProcessWideKeyAtomic timeout without owning the mutex: the SDK acquires it
-after timeout. Acquiring it in both places deadlocks the update thread. The
-separate kernel timeout fix is required for game-driven rumble to work.
+after timeout. Acquiring it in both places deadlocks the update thread. This
+behavior is already present on beta_5 (8a8f74f); no separate kernel PR is required.
 
 ## Tests
 
 From an MSYS2 UCRT64 shell at the repository root:
 
 ```sh
-clang -O2 -pthread tools/test_condvar.c -o build/test_condvar.exe
-build/test_condvar.exe
 clang -O2 $(pkg-config --cflags sdl3) tools/test_rumble.c -o build/test_rumble.exe
 build/test_rumble.exe
 clang -O2 $(pkg-config --cflags sdl3) tools/test_sdl_rumble.c $(pkg-config --libs sdl3) -o build/test_sdl_rumble.exe
