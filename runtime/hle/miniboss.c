@@ -618,7 +618,7 @@ static const DeathKind g_death[] = {
 };
 #define NDEATH (int)(sizeof g_death / sizeof g_death[0])
 #define MAX_DYING 16
-static struct { uint64_t e, actor, at; int frames; } g_dying[MAX_DYING];
+static struct { uint64_t e, actor, at; long frames; } g_dying[MAX_DYING];  // (frames: then the frame it's forgotten)
 RT_ON_RESET(dying_reset) { memset(g_dying, 0, sizeof g_dying); }
 
 static const char *mb_level(void) {
@@ -656,8 +656,12 @@ int rt_death_event(Cpu *c) {  // DEATH_EVENT_SITE (x20: the event state, x19: th
     extern const char *rando_seed_dir(void);
     uint64_t e = c->x[20], a = c->x[19];
     if (!rando_seed_dir() || !a || !strncmp(mb_level(), "Panel", 5)) return 0;
-    for (int i = 0; i < MAX_DYING; i++)
-        if (g_dying[i].e == e && g_dying[i].actor == a && g_dying[i].at == 1) { g_dying[i].e = 0; return 0; }  // (ours)
+    for (int i = 0; i < MAX_DYING; i++) {
+        if (g_dying[i].actor != a || !g_dying[i].actor) continue;
+        if (g_dying[i].at == 1) return 0;  // (ours, now)
+        c->x[2] = GA_NOOP_FN;  // (dying already: a hit while it dies enters its End state again - one death only)
+        return 1;
+    }
     uint64_t vt = LD64(a);
     int k = 0;
     while (k < NDEATH && g_death[k].vt != vt) k++;
@@ -668,7 +672,7 @@ int rt_death_event(Cpu *c) {  // DEATH_EVENT_SITE (x20: the event state, x19: th
     if (len < 3 || len > 0x18 || memcmp((const char *)(uintptr_t)(e + 8 + len - 3), "End", 3)) return 0;
     int slot = -1;
     for (int i = 0; i < MAX_DYING && slot < 0; i++)
-        if (!g_dying[i].e) slot = i;
+        if (!g_dying[i].actor) slot = i;
     if (slot < 0) return 0;
     g_dying[slot].e = e, g_dying[slot].actor = a, g_dying[slot].at = renderer_present_count() + g_death[k].frames;
     g_dying[slot].frames = g_death[k].frames;
@@ -681,11 +685,15 @@ int rt_death_event(Cpu *c) {  // DEATH_EVENT_SITE (x20: the event state, x19: th
 
 static void dying_tick(Cpu *c, uint64_t frame) {  // (the delayed request: through its event state, as the game's)
     for (int i = 0; i < MAX_DYING; i++) {
-        if (!g_dying[i].e || g_dying[i].at == 1 || frame < g_dying[i].at) continue;
         uint64_t e = g_dying[i].e, a = g_dying[i].actor;
+        if (!a) continue;
         int k = 0;
         while (k < NDEATH && g_death[k].vt != LD64(a)) k++;
-        if (k == NDEATH) { g_dying[i].e = 0; continue; }  // (gone)
+        if (k == NDEATH || (!e && (long)frame > g_dying[i].frames)) {  // (gone; or 10 s after its request: gone surely)
+            memset(&g_dying[i], 0, sizeof g_dying[i]);
+            continue;
+        }
+        if (!e || frame < g_dying[i].at) continue;  // (e 0: requested - kept a while, for hits meanwhile)
         g_dying[i].at = 1;
         uint64_t saved[31], sp = c->sp;
         memcpy(saved, c->x, sizeof saved);
@@ -693,7 +701,7 @@ static void dying_tick(Cpu *c, uint64_t frame) {  // (the delayed request: throu
         guest_call(c, GA_EVENT_STATE_START);
         memcpy(c->x, saved, sizeof saved);
         c->sp = sp;
-        g_dying[i].e = 0;
+        g_dying[i].e = 0, g_dying[i].at = 2, g_dying[i].frames = (long)(frame + 600);
         LOG("[miniboss] f%llu copy %llx: its End event (short path)\n", (unsigned long long)frame, (unsigned long long)a);
     }
 }

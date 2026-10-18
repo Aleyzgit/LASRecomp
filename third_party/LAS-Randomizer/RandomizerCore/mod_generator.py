@@ -2065,11 +2065,9 @@ class ModsProcess(QtCore.QThread):
 
             room_data = self.readFile(f'{room}.leb')
 
-            for element_key in elements_to_remove:
-                for index, actor in enumerate(room_data.actors):
-                    if actor.key == element_key:
-                        room_data.actors.pop(index)
-                        break
+            # (LARecomp: with their kit actors and the room's links renumbered - enemies.remove_actors)
+            from RandomizerCore.Randomizers import enemies
+            enemies.remove_actors(room_data, [i for i, a in enumerate(room_data.actors) if a.key in elements_to_remove])
 
             self.writeFile(f'{room}.leb', room_data)
 
