@@ -9,7 +9,10 @@ the logic thinks is open too early - the circular dig-spot gates of #81 / #144. 
 runtime/ui/rando_tab.mm (seed_id_encode, request.json in start_generation): keep the two in step.
 
 usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir] [--stealing M] [--shopsanity N]
+                    [--miniboss-freq F] [--full]
        (default: the fixed seed IDs below + 40 random option mixes with digsanity on, every logic level)
+--miniboss-freq F: every random mix randomizes enemies with mini-boss frequency F (0 - 3: Normal, 2x, 3x, All), enemy
+mode Seeded or Random; --full: each seed is also generated in full (game files, enemies and all) and must finish.
 Exit status 1 if any seed fails either check. Run it with the LAS venv's Python (third_party/LAS-Randomizer/venv).
 """
 import argparse
@@ -205,7 +208,7 @@ def check_seed(out_dir, level, walk):
 
 
 def run_one(job):
-    sid, o, level, romfs, keep, walk = job
+    sid, o, level, romfs, keep, walk, full = job
     tmp = tempfile.mkdtemp(prefix='sweep-', dir=keep)
     req = os.path.join(tmp, 'request.json')
     with open(req, 'w') as f:
@@ -220,6 +223,17 @@ def run_one(job):
         tail = (r.stderr.strip().splitlines() or ['?'])[-1]
         return sid, level, f'generator exit {r.returncode}: {tail}', None
     own, strict, lost = check_seed(os.path.join(tmp, 'out'), level, walk)
+    if full and not own and not strict:  # (the whole seed: enemies, mini-bosses, every room edit)
+        env = dict(os.environ, PYTHONHASHSEED='0')
+        env.pop('LARECOMP_CHECK_ONLY', None)
+        try:
+            r = subprocess.run([sys.executable, os.path.join(HERE, 'las_headless.py'), romfs, os.path.join(tmp, 'full'),
+                                req], env=env, capture_output=True, text=True, timeout=TIMEOUT)
+        except subprocess.TimeoutExpired:
+            return sid, level, f'full generation timeout ({TIMEOUT} s)', lost
+        if r.returncode != 0:
+            tail = (r.stderr.strip().splitlines() or ['?'])[-1]
+            return sid, level, f'full generation exit {r.returncode}: {tail}', lost
     if not keep:
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)
@@ -252,6 +266,9 @@ def main():
     ap.add_argument('--stealing', choices=['never', 'normal', 'always'], help='every random mix with this stealing rule')
     ap.add_argument('--shopsanity', type=int, choices=[0, 1, 2], help='every random mix with this shopsanity (off / '
                     'vanilla / random prices)')
+    ap.add_argument('--miniboss-freq', type=int, choices=[0, 1, 2, 3], help='every random mix with enemies randomized, '
+                    'mini-bosses at this frequency (Normal / 2x / 3x / All)')
+    ap.add_argument('--full', action='store_true', help='also generate each seed in full (game files)')
     args = ap.parse_args()
     romfs = os.path.abspath(args.romfs)
     if args.keep:
@@ -264,6 +281,9 @@ def main():
         o = random_options(rng)
         if args.shopsanity is not None:
             o['shopsanity'] = args.shopsanity
+        if args.miniboss_freq is not None:
+            o.update(randomize_enemies=True, enemy_minibosses=True, miniboss_freq=args.miniboss_freq,
+                     enemy_mode=int(rng.random() < 0.5))
         if args.stealing:
             o['no_stealing'], o['steal_needs_sword'] = args.stealing == 'never', args.stealing == 'normal'
             if args.stealing == 'never' and not o['shopsanity']:
@@ -271,7 +291,7 @@ def main():
         jobs.append((encode(o), o, levels[i % len(levels)]))
     bad = 0
     with concurrent.futures.ProcessPoolExecutor(args.j) as ex:
-        for sid, level, res, lost in ex.map(run_one, [j + (romfs, args.keep, walk) for j in jobs]):
+        for sid, level, res, lost in ex.map(run_one, [j + (romfs, args.keep, walk, args.full) for j in jobs]):
             d = decode(sid)
             print(f"{sid} {level:9} shop {['off', 'vanilla', 'random'][d['shopsanity']]:7} steal {stealing(d):6} {res}",
                   flush=True)

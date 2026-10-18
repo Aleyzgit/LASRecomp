@@ -1824,6 +1824,8 @@ class ModsProcess(QtCore.QThread):
         hole_ids = []
 
         for value in ENEMY_DATA['Actors'].values():
+            if value.get('minibosses-only') and not self.settings.get('enemy-minibosses', False):
+                continue  # (LARecomp: Shadow Link joins the pool only with Include mini-bosses)
             if value['type'] == 'land':
                 land_ids.append(value['id'])
             elif value['type'] == 'air':

@@ -4,7 +4,7 @@
 // trigger watches (TagHolocaust / TagPopChecker: shutters, chests, stairs) or that stands in a room with a shutter no
 // switch drives, never a mini-boss (they stay where the seed put them) - so every check and every way on is as in a
 // Seeded seed. Each roll follows LAS enemies.py: the terrain class of the vanilla actor, the room's restrictions, 2D
-// rooms, one fly-bomb / blocking group per room, Stretchy Ghost / orb colours, the enemy table's parameters.
+// rooms, one fly-bomb / blocking group / Shadow Link per room, Stretchy Ghost / orb colours, the enemy table's parameters.
 //  - file loads (runtime/services/fs.c -> enemy_random_filter): a read of a listed room file from its first byte rolls
 //    its actor records before the bytes reach the game (type, parameters, rotation, scale, enemy flag);
 //  - spawns (rt_enemy_spawn): the game keeps recently loaded files, so a level entered again, an overworld area
@@ -52,7 +52,7 @@ typedef struct {
 } RFile;
 
 static int g_pick[NCLS][MAXPICK], g_npick[NCLS];
-static int g_no2d[16], g_nno2d, g_fly[8], g_nfly, g_block[16], g_nblock;
+static int g_no2d[16], g_nno2d, g_fly[8], g_nfly, g_block[16], g_nblock, g_one[8], g_none;  // (one: Shadow Link)
 static Enemy g_enemy[MAXENEMY];
 static int g_nenemy, g_sizes;
 static RFile *g_files;
@@ -73,6 +73,7 @@ RT_ON_RESET(enemy_random_reset) {
     g_keyidx = NULL, g_keys = NULL, g_keycap = 0;
     g_files = NULL, g_slots = NULL;
     g_nfiles = g_nslots = g_nenemy = g_sizes = g_loaded = 0;
+    g_none = 0;  // (a seed without Include mini-bosses has no "one" group)
     g_dir[0] = 0;
 }
 
@@ -154,6 +155,7 @@ static void load(void) {
             *t2 = 0;
             if (!strcmp(rest, "fly")) g_nfly = ids(t2 + 1, g_fly, 8);
             else if (!strcmp(rest, "block")) g_nblock = ids(t2 + 1, g_block, 16);
+            else if (!strcmp(rest, "one")) g_none = ids(t2 + 1, g_one, 8);  // (seeds with Include mini-bosses)
         } else if (!strcmp(line, "sizes")) {
             g_sizes = atoi(rest);
         } else if (!strcmp(line, "enemy") && g_nenemy < MAXENEMY) {
@@ -255,6 +257,7 @@ static int pick_for(const Slot *s, int *restr, int *nr) {
     if (pick < 0 || in(restr, *nr, pick)) pick = s->seed_type;  // (nothing fits: the seed's own)
     if (in(g_fly, g_nfly, pick)) { for (int i = 0; i < g_nfly && *nr < 96; i++) restr[(*nr)++] = g_fly[i]; }
     else if (in(g_block, g_nblock, pick)) { for (int i = 0; i < g_nblock && *nr < 96; i++) restr[(*nr)++] = g_block[i]; }
+    else if (in(g_one, g_none, pick)) { for (int i = 0; i < g_none && *nr < 96; i++) restr[(*nr)++] = g_one[i]; }
     return pick;
 }
 
@@ -343,6 +346,7 @@ static void roll_one(RFile *rf, int k, int fd) {
         if (si == k) continue;
         if (in(g_fly, g_nfly, t)) { for (int i = 0; i < g_nfly && nr < 96; i++) restr[nr++] = g_fly[i]; }
         else if (in(g_block, g_nblock, t)) { for (int i = 0; i < g_nblock && nr < 96; i++) restr[nr++] = g_block[i]; }
+        else if (in(g_one, g_none, t)) { for (int i = 0; i < g_none && nr < 96; i++) restr[nr++] = g_one[i]; }
     }
     int was = rec_type(s);
     apply_pick(s, seed, pick_for(s, restr, &nr));

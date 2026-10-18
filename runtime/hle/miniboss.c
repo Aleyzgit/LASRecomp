@@ -47,7 +47,9 @@ static const Kind g_kinds[] = {
 #define WAKE_DIST 7.0f  // (a Field screen is ~15 x 12 units)
 
 typedef struct { uint64_t obj, first, last, woken_at; int kind, woken; float px, pz; int stuck; uint64_t flip_at; } Seen;
-static Seen g_seen[32];
+// (frequency All: up to 6 on a screen, and the Field keeps the screens around Link loaded - room for all of them)
+#define MAX_SEEN 128
+static Seen g_seen[MAX_SEEN];
 RT_ON_RESET(miniboss_reset) { memset(g_seen, 0, sizeof g_seen); }
 extern uint64_t renderer_present_count(void);
 
@@ -160,7 +162,7 @@ void rt_mb_seen(uint64_t o) {
     if (k == NKINDS) return;
     uint64_t f = renderer_present_count();
     int free_i = -1;
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < MAX_SEEN; i++) {
         if (g_seen[i].obj == o) { g_seen[i].last = f; return; }
         if (free_i < 0 && (!g_seen[i].obj || f - g_seen[i].last > 120)) free_i = i;
     }
@@ -382,27 +384,29 @@ int rt_crashout_skip(void) { return rt_gohma_free(); }
 // Shadow Link on the Field (a chamber mini-boss: "Include mini-bosses"). As a shadow he follows Link; within 3 units
 // his own code requests his Appear event (main+0xd157f0: ShadowLink.bfevfl - the camera looks at him, his Sign glow,
 // PopStart) and marks it at +0x1703 (requested) / +0x1704 (running); once +0x1704 is cleared again (the event's end)
-// he pops up. An event stops Link and takes the camera, so on the Field the request itself is skipped
-// (tools/patches.py SHADOW_LINK_APPEAR_SITE): the marks are set as it would, his Sign glow plays here (his tailor at
-// [+0x16c0]+0x58, channel "Other", as his own code plays its effects) and, after the event's own timing, +0x1704 is
-// cleared - he pops up with Link still in control and the camera on Link.
-static struct { uint64_t obj, last, at; } g_sl[8];
+// he pops up. An event stops Link and takes the camera, so in seeds the request itself is skipped - on the Field (a
+// mini-boss) and in dungeons, caves and houses (a plain enemy: enemies.yml, Include mini-bosses), everywhere but his
+// own Dampe's chamber levels (Panel*) - (tools/patches.py SHADOW_LINK_APPEAR_SITE): the marks are set as it would, his
+// Sign glow plays here (his tailor at [+0x16c0]+0x58, channel "Other", as his own code plays its effects) and, after
+// the event's own timing, +0x1704 is cleared - he pops up with Link still in control and the camera on Link.
+#define MAX_SL 32  // (several on a screen with frequency All)
+static struct { uint64_t obj, last, at; } g_sl[MAX_SL];
 RT_ON_RESET(shadow_link_reset) { memset(g_sl, 0, sizeof g_sl); }
 #define SL_REQUESTED 0x1703
 #define SL_RUNNING 0x1704
 
 static void shadow_link_seen(uint64_t o) {
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < MAX_SL; i++)
         if (g_sl[i].obj == o) g_sl[i].last = renderer_present_count();
 }
 
 int rt_shadow_link_appear(uint64_t o) {  // (SHADOW_LINK_APPEAR_SITE: 1 = the request is skipped)
     extern const char *rando_seed_dir(void);
     uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
-    if (!rando_seed_dir() || !ps || strcmp((const char *)(uintptr_t)ps, "Field")) return 0;  // (Dampe's chamber: as is)
+    if (!rando_seed_dir() || !ps || !strncmp((const char *)(uintptr_t)ps, "Panel", 5)) return 0;  // (Dampe's chamber: as is)
     uint64_t f = renderer_present_count();
     int slot = -1;
-    for (int i = 0; i < 8 && slot < 0; i++)
+    for (int i = 0; i < MAX_SL && slot < 0; i++)
         if (g_sl[i].obj == o || !g_sl[i].obj || f - g_sl[i].last > 120) slot = i;
     if (slot < 0) slot = 0;
     g_sl[slot].obj = o, g_sl[slot].last = f, g_sl[slot].at = f;
@@ -428,7 +432,7 @@ static void shadow_link_sign(Cpu *c, uint64_t o) {
 }
 
 static void shadow_link_tick(Cpu *c, uint64_t frame) {
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < MAX_SL; i++) {
         uint64_t o = g_sl[i].obj;
         if (!o) continue;
         if (frame - g_sl[i].last > 2 || LD64(o) != GA_SHADOW_LINK_VTABLE || !LD8(o + SL_RUNNING)) {
@@ -447,6 +451,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
     force_tick(c, frame);
     extern const char *rando_seed_dir(void);
     if (!rando_seed_dir()) return;  // (only seeds put mini-bosses on the Field)
+    shadow_link_tick(c, frame);  // (any level: Shadow Link is a plain enemy in dungeons too)
     uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
     if (!ps || strcmp((const char *)(uintptr_t)ps, "Field")) return;  // (dungeon arenas start their own)
     uint64_t pc = doorjump_player(frame);
@@ -454,8 +459,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
     const float *lp = (const float *)(uintptr_t)(pc + 0x80);
     memcpy(g_link, lp, sizeof g_link), g_have_link = true;
     miniboss_marker_set();
-    shadow_link_tick(c, frame);
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < MAX_SEEN; i++) {
         Seen *s = &g_seen[i];
         if (!s->obj || frame - s->last > 2 || frame - s->first < 30 || LD64(s->obj) != g_kinds[s->kind].vt) continue;
         const Kind *k = &g_kinds[s->kind];

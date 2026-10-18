@@ -430,6 +430,11 @@ Actors:
     id: 0xB7
     type: land
     enemy: True
+  EnemyShadowLink:  # LARecomp: Dampe's chamber mini-boss, also a plain land enemy - only with Include mini-bosses on
+    id: 0x21E
+    type: land
+    enemy: True
+    minibosses-only: True
   # EnemyPotDemonPot:
   #   id: 0xB9
   #   type: boss
