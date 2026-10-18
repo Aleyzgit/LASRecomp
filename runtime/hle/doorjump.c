@@ -150,8 +150,9 @@ static uint64_t find_player(uint64_t frame) {
 
 uint64_t doorjump_player(uint64_t frame) { return find_player(frame); }  // (test hooks elsewhere: hookshot.c; digsanity: digs.c)
 
-// LARECOMP_DOORJUMP_TEST=<frame>:<cell>:<side> (test): from <frame> on, once the level with jumps has been loaded
-// for 60 frames (warp into the cell first, LARECOMP_WARP_AT), put Link 1.2 inside that doorway; the test holds the
+// LARECOMP_DOORJUMP_TEST=<frame>:<cell>:<side>[:<centre>] (test): from <frame> on, once the level with jumps has been
+// loaded for 60 frames (warp into the cell first, LARECOMP_WARP_AT), put Link 1.2 inside that doorway (with a centre:
+// that one of the side's doorways - one without a row walks through into the neighbour); the test holds the
 // stick outward (tools/doorjump_test.sh, LARECOMP_INPUT); 300 frames later log the cell he is in
 uint64_t g_stick_freeze_until;
 static int g_jumps_fired;  // (test result: a jump that fired and then he ended elsewhere = pushed back by an enemy)  // runtime/hle/input.c releases the stick until this frame
@@ -161,6 +162,7 @@ uint64_t g_test_stick_until;
 static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     static long at = -2, placed = -1;
     static char cell[8], side;
+    static int want = -1;  // the doorway's centre (-1: the side's first row)
     static int er = -1, ec = -1;  // expected cell (the tested jump's target)
     static float px0, pz0;        // where Link was placed
     static int tries;
@@ -170,7 +172,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
         at = -1;
         const char *e = ENV("LARECOMP_DOORJUMP_TEST");
         char sd[4];
-        if (e && sscanf(e, "%ld:%7[^:]:%3s", &at, cell, sd) == 3) side = sd[0]; else at = -1;
+        if (e && sscanf(e, "%ld:%7[^:]:%1s:%d", &at, cell, sd, &want) >= 3) side = sd[0]; else at = -1;
     }
     if (at < 0 || !pc) return;
     // wait until the warp into the dungeon has finished: in a level with jumps, settled for 60 frames
@@ -192,9 +194,19 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     }
     bool arrived = in && frame - in_level_since >= 120 && ((moved_ && still_ >= 60) || frame - in_level_since >= 900);
     if (placed < 0 && (long)frame >= at && arrived) {
-        for (int i = 0; i < g_njumps; i++) {
-            const Jump *j = &g_jumps[i];
+        // a doorway without a row (want >= 0): no jump, he walks on into the neighbour across the edge
+        Jump plain = {0};
+        if (want >= 0) {
+            strlcpy(plain.level, lv, sizeof plain.level);
+            plain.row = row, plain.col = col, plain.side = side, plain.own = want;
+            plain.trow = row + (side == 'N' ? -1 : side == 'S' ? 1 : 0);
+            plain.tcol = col + (side == 'W' ? -1 : side == 'E' ? 1 : 0);
+        }
+        for (int i = 0; i <= g_njumps; i++) {
+            const Jump *j = i < g_njumps ? &g_jumps[i] : &plain;
+            if (i == g_njumps && want < 0) break;
             if (j->row != row || j->col != col || j->side != side || strcmp(j->level, lv)) continue;  // (this level's)
+            if (want >= 0 && j->own != want) continue;
             float x0 = 15.0f * col, z0 = 12.0f * (row - 1), x = 0, z = 0;
             switch (side) {
             case 'W': x = x0 + 1.2f; z = z0 + j->own * 0.75f; break;
