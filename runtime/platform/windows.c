@@ -114,6 +114,11 @@ void plat_sleep_until_ns(uint64_t t) {
     }
 }
 
+int plat_cpu_count(void) {
+    DWORD_PTR proc = 0, sys = 0;
+    return GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys) ? __builtin_popcountll((unsigned long long)proc) : 0;
+}
+
 void plat_thread_guest(int prio) { (void)prio; }  // (the OS's default scheduling serves the game here)
 
 void plat_thread_realtime(uint64_t period_ns) {
@@ -329,6 +334,19 @@ void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
     MessageBoxA(NULL, text, "LAS Recomp", MB_ICONERROR | MB_OK);
+}
+
+static DWORD WINAPI notice_thread(LPVOID text) {
+    MessageBoxA(NULL, text, "LAS Recomp", MB_ICONWARNING | MB_OK);
+    free(text);
+    return 0;
+}
+void plat_notice(const char *text) {
+    if (!g_log_path[0]) return;
+    char *copy = _strdup(text);
+    HANDLE t = copy ? CreateThread(NULL, 0, notice_thread, copy, 0, NULL) : NULL;
+    if (t) CloseHandle(t);
+    else free(copy);
 }
 
 bool plat_module_name(uint64_t pc, char *out, size_t n) {

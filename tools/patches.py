@@ -344,6 +344,40 @@ def _frame_steps(gen, a):
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
 
 
+# The game's own dynamic resolution, off: resolution is ours to choose (runtime/nvn/output_scale.c - a fixed choice
+# renders at exactly that size, "Dynamic" is our scaler alone). The game sizes its main pass by a level (renderer
+# +0x6e4c, docked): 1080 - 36 x level lines at 16:9 (f_7001023c10), level 0 = 1920x1080, 9 = 1344x756, 10 = 1280x720.
+# Its scaler (the object at +0x648: enabled byte, table indexes, the level tables - docked [0 3 6 9 10]) is set up at
+# boot (f_700107cb90) at the first table level >= the boot default (8: so 9, 1344x756). Then each frame its frame
+# controller (f_700000c910) turns its GPU timing counters (renderer+0x81c0) into a load figure (GPU time x 100 /
+# (16.67 ms x swap interval)); 6 frames all over 90%: one level down the table (f_700107d110), 6 all under 70%: up.
+# GAME_DYNRES_SITE: the enabled byte reads as 0 - no samples, no steps. GAME_DYNRES_INIT_SITE: the set-up reads the
+# boot default as 0 - it starts (and so stays) at level 0, full size. The rest of the frame controller - the 30 fps
+# mode, which reads the same counters - runs as before. LARECOMP_GAME_DYNRES=1 (test): the game's own again.
+GAME_DYNRES_SITE = A.GAME_DYNRES_SITE
+GAME_DYNRES_INIT_SITE = A.GAME_DYNRES_INIT_SITE
+
+
+def _game_dynres(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x395922e8, hex(w)  # ldrb w8, [x23, #0x648]
+    return ('{ extern int rt_game_dynres(void); '
+            'c->x[8] = rt_game_dynres() ? LD8(c->x[23] + 0x648) : 0; }'
+            f'  /* {a:#x}: ldrb w8, [x23, #0x648] (the game\'s dynamic resolution: off) */')
+
+
+def _game_dynres_init(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb86d698c, hex(w)  # ldr w12, [x12, x13] (x13 = 0x6e4c)
+    return ('{ extern int rt_game_dynres(void); '
+            'c->x[12] = rt_game_dynres() ? LD32(c->x[12] + c->x[13]) : 0; }'
+            f'  /* {a:#x}: ldr w12, [x12, x13] (the game\'s starting resolution level: full size) */')
+
+
+PATCHES[GAME_DYNRES_SITE] = _game_dynres
+PATCHES[GAME_DYNRES_INIT_SITE] = _game_dynres_init
+
+
 # Digsanity (runtime/hle/digs.c): the shovel's dig commit (f_7000ddc530) spawns the hole actor (ObjHolesDug 0x1cd)
 # through f_7000d228d0(&out, transform x21, zone, &room, ...); right after it the hole (out at [sp+0x10]) and its
 # snapped tile-centre position (x21) tell the runtime which tile was dug - the first dig of a tile gives its item.
@@ -445,6 +479,58 @@ def _snap_dir(gen, a):
 
 
 PATCHES[SNAP_DIR_SITE] = _snap_dir
+
+
+# Walk speed (runtime/hle/qol.c, setting walk_speed): Link's walk state (main+0xdcdae0) and shield walk (main+0xdb7d30)
+# put a speed multiplier in s0 right before these loads - 1.0, or 1.15 with a Piece of Power - and scale the ramped
+# walk speed by it (then by the slow-ground factors 0.25 / 0.75). rt_walk_speed multiplies s0 by the setting. The
+# Pegasus Boots dash, swimming and side-view ladders have their own speeds and are untouched, and so is the hop off a
+# ledge (the same multiplier loaded again at main+0xdce508 / 0xdd0254 / 0xdb86e8 / 0xdb8f3c: left alone, so jump
+# distances stay the game's own).
+WALK_SPEED_SITES = {A.WALK_SPEED_SITES_0: (19, 0), A.WALK_SPEED_SITES_1: (19, 1), A.WALK_SPEED_SITES_2: (20, 2),
+                    A.WALK_SPEED_SITES_3: (20, 3)}
+
+
+def _walk_speed(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    rn, site = WALK_SPEED_SITES[a]
+    assert w == 0xf94ca408 | (rn << 5), hex(w)  # ldr x8, [x19|x20, #0x1948]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[0], 4); '
+            f'm_ = rt_walk_speed(c->x[{rn}], m_, {site}); c->v[0] = 0; memcpy(&c->v[0], &m_, 4); '
+            f'c->x[8] = LD64(c->x[{rn}] + 0x1948); }}'
+            f'  /* {a:#x}: ldr x8, [x{rn}, #0x1948] (walk speed multiplier in s0) */')
+
+
+for _a in WALK_SPEED_SITES:
+    PATCHES[_a] = _walk_speed
+
+
+# Walk animation rate: main+0xdce320 (walk state) has the walk animation's play rate in s8 (1, 0.75 on slow ground,
+# x1.15 with a Piece of Power), handed to the animation layers right after.
+def _walk_anim(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94ab668, hex(w)  # ldr x8, [x19, #0x1568]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[8], 4); '
+            'm_ = rt_walk_speed(c->x[19], m_, 100); c->v[8] = 0; memcpy(&c->v[8], &m_, 4); '
+            'c->x[8] = LD64(c->x[19] + 0x1568); }'
+            f'  /* {a:#x}: ldr x8, [x19, #0x1568] (walk animation rate in s8) */')
+
+
+PATCHES[A.WALK_ANIM_SITE_0] = _walk_anim
+
+
+# The same for the shield walk (main+0xdb8168): s0 = 1 or 0.75 on slow ground (times s1 = 1.15 with a Piece of Power
+# right after).
+def _shield_anim(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94006c8, hex(w)  # ldr x8, [x22, #8]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[0], 4); '
+            'm_ = rt_walk_speed(c->x[20], m_, 101); c->v[0] = 0; memcpy(&c->v[0], &m_, 4); '
+            'c->x[8] = LD64(c->x[22] + 8); }'
+            f'  /* {a:#x}: ldr x8, [x22, #8] (shield walk animation rate in s0) */')
+
+
+PATCHES[A.WALK_ANIM_SITE_1] = _shield_anim
 
 
 # No Guardian Acorns / Pieces of Power (randomizer no-buff-drops, runtime/hle/qol.c): the drop roll main+0x89b960 reads
@@ -687,6 +773,15 @@ FRAME_JOB_KICKOFF_SITES = [A.FRAME_JOB_KICKOFF_SITES_0, A.FRAME_JOB_KICKOFF_SITE
                            A.FRAME_JOB_KICKOFF_SITES_3]
 FRAME_JOB_FINISH_SITE = A.FRAME_JOB_FINISH_SITE
 
+# Startup hang (Windows, few cores): a call run on its object's owner thread. main+0x1048cf0 (slot +0x48 of the class
+# whose vtable is 0x7001c490b0; a loader thread calls it for an object O the main thread owns) locks O's mutex (O+0x18),
+# posts a task to the owner's queue ([O+8]) and waits on O's condition variable (O+0x38) once, with no predicate. The
+# task (main+0x1049ed0, on the main thread) stores the result at O+0x10 and calls notify_one without taking O's mutex.
+# If the loader thread is preempted between its post and its wait, the notify finds nobody and the loader waits forever,
+# while the main thread waits for that loader's load (key in its own task queue). The hook takes and drops O's mutex
+# before the notify: the loader holds it from before the post until its wait has begun, so the notify always lands.
+OWNER_CALL_NOTIFY_SITE = A.OWNER_CALL_NOTIFY_SITE
+
 
 # Shadow Link's Appear event (main+0xd157f0: requested once Link is within 3 units, ShadowLink.bfevfl) stops Link and
 # turns the camera to him; on the Field (seeds) the request is skipped and runtime/hle/miniboss.c plays his appearance
@@ -726,4 +821,5 @@ HOOKS = {
     FRAME_JOB_KICKOFF_SITES[2]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_KICKOFF_SITES[3]: (0x910782b3, (), 'add x19, x21, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_FINISH_SITE: (0xf9400008, (), 'ldr x8, [x0]: frame job finish (debug delay)'),
+    OWNER_CALL_NOTIFY_SITE: (0x9100e2a0, (), 'add x0, x21, #0x38: owner-thread call done, the caller is waiting first'),
 }
