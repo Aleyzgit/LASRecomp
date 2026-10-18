@@ -71,6 +71,8 @@ jobs:
           build/test-simd-rounding
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
+      - name: Vulkan synchronization failure regression
+        run: python3 tools/test_vulkan_sync_errors.py
       - name: FP/SIMD lowering vs a CPU emulator (a sample)
         run: |
           python3 -m venv tools/venv && tools/venv/bin/pip install -q unicorn capstone lz4
@@ -101,6 +103,8 @@ jobs:
         run: python3 tools/test_settings.py
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
+      - name: Vulkan synchronization failure regression
+        run: python3 tools/test_vulkan_sync_errors.py
 
   windows:
     runs-on: windows-2022
@@ -148,3 +152,5 @@ jobs:
       # just satisfies it. The GLSL half - every fuzzed translation compiles and validates - is the check)
       - name: Shader translator fuzz (GLSL)
         run: REF=HEAD tools/test_translate.sh 4000 "$(nproc)" glsl
+      - name: Vulkan synchronization failure regression
+        run: python tools/test_vulkan_sync_errors.py
