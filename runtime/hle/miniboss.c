@@ -164,8 +164,10 @@ static void scan_tick(uint64_t frame) {
 }
 
 static void shadow_link_seen(uint64_t o);
+static void dying_seen(uint64_t o);
 void rt_mb_seen(uint64_t o) {
     uint64_t vt = LD64(o);
+    dying_seen(o);
     if (vt == GA_SHADOW_LINK_VTABLE) shadow_link_seen(o);
     if (ENV("LARECOMP_MB_LOG")) log_new_vtable(o, vt);
     if (ENV("LARECOMP_MB_SCAN") || ENV("LARECOMP_MB_SCAN_NAME")) scan_seen(o, vt);
@@ -602,23 +604,25 @@ static void shadow_link_tick(Cpu *c, uint64_t frame) {
 // made - the copy's short path (miniboss_guard.py: item drop, model hidden) ends at once and the actor goes as after
 // its whole event. Originals (their level name is their own: copies keep the replaced enemy's) and Dampe's chamber
 // keep the whole event. Each kind: class vtable, own level-name prefix (12 characters), Dead_Boss effect time.
-typedef struct { uint64_t vt; const char *own; int frames; } DeathKind;
-static const DeathKind g_death[] = {
-    {GA_HINOX_VTABLE, "EnemyHinox", 240},
-    {GA_ROLLING_BONES_VTABLE, "EnemyRola", 240},
-    {GA_SMASHER_VTABLE, "EnemyJacky", 240},
-    {GA_AVALAUNCH_VTABLE, "EnemyStoneHi", 240},
-    {GA_BLAINO_VTABLE, "EnemyMightPu", 240},
-    {GA_CUE_BALL_VTABLE, "EnemyHiploop", 240},
-    {GA_LANMOLA_VTABLE, "EnemyLanmola", 240},
-    {GA_GIANT_BUZZ_BLOB_VTABLE, "EnemyBossBlo", 240},
-    {GA_ARMOS_KNIGHT_VTABLE, "EnemyDeguArm", 240},
-    {GA_MOBLIN_CHIEF_VTABLE, "EnemyBossbli", 240},
-    {GA_MASTER_STALFOS_VTABLE, "EnemyMasterS", 240},
+typedef struct { uint64_t vt; const char *own; int frames; uint32_t sm; uint64_t chg; } DeathKind;
+static const DeathKind g_death[] = {  // (sm, chg: its state machine and change function - see dying_tick)
+    {GA_HINOX_VTABLE, "EnemyHinox", 240, 0xff0, GA_HINOX_CHANGE_STATE},
+    {GA_ROLLING_BONES_VTABLE, "EnemyRola", 240, 0xff0, GA_ROLLING_BONES_CHANGE_STATE},
+    {GA_SMASHER_VTABLE, "EnemyJacky", 240, 0x1110, GA_SMASHER_CHANGE_STATE},
+    {GA_AVALAUNCH_VTABLE, "EnemyStoneHi", 240, 0xff0, GA_AVALAUNCH_CHANGE_STATE},
+    {GA_BLAINO_VTABLE, "EnemyMightPu", 240, 0x11a0, GA_BLAINO_CHANGE_STATE},
+    {GA_CUE_BALL_VTABLE, "EnemyHiploop", 240, 0xff0, GA_CUE_BALL_CHANGE_STATE},
+    {GA_LANMOLA_VTABLE, "EnemyLanmola", 240, 0xff0, GA_LANMOLA_CHANGE_STATE},
+    {GA_GIANT_BUZZ_BLOB_VTABLE, "EnemyBossBlo", 240, 0xff0, GA_GIANT_BUZZ_BLOB_CHANGE_STATE},
+    {GA_ARMOS_KNIGHT_VTABLE, "EnemyDeguArm", 240, 0xff0, GA_ARMOS_KNIGHT_CHANGE_STATE},
+    {GA_MOBLIN_CHIEF_VTABLE, "EnemyBossbli", 240, 0xff0, GA_MOBLIN_CHIEF_CHANGE_STATE},
+    {GA_MASTER_STALFOS_VTABLE, "EnemyMasterS", 240, 0x1230, GA_MASTER_STALFOS_CHANGE_STATE},
 };
 #define NDEATH (int)(sizeof g_death / sizeof g_death[0])
 #define MAX_DYING 16
-static struct { uint64_t e, actor, at; long frames; } g_dying[MAX_DYING];  // (frames: then the frame it's forgotten)
+// (frames: then the frame it's forgotten; seen: its last update - a copy in a room Link has left is not updated, and
+// its End event requested then never ends it: it stays, hidden, and fights on when Link comes back)
+static struct { uint64_t e, actor, at, seen; long frames; int kind, state; } g_dying[MAX_DYING];
 RT_ON_RESET(dying_reset) { memset(g_dying, 0, sizeof g_dying); }
 
 static const char *mb_level(void) {
@@ -675,12 +679,20 @@ int rt_death_event(Cpu *c) {  // DEATH_EVENT_SITE (x20: the event state, x19: th
         if (!g_dying[i].actor) slot = i;
     if (slot < 0) return 0;
     g_dying[slot].e = e, g_dying[slot].actor = a, g_dying[slot].at = renderer_present_count() + g_death[k].frames;
-    g_dying[slot].frames = g_death[k].frames;
+    g_dying[slot].frames = g_death[k].frames, g_dying[slot].seen = renderer_present_count();
+    g_dying[slot].kind = k, g_dying[slot].state = -1;  // (its End state: the entry that is this event state)
+    for (int st = 0; st < 24; st++)
+        if (LD64(a + g_death[k].sm + 0x40 + st * 0x30 + 8) == e - 8) g_dying[slot].state = st;
     tailor_play(c, model_holder(a), "Dead_Boss");
     c->x[2] = GA_NOOP_FN;  // (the tail call: nothing)
     LOG("[miniboss] f%llu copy %llx (%.12s) dies: Dead_Boss here, its End event in %d frames\n",
         (unsigned long long)renderer_present_count(), (unsigned long long)a, nm, g_death[k].frames);
     return 1;
+}
+
+static void dying_seen(uint64_t o) {
+    for (int i = 0; i < MAX_DYING; i++)
+        if (g_dying[i].actor == o) g_dying[i].seen = renderer_present_count();
 }
 
 static void dying_tick(Cpu *c, uint64_t frame) {  // (the delayed request: through its event state, as the game's)
@@ -690,10 +702,30 @@ static void dying_tick(Cpu *c, uint64_t frame) {  // (the delayed request: throu
         int k = 0;
         while (k < NDEATH && g_death[k].vt != LD64(a)) k++;
         if (k == NDEATH || (!e && (long)frame > g_dying[i].frames)) {  // (gone; or 10 s after its request: gone surely)
+            LOG("[miniboss] f%llu copy %llx: %s\n", (unsigned long long)frame, (unsigned long long)a,
+                k == NDEATH ? "gone" : "still there 10 s after its End event");
             memset(&g_dying[i], 0, sizeof g_dying[i]);
             continue;
         }
         if (!e || frame < g_dying[i].at) continue;  // (e 0: requested - kept a while, for hits meanwhile)
+        if (frame - g_dying[i].seen > 2) continue;  // (not updated - Link is in another room: when it is again)
+        // Back in a room Link left meanwhile, it was reset to a living state (its End event pending): back to its
+        // End state, the effect once more, its End event after the effect's time (else it fought on, hidden)
+        const DeathKind *dk = &g_death[g_dying[i].kind];
+        int st = g_dying[i].state, now = LD8(a + dk->sm + 0xd);
+        if (st >= 0 && now != st) {
+            uint64_t saved[31], sp = c->sp;
+            memcpy(saved, c->x, sizeof saved);
+            c->x[0] = a + dk->sm, c->x[1] = (uint64_t)st;
+            guest_call(c, dk->chg);
+            memcpy(c->x, saved, sizeof saved);
+            c->sp = sp;
+            tailor_play(c, model_holder(a), "Dead_Boss");
+            g_dying[i].at = frame + (uint64_t)dk->frames;
+            LOG("[miniboss] f%llu copy %llx: reset in state %d - back in its End state %d\n", (unsigned long long)frame,
+                (unsigned long long)a, now, st);
+            continue;
+        }
         g_dying[i].at = 1;
         uint64_t saved[31], sp = c->sp;
         memcpy(saved, c->x, sizeof saved);
