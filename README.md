@@ -174,6 +174,20 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
 
 ## Credits
 
+**Contributors** - thank you to everyone who has sent code (GitHub handles, in order of first contribution):
+- **[@dvilelaf](https://github.com/dvilelaf)** - the System language setting (#15), packaging fix for the game code
+  generator helper (#10), and the task forwarder fix for the level-transition crash (#34, issue #19)
+- **[@Tensorlong](https://github.com/Tensorlong)** - Metal half-precision fix for the white Link on M1 Macs (#18)
+- **[@mansarip](https://github.com/mansarip)** - support for unrecognised controllers through a simple mapping file (#26)
+- **[@we11adam](https://github.com/we11adam)** - shared fonts served per language instead of one Japanese font (#27),
+  and the zh-Hans / zh-Hant codes for Chinese (#25)
+- **[@Maganra](https://github.com/Maganra)** - Linux page write tracking (userfaultfd + PAGEMAP_SCAN) for the Vulkan
+  vertex cache and texture checks (#42)
+- **[@hjqcan](https://github.com/hjqcan)** - centralized game patch and runtime addresses (#57), and CRLF settings
+  parsing plus Traditional Chinese locale detection (#53)
+
+Thanks also to everyone who reports issues and tests builds; your logs and screenshots find most of the bugs.
+
 **LAS-Randomizer** - the randomizer at the heart of this project's randomizer features, vendored (with local
 changes) in `third_party/LAS-Randomizer` under the MIT license. Huge thanks to its authors and community:
 - **Owen_Splat** - LAS-Randomizer (https://github.com/Owen-Splat/LAS-Randomizer)
