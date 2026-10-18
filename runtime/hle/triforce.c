@@ -8,8 +8,9 @@
 //             needed (binary), TriforceDone = the Triforce is complete (its message, the white fade and the ending).
 //             The item-get chains give the item before the hold-up, so they're up to date when the message is picked;
 //             triforce_tick keeps them in step every frame too (a loaded save, the save editor).
-//   look      the Piece of Power's model (texpatch: its colour map) is drawn gold while a piece is received and where
-//             a piece stands in the world; other Pieces of Power keep their own colours.
+//   look      the Piece of Power's model (texpatch: its colour map) is drawn gold while a piece is received, while Link
+//             is in the room / screen where a piece stands (and in the shop / Trendy Game when one is a good there);
+//             other Pieces of Power keep their own colours.
 #include "../game_addresses.h"
 #include <math.h>
 #include <stdio.h>
@@ -28,6 +29,7 @@ static int g_needed = -1, g_placed, g_item = -1, g_bits = -1, g_remain = -1, g_d
 static Spot g_spots[96];
 static int g_nspots;
 static uint64_t g_got_frame;  // presented-frame count when a piece was last received (0 = none yet)
+static volatile int g_link_c = -999, g_link_r = -999;  // Link's room / screen cell (15 x 12 units), game thread
 
 static void load(void) {
     g_needed = g_placed = g_nspots = 0;
@@ -131,6 +133,14 @@ void triforce_tick(void) {
         LOG("[triforce] test: pieces %s given\n", give_list);
         give_at = -1;
     }
+    if (g_nspots) {
+        extern uint64_t doorjump_player(uint64_t frame);  // PlayerCollision component: position at +0x80
+        uint64_t pc = doorjump_player(renderer_present_count());
+        if (pc) {
+            const float *pos = (const float *)(uintptr_t)(pc + 0x80);
+            g_link_c = (int)floorf(pos[0] / 15.0f), g_link_r = (int)floorf(pos[2] / 12.0f);
+        }
+    }
     sync_flags();
 }
 
@@ -146,13 +156,12 @@ void triforce_model_tint(const float *m, uint32_t m_size, float tint[8]) {
     if (!on() && !getenv("LARECOMP_TRIFORCE_TINT")) return;
     bool gold = getenv("LARECOMP_TRIFORCE_TINT") || (g_got_frame && renderer_present_count() - g_got_frame <= 600);
     const char *lv = level_name();
-    for (int i = 0; i < g_nspots && !gold; i++) {
+    for (int i = 0; i < g_nspots && !gold; i++) {  // (a standing piece: while Link is in its room / screen)
         const Spot *sp = &g_spots[i];
         if (strcmp(sp->level, lv)) continue;
-        if (isnan(sp->x)) gold = true;
-        else if (m && m_size >= 48 && fabsf(sp->x - m[3]) < 1.0f && fabsf(sp->z - m[11]) < 1.0f && fabsf(sp->y - m[7]) < 2.5f)
-            gold = true;
+        gold = isnan(sp->x) || (g_link_c == (int)floorf(sp->x / 15.0f) && g_link_r == (int)floorf(sp->z / 12.0f));
     }
+    (void)m, (void)m_size;
     if (!gold) return;
     // ltint (translate.c): colour.rgb, mix, glow.rgb, luminance power - bright Triforce gold, lit 3D
     static const float kGold[8] = {1.90f, 1.40f, 0.30f, 1.0f, 0.50f, 0.35f, 0.05f, 0.50f};

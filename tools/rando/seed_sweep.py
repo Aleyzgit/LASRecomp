@@ -9,7 +9,7 @@ the logic thinks is open too early - the circular dig-spot gates of #81 / #144. 
 runtime/ui/rando_tab.mm (seed_id_encode, request.json in start_generation): keep the two in step.
 
 usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir] [--stealing M] [--shopsanity N]
-                     [--souls] [--rooms N ...]
+                     [--souls] [--rooms N ...] [--triforce N]
        (default: the fixed seed IDs below + 40 random option mixes with digsanity on, every logic level)
 Exit status 1 if any seed fails either check. Run it with the LAS venv's Python (third_party/LAS-Randomizer/venv).
 """
@@ -264,6 +264,8 @@ def main():
     ap.add_argument('--shopsanity', type=int, choices=[0, 1, 2], help='every random mix with this shopsanity (off / '
                     'vanilla / random prices)')
     ap.add_argument('--souls', action='store_true', help='every random mix with boss and mini-boss souls on')
+    ap.add_argument('--triforce', type=int, metavar='N', help='every random mix a Triforce hunt for N pieces '
+                    '(extra pieces cycled: none / +25%% / +50%%)')
     ap.add_argument('--rooms', type=int, choices=[0, 1, 2, 3], action='append',
                     help='dungeon room shuffle of the random mixes (off / coherent / chaos / madness; repeat: cycled)')
     args = ap.parse_args()
@@ -280,6 +282,8 @@ def main():
             o['shopsanity'] = args.shopsanity
         if args.souls:
             o['boss_souls'] = o['miniboss_souls'] = True
+        if args.triforce:
+            o['triforce_needed'], o['triforce_extra'] = args.triforce, i % 3
         if args.rooms:
             o['room_shuffle'] = args.rooms[(i // len(levels)) % len(args.rooms)]  # (not in step with the levels)
         if args.stealing:

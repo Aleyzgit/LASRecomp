@@ -465,9 +465,11 @@ def main():
     print('placements ready', flush=True)
     if os.environ.get('LARECOMP_TEST_SWAP'):  # (test: <location>=<item>,...: that item swapped into that location)
         pl = result['placements']
+        done = set()
         for kv in os.environ['LARECOMP_TEST_SWAP'].split(','):
             loc, item = kv.split('=', 1)
-            src = next(k for k, v in pl.items() if v == item and k != loc and k not in ('settings', 'indexes'))
+            done.add(loc)
+            src = next(k for k, v in pl.items() if v == item and k not in done and k not in ('settings', 'indexes'))
             pl[loc], pl[src] = pl[src], pl[loc]
             ix = pl['indexes']
             a, b = ix.pop(loc, None), ix.pop(src, None)
