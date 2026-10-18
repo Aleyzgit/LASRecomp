@@ -948,17 +948,16 @@ static int rt_kind(uint32_t f) {
 #define PROG_TAB 4096
 static struct { uint64_t key; void *prog; } prog_tab[PROG_TAB];
 
-// ------------------------------------------------------------------ binary archive (opt-in: LARECOMP_METAL_ARCHIVE=1)
+// ------------------------------------------------------------------ binary archive (LARECOMP_METAL_ARCHIVE=0: none)
 // cache/shaders.metalarchive: the GPU code of every pipeline built here (prepared or at first use), kept across runs
 // (MTLBinaryArchive), used only with a matching cache/shaders.metalarchive.tag (shader_cache_tag: this build, the
-// translator, the GPU and the macOS build; another one: a new archive). Saved (temp file + rename) when the
-// preparation ends and 10 s after the last pipeline added at first use.
-// Off by default - measured on an M3 Max (895 variants): building the pipelines from compiled functions is cheap
-// (~1 s of CPU for all of them, cold), the cost is compiling the MSL source into functions (~300 s of CPU, ~35 s on
-// 12 threads, when macOS's shader cache has lost them), and an archive holds only the former. It also took 3-6 s
-// to load (43 MB) and made pipelines found in it slower to build than through macOS's cache.
-// The MSL text cache it was meant to replace (cache/shaders/*.metal + a boot warm-up compile) is gone either way: the
-// preparation on every start keeps macOS's cache warm for the listed variants; that folder is removed.
+// translator, the GPU and the macOS build; another one, or an archive that doesn't load: a new one, silently). Saved
+// (temp file + rename) when the preparation ends and 10 s after the last pipeline added at first use.
+// What it holds is the cheap half (pipelines from compiled functions: ~1 s of CPU for all 895 variants on an M3 Max);
+// compiling the MSL source into functions (~300 s of CPU when macOS's shader cache lost them) still goes through
+// macOS's cache. It loads in the background (3-6 s for 43 MB).
+// The MSL text cache (cache/shaders/*.metal + a boot warm-up compile) is gone: the preparation on every start keeps
+// macOS's cache warm for the listed variants; that folder is removed.
 #define ARCHIVE_FILE "cache/shaders.metalarchive"
 #define ARCHIVE_TAG ARCHIVE_FILE ".tag"
 static id<MTLBinaryArchive> g_archive;
@@ -1042,8 +1041,22 @@ static void archive_open(void) {  // (at the first pipeline / preparation)
     dispatch_once(&once, ^{
         double t0 = now_ms();
         remove_old_text_cache();
+        remove(ARCHIVE_FILE ".tmp");  // (a save cut short: what it left - Metal writes <uuid>.metallib files beside it)
+        DIR *cd = opendir("cache");
+        if (cd) {
+            struct dirent *e;
+            while ((e = readdir(cd))) {
+                size_t l = strlen(e->d_name);
+                if (l == 36 + 9 && !strcmp(e->d_name + 36, ".metallib")) {
+                    char path[300];
+                    snprintf(path, sizeof path, "cache/%s", e->d_name);
+                    unlink(path);
+                }
+            }
+            closedir(cd);
+        }
         const char *on = getenv("LARECOMP_METAL_ARCHIVE");
-        if (!on || !atoi(on)) return;
+        if (on && !atoi(on)) return;
         atexit(archive_exit);
         char tag[700];
         archive_tag(tag, sizeof tag);
@@ -1067,7 +1080,7 @@ static void archive_open(void) {  // (at the first pipeline / preparation)
 static void archive_added(void) {  // saved 10 s after the last add (first-use builds come in bursts)
     g_archive_dirty++, g_archive_adds++;
     uint64_t my = ++g_archive_gen;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC), dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         if (g_archive_gen == my) archive_save(false);
     });
 }
@@ -1082,9 +1095,11 @@ static id<MTLRenderPipelineState> archive_render_pipeline_(MTLRenderPipelineDesc
     id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd options:MTLPipelineOptionFailOnBinaryArchiveMiss
                                                                     reflection:nil error:nil];
     if (ps) { g_archive_hits++; return ps; }
-    pthread_rwlock_rdlock(&g_archive_lock);
-    bool added = [archive addRenderPipelineFunctionsWithDescriptor:pd error:nil];
-    pthread_rwlock_unlock(&g_archive_lock);
+    bool added = false;  // (not while a save runs: it can take a while - this one goes in a later run)
+    if (!pthread_rwlock_tryrdlock(&g_archive_lock)) {
+        added = [archive addRenderPipelineFunctionsWithDescriptor:pd error:nil];
+        pthread_rwlock_unlock(&g_archive_lock);
+    }
     if (added) archive_added();
     return [dev newRenderPipelineStateWithDescriptor:pd error:err];
 }
@@ -1106,9 +1121,11 @@ static id<MTLComputePipelineState> archive_compute_pipeline(id<MTLFunction> f, N
     id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionFailOnBinaryArchiveMiss
                                                                       reflection:nil error:nil];
     if (ps) { g_archive_hits++; return ps; }
-    pthread_rwlock_rdlock(&g_archive_lock);
-    bool added = [archive addComputePipelineFunctionsWithDescriptor:cd error:nil];
-    pthread_rwlock_unlock(&g_archive_lock);
+    bool added = false;  // (not while a save runs: it can take a while - this one goes in a later run)
+    if (!pthread_rwlock_tryrdlock(&g_archive_lock)) {
+        added = [archive addComputePipelineFunctionsWithDescriptor:cd error:nil];
+        pthread_rwlock_unlock(&g_archive_lock);
+    }
     if (added) archive_added();
     return [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionNone reflection:nil error:err];
 }
@@ -3151,8 +3168,8 @@ bool renderer_prepare_begin(void) {
 }
 
 int renderer_prepare_pending(void) { return g_prep_pending; }
-void renderer_prepare_end(void) {  // (the binary archive: saved at once)
-    archive_save(false);
+void renderer_prepare_end(void) {  // (the binary archive: saved now, off this thread - a PLAY waiting on the
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{ archive_save(false); });  // preparation doesn't wait for it)
     LOG("[metal] shader archive: %d pipelines loaded from it, %d added; ready after %.0f ms; library compiles %.0f ms, "
         "pipeline builds %.0f ms (summed over threads)\n", (int)g_archive_hits, (int)g_archive_adds, g_archive_open_us / 1e3,
         g_lib_us / 1e3, g_pipe_us / 1e3);
