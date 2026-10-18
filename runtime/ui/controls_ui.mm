@@ -290,17 +290,5 @@ extern "C" void controls_tab_draw(float scale) {
                    "The button icons the game shows. Auto: the connected controller's.");
     }
 
-    opt_section("System language");
-    {
-        // what the game is told the console's language is: its text follows this (runtime/settings.c)
-        char autol[64];
-        snprintf(autol, sizeof autol, "Auto (%s)", settings_language_name());
-        const char *names[N_LANGUAGES];
-        names[0] = autol;
-        for (int i = 1; i < N_LANGUAGES; i++) names[i] = g_language_names[i];
-        if (opt_choice("Language", &g_settings.language, names, N_LANGUAGES, LANG_AUTO,
-                       "The game's text language, as its own system setting. Applies when the game restarts."))
-            settings_save();
-    }
     opt_end();
 }
