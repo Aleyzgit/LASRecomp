@@ -55,6 +55,10 @@ float rt_walk_speed(uint64_t player, float m, int site) {
     }
     float k = env > 0 ? env : g_settings.walk_speed;
     if (!(k > 0.5f && k <= 4)) k = 1;
+    if (k != 1 && !g_settings.walk_speed_dungeons) {  // (off indoors: every level but the overworld, "Field")
+        uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+        if (ps && strcmp((const char *)(uintptr_t)ps, "Field")) k = 1;
+    }
     if (!(mask >> (site >= 100 ? 30 + site - 100 : site) & 1)) k = 1;
     if (logn >= 0) {
         static int cnt[102];

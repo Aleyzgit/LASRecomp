@@ -94,6 +94,11 @@ extern "C" void difficulty_draw(float scale) {
             g_settings.walk_speed = mult[wi];
             settings_save();
         }
+        opt_indent(1);
+        if (wi == 0) opt_disable_next();
+        if (opt_toggle("Indoors", &g_settings.walk_speed_dungeons, false, "Also in houses, caves and dungeons. Off: normal speed there."))
+            settings_save();
+        opt_indent(-1);
     }
     opt_section("Difficulty");
     static const char *const names[] = {"Half", "Default", "2x", "3x", "4x", "5x", "6x", "7x", "8x"};
