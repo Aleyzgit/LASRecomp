@@ -645,7 +645,9 @@ static void run_job(void (*fn)(void *), void *arg) {
     if (!started) {
         started = true;
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
-        int n = SDL_GetNumLogicalCPUCores() - 4;
+        int n = plat_cpu_count();  // (the process's affinity mask: a process held to a few cores, few workers)
+        if (n <= 0) n = SDL_GetNumLogicalCPUCores();
+        n -= 4;
         if (n < 4) n = 4;
         if (n > 16) n = 16;
         for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }

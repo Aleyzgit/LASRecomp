@@ -475,7 +475,6 @@ static bool arbiter_update(uint64_t addr, int32_t expected, int32_t desired) {
 static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t value, int32_t count) {
     pthread_mutex_lock(&g_klock);
     uint32_t r = R_OK;
-    int32_t cur = (int32_t)__atomic_load_n(u32p(addr), __ATOMIC_SEQ_CST);
     if (type == ARB_SIGNAL) {
         arbiter_wake(addr, count);
     } else if (type == ARB_SIGNAL_INC_EQ) {
