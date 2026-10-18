@@ -877,7 +877,7 @@ static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy,
     float sc = ds.y / 1080.0f;
     ImDrawList *fg = ImGui::GetForegroundDrawList();
     ImVec2 o = ImGui::GetMainViewport()->Pos;
-    fg->AddRectFilled(o, ImVec2(o.x + ds.x, o.y + ds.y), IM_COL32(0, 0, 0, 170));
+    if (!g_auto_update) fg->AddRectFilled(o, ImVec2(o.x + ds.x, o.y + ds.y), IM_COL32(0, 0, 0, 170));  // (an update: plain)
     float f = test_busy && g_prep_frac < 0 ? 0.42f : prep_wait && g_prep_frac < 0 ? 0.99f : extract_progress();
     // (while the game code is built: what's happening, on whose files - runtime/gamebuild.c)
     bool preparing = g_prep_frac >= 0 || prep_wait, recompiling = g_build_frac >= 0 && !preparing;
@@ -916,9 +916,7 @@ static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy,
         ImVec2 ca((a.x + b.x) * 0.5f - 150 * sc, b.y - 66 * sc), cb(ca.x + 300 * sc, ca.y + 44 * sc);
         bool hover = !g_cancel_build && ImGui::IsMouseHoveringRect(ca, cb, false);
         fg->AddRectFilled(ca, cb, hover ? IM_COL32(80, 80, 55, 255) : IM_COL32(45, 55, 45, 255), 8 * sc);
-        char cancel_l[48];
-        snprintf(cancel_l, sizeof cancel_l, "Cancel (%s / Esc)", ui_pad_back_label());
-        const char *cancel = g_cancel_build ? "Cancelling..." : cancel_l;
+        const char *cancel = g_cancel_build ? "Cancelling..." : "Cancel";  // (B / Circle and Esc too)
         ImVec2 cs = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, cancel);
         fg->AddText(g_font_small, sfs, ImVec2((ca.x + cb.x - cs.x) * 0.5f, (ca.y + cb.y - cs.y) * 0.5f),
                     IM_COL32(236, 194, 84, 255), cancel);
@@ -1302,7 +1300,11 @@ extern "C" void launcher_run(const char *root) {
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
             ImGui::GetIO().FontGlobalScale = s * 0.5f;
             ImDrawList *bg = ImGui::GetBackgroundDrawList();
-            if (g_bg) {  // cover the window, keep the aspect
+            // an update by itself: only its bar, on plain gray (a failure or Cancel then shows the Game Files page)
+            const bool update_only = g_auto_update && busy;
+            if (update_only) {
+                bg->AddRectFilled(ImVec2(0, 0), ds, IM_COL32(40, 40, 40, 255));
+            } else if (g_bg) {  // cover the window, keep the aspect
                 float ia = (float)g_bg_w / g_bg_h, wa = ds.x / ds.y;
                 ImVec2 uv0(0, 0), uv1(1, 1);
                 if (wa > ia) { float v = ia / wa; uv0.y = (1 - v) / 2; uv1.y = 1 - uv0.y; }
@@ -1312,7 +1314,7 @@ extern "C" void launcher_run(const char *root) {
                 bg->AddRectFilledMultiColor(ImVec2(0, 0), ds, IM_COL32(18, 34, 40, 255), IM_COL32(40, 70, 64, 255),
                                             IM_COL32(12, 20, 24, 255), IM_COL32(8, 12, 16, 255));
             }
-            {  // a shadow banner fading in from the left behind the menu, and one from the right behind the version
+            if (!update_only) {  // a shadow banner fading in from the left behind the menu, and one from the right behind the version
                 const float stops[][2] = {{0.0f, 225}, {0.3f, 215}, {0.44f, 165}, {0.55f, 95}, {0.64f, 35}, {0.74f, 0}};
                 for (int i = 0; i + 1 < (int)(sizeof stops / sizeof stops[0]); i++) {
                     ImU32 a = IM_COL32(6, 10, 34, (int)stops[i][1]), b = IM_COL32(6, 10, 34, (int)stops[i + 1][1]);
@@ -1504,6 +1506,11 @@ extern "C" void launcher_run(const char *root) {
                     for (size_t i = 0; i < choices.size(); i++)
                         if (choices[i] == cur) choice = (int)i;
                 }
+            } else if (update_only) {
+                pthread_mutex_lock(&g_lock);
+                std::string job = g_job;
+                pthread_mutex_unlock(&g_lock);
+                draw_busy_overlay(ds, job, false);
             } else {
                 // SETUP: the game files, in a window like Settings (option rows: runtime/ui/option_rows.h) - choose the
                 // folder with the game files, set up; once set up, delete. Each row's explanation on the right.
