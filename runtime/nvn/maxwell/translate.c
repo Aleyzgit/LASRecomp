@@ -1896,6 +1896,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         }
     } else if (info->uses_gmem) {  // chunks imported lazily: a table of device addresses, buffer references (shader.h)
         int ws = (int)maxwell_gmem_chunk_shift - 2, cs = GMEM_CHUNK_SET(stage);
+        bool direct = stage != STAGE_COMPUTE;  // (compute: its storage buffers are in gfast_ already)
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GChunks { uvec4 gchunk[%d]; };\n", cs, GMEM_CHUNK_BINDING, GMEM_CHUNKS_MAX);
         sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GW { uint w[]; };\n", c->uses_gmem_store ? "" : "readonly ");
         sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint n[%d]; uint w[%d]; } gmiss_;\n", cs, GMEM_MISS_BINDING,
@@ -1903,40 +1904,38 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "void gmiss(uint c, uint i) { atomicAdd(gmiss_.n[c], 1u); atomicMin(gmiss_.w[c], i); }\n");
         // (gchunk[c]: x, y = device address, z = words; the first word's chunk holds the whole aligned access)
         sp(&s, "#define GMC(i) ((i) >> %du)\n#define GMO(i) ((i) & 0x%xu)\n", ws, (1u << ws) - 1);
-        if (maxwell_gmem_memo) {  // the last chunk looked up stays in registers (shader.h maxwell_gmem_memo)
+        if (direct)  // (gd[k]: x = the chunk's first word, y = its words (0: unused), z, w = its device address)
+            sp(&s, "layout(push_constant) uniform GDirect { uvec4 gd[%d]; };\n", GMEM_DIRECT_MAX);
+        if (maxwell_gmem_memo)  // the last chunk looked up stays in registers (shader.h maxwell_gmem_memo)
             sp(&s, "uint gmc_ = 0xFFFFFFFFu, gmz_ = 0u; uint64_t gma_ = 0ul;\n"
                    "void gmsel(uint c) { if (c != gmc_) { uvec4 e = gchunk[c]; gmc_ = c; gmz_ = e.z; gma_ = (uint64_t(e.y) << 32) | uint64_t(e.x); } }\n");
-            sp(&s, "uint GMR1(uint i) { uint c = GMC(i), o = GMO(i); gmsel(c); if (o < gmz_) return GW(gma_).w[o]; gmiss(c, i); return 0u; }\n");
-            sp(&s, "uvec2 GMR2(uint i) { uint c = GMC(i), o = GMO(i); gmsel(c); if (o + 1u < gmz_) { GW p = GW(gma_); return uvec2(p.w[o], p.w[o + 1u]); } gmiss(c, i); return uvec2(0u); }\n");
-            sp(&s, "uvec4 GMR4(uint i) { uint c = GMC(i), o = GMO(i); gmsel(c); if (o + 3u < gmz_) { GW p = GW(gma_); return uvec4(p.w[o], p.w[o + 1u], p.w[o + 2u], p.w[o + 3u]); } gmiss(c, i); return uvec4(0u); }\n");
-            sp(&s, "#define GMR(i) GMR1(i)\n");
-            if (c->uses_gmem_store) {
-                sp(&s, "void GMW1(uint i, uint v) { uint c = GMC(i), o = GMO(i); gmsel(c); if (o < gmz_) GW(gma_).w[o] = v; else gmiss(c, i); }\n");
-                sp(&s, "void GMW2(uint i, uvec2 v) { uint c = GMC(i), o = GMO(i); gmsel(c); if (o + 1u < gmz_) { GW p = GW(gma_); p.w[o] = v.x; p.w[o + 1u] = v.y; } else gmiss(c, i); }\n");
-                sp(&s, "void GMW4(uint i, uvec4 v) { uint c = GMC(i), o = GMO(i); gmsel(c); if (o + 3u < gmz_) { GW p = GW(gma_); "
-                       "p.w[o] = v.x; p.w[o + 1u] = v.y; p.w[o + 2u] = v.z; p.w[o + 3u] = v.w; } else gmiss(c, i); }\n");
-                sp(&s, "void GMAND1(uint i, uint v) { uint c = GMC(i), o = GMO(i); gmsel(c); if (o < gmz_) atomicAnd(GW(gma_).w[o], v); else gmiss(c, i); }\n");
-                sp(&s, "void GMOR1(uint i, uint v) { uint c = GMC(i), o = GMO(i); gmsel(c); if (o < gmz_) atomicOr(GW(gma_).w[o], v); else gmiss(c, i); }\n");
-                sp(&s, "#define GMW(i, v) GMW1(i, v)\n#define GMAND(i, m) GMAND1(i, m)\n#define GMOR(i, m) GMOR1(i, m)\n");
-            }
-        } else {
-        sp(&s, "uint GMR1(uint i) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o < e.z) return GW((uint64_t(e.y) << 32) | uint64_t(e.x)).w[o]; gmiss(c, i); return 0u; }\n");
-        sp(&s, "uvec2 GMR2(uint i) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o + 1u < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); "
-               "return uvec2(p.w[o], p.w[o + 1u]); } gmiss(c, i); return uvec2(0u); }\n");
-        sp(&s, "uvec4 GMR4(uint i) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o + 3u < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); "
-               "return uvec4(p.w[o], p.w[o + 1u], p.w[o + 2u], p.w[o + 3u]); } gmiss(c, i); return uvec4(0u); }\n");
+        // Each access: the draw's storage buffer chunks first (gd, uniform: no table read, no miss path), then the table.
+        static const struct { const char *head, *act, *miss; int last; bool store; } fn[] = {
+            {"uint GMR1(uint i)", "return p.w[o];", "return 0u;", 0, false},
+            {"uvec2 GMR2(uint i)", "return uvec2(p.w[o], p.w[o + 1u]);", "return uvec2(0u);", 1, false},
+            {"uvec4 GMR4(uint i)", "return uvec4(p.w[o], p.w[o + 1u], p.w[o + 2u], p.w[o + 3u]);", "return uvec4(0u);", 3, false},
+            {"void GMW1(uint i, uint v)", "p.w[o] = v; return;", "", 0, true},
+            {"void GMW2(uint i, uvec2 v)", "p.w[o] = v.x; p.w[o + 1u] = v.y; return;", "", 1, true},
+            {"void GMW4(uint i, uvec4 v)", "p.w[o] = v.x; p.w[o + 1u] = v.y; p.w[o + 2u] = v.z; p.w[o + 3u] = v.w; return;", "", 3, true},
+            {"void GMAND1(uint i, uint v)", "atomicAnd(p.w[o], v); return;", "", 0, true},
+            {"void GMOR1(uint i, uint v)", "atomicOr(p.w[o], v); return;", "", 0, true},
+        };
+        for (int f = 0; f < (int)(sizeof fn / sizeof fn[0]); f++) {
+            if (fn[f].store && !c->uses_gmem_store) continue;
+            sp(&s, "%s { uint o;", fn[f].head);
+            if (direct)  // (whole chunks: an aligned access in one never leaves it)
+                for (int k = 0; k < GMEM_DIRECT_MAX; k++)
+                    sp(&s, " o = i - gd[%d].x; if (o < gd[%d].y) { GW p = GW((uint64_t(gd[%d].w) << 32) | uint64_t(gd[%d].z)); %s }", k, k, k, k, fn[f].act);
+            char lim[16];
+            if (fn[f].last) snprintf(lim, sizeof lim, "o + %du", fn[f].last); else snprintf(lim, sizeof lim, "o");
+            if (maxwell_gmem_memo)
+                sp(&s, " uint c = GMC(i); o = GMO(i); gmsel(c); if (%s < gmz_) { GW p = GW(gma_); %s } gmiss(c, i); %s }\n", lim, fn[f].act, fn[f].miss);
+            else
+                sp(&s, " uint c = GMC(i); o = GMO(i); uvec4 e = gchunk[c]; if (%s < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); %s } "
+                       "gmiss(c, i); %s }\n", lim, fn[f].act, fn[f].miss);
+        }
         sp(&s, "#define GMR(i) GMR1(i)\n");
-        if (c->uses_gmem_store) {
-            sp(&s, "void GMW1(uint i, uint v) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o < e.z) GW((uint64_t(e.y) << 32) | uint64_t(e.x)).w[o] = v; else gmiss(c, i); }\n");
-            sp(&s, "void GMW2(uint i, uvec2 v) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o + 1u < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); "
-                   "p.w[o] = v.x; p.w[o + 1u] = v.y; } else gmiss(c, i); }\n");
-            sp(&s, "void GMW4(uint i, uvec4 v) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o + 3u < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); "
-                   "p.w[o] = v.x; p.w[o + 1u] = v.y; p.w[o + 2u] = v.z; p.w[o + 3u] = v.w; } else gmiss(c, i); }\n");
-            sp(&s, "void GMAND1(uint i, uint v) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o < e.z) atomicAnd(GW((uint64_t(e.y) << 32) | uint64_t(e.x)).w[o], v); else gmiss(c, i); }\n");
-            sp(&s, "void GMOR1(uint i, uint v) { uint c = GMC(i), o = GMO(i); uvec4 e = gchunk[c]; if (o < e.z) atomicOr(GW((uint64_t(e.y) << 32) | uint64_t(e.x)).w[o], v); else gmiss(c, i); }\n");
-            sp(&s, "#define GMW(i, v) GMW1(i, v)\n#define GMAND(i, m) GMAND1(i, m)\n#define GMOR(i, m) GMOR1(i, m)\n");
-        }
-        }
+        if (c->uses_gmem_store) sp(&s, "#define GMW(i, v) GMW1(i, v)\n#define GMAND(i, m) GMAND1(i, m)\n#define GMOR(i, m) GMOR1(i, m)\n");
     }
     if (info->uses_gmem_map) {  // (compute) the dispatch's storage buffers, device-local: gmap[i] = heap offset, size, word
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GMap { uvec4 gmap[%d]; };\n", set, GMAP_BUFFER_INDEX, GMAP_MAX + 1);

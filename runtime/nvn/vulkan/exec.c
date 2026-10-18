@@ -1230,9 +1230,14 @@ typedef struct {
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
     p->set_layout[0] = vk_set_layout(p->binds, p->nbinds, 0, s0);
     if (nsets > 1) p->set_layout[1] = vk_set_layout(p->binds, p->nbinds, 1, s1);
-    if (gc_shift && ((p->vi && p->vi->uses_gmem) || (p->fi && p->fi->uses_gmem))) p->set_layout[nsets++] = gmem_chunk_layout();
+    bool gm = gc_shift && ((p->vi && p->vi->uses_gmem) || (p->fi && p->fi->uses_gmem));
+    if (gm) p->set_layout[nsets++] = gmem_chunk_layout();
+    // (lazy chunks, vertex / fragment: the storage buffers' chunks as push constants, shader.h GMEM_DIRECT_MAX)
+    VkPushConstantRange gd = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 16 * GMEM_DIRECT_MAX};
+    bool direct = gm && gc_lazy && s1 == VK_SHADER_STAGE_FRAGMENT_BIT;
     VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = (uint32_t)nsets,
-                                     .pSetLayouts = p->set_layout};
+                                     .pSetLayouts = p->set_layout, .pushConstantRangeCount = direct ? 1 : 0,
+                                     .pPushConstantRanges = direct ? &gd : NULL};
     VkPipelineLayout l;
     VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &l));
     return l;
@@ -2311,6 +2316,7 @@ static int gc_scanned;                // chunks imported for a pointer found in 
 static uint8_t gc_remembered[GC_MAX]; // chunks shaders reached without a bind (a miss, a pointer): imported again after a reboot
                                       // and, through cache/gmem_chunks.txt, at the next start (a machine misses a chunk once)
 static bool gc_file_loaded;
+static uint64_t gc_remembered_heap;   // the heap size the remembered chunks were imported at this boot (0: not yet)
 
 // cache/gmem_chunks.txt: one heap byte offset (hex) per line of a chunk shaders reached without a bind. Offsets, not
 // chunk numbers: the chunk size depends on the GPU. Loaded once, into gc_remembered; written whenever one is added.
@@ -2507,7 +2513,11 @@ static VkDescriptorSet gmem_chunk_set(void) {
         memset(gc_miss + GC_MAX, 0xFF, sizeof(uint32_t) * GC_MAX);
     }
     uint64_t seq = vk_pending_seq();
-    if (gc_lazy && !gc_imported) {  // (a boot, or a reboot: the chunks shaders reached without a bind last time, before they miss again)
+    // A boot, or a reboot: the chunks shaders reached without a bind last time (this process, or cache/gmem_chunks.txt),
+    // before they miss again. Once a boot per heap size (a chunk beyond the heap mapped so far comes when it grows) -
+    // not "while nothing is imported": copies and storage buffers import chunks before the first set is built.
+    if (gc_lazy && gc_remembered_heap != gmem_heap_size()) {
+        gc_remembered_heap = gmem_heap_size();
         gc_remembered_load();
         for (int k = 0; k < gc_n; k++) if (gc_remembered[k] && !gc[k].buf) gc_import(k);
     }
@@ -2545,6 +2555,40 @@ static VkDescriptorSet gmem_chunk_set(void) {
     return set;
 }
 
+// Lazy mode, a draw: the imported chunks under its vertex / fragment storage buffers, in slot order, as the shaders'
+// GDirect push constants (shader.h GMEM_DIRECT_MAX): reads there skip the table. A range over two chunks gives both.
+// LARECOMP_VK_GMEM_DIRECT=0: none (every access through the table, as before; no shader change).
+static void gmem_direct_push(VkCommandBuffer cb, VkPipelineLayout layout, uint32_t stages) {
+    static int on = -1;
+    if (on < 0) {
+        on = !getenv("LARECOMP_VK_GMEM_DIRECT") || atoi(getenv("LARECOMP_VK_GMEM_DIRECT")) != 0;
+        if (!on) LOG("[vk] lazy chunks: storage buffer chunks through the table too (LARECOMP_VK_GMEM_DIRECT=0)\n");
+    }
+    uint32_t gd[GMEM_DIRECT_MAX * 4] = {0};
+    int n = 0;
+    for (int stage = 0; on && stage < 2; stage++) {
+        if (!(stages & (1u << stage))) continue;
+        for (int i = 0; i < 16 && n < GMEM_DIRECT_MAX; i++) {
+            uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+            if (a < HEAP_BASE || a - HEAP_BASE >= HEAP_MAX) continue;
+            uint64_t off = a - HEAP_BASE;
+            int k0 = (int)(off >> gc_shift), k1 = (int)((off + (sz ? sz : 1) - 1) >> gc_shift);
+            for (int k = k0; k <= k1 && k < gc_n && n < GMEM_DIRECT_MAX; k++) {
+                if (!gc[k].buf) continue;
+                int j = 0;
+                while (j < n && gd[j * 4] != (uint32_t)(((uint64_t)k << gc_shift) >> 2)) j++;
+                if (j < n) continue;
+                gd[n * 4 + 0] = (uint32_t)(((uint64_t)k << gc_shift) >> 2);
+                gd[n * 4 + 1] = (uint32_t)(gc[k].size >> 2);
+                gd[n * 4 + 2] = (uint32_t)gc[k].addr;
+                gd[n * 4 + 3] = (uint32_t)(gc[k].addr >> 32);
+                n++;
+            }
+        }
+    }
+    vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof gd, gd);
+}
+
 // Binds the chunk set for a draw / dispatch whose shaders (stages: a mask of 1 << stage) use global memory: their storage
 // buffers' chunks first.
 static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipelineLayout layout, uint32_t set_index, uint32_t stages) {
@@ -2566,6 +2610,7 @@ static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeli
     }
     VkDescriptorSet set = gmem_chunk_set();
     vkCmdBindDescriptorSets(cb, bp, layout, set_index, 1, &set, 0, NULL);
+    if (gc_lazy && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) gmem_direct_push(cb, layout, stages);
 }
 
 // Once a frame (the present's submission): a chunk shaders missed is imported for the next frame; the lowest address
@@ -2964,6 +3009,7 @@ void vk_exec_reset(void) {
         memset(&gc[k], 0, sizeof gc[k]);
     }
     gc_imported = 0; gc_scanned = 0; gc_imported_bytes = 0; gc_gen++;  // (gc_remembered stays: the same heap layout next boot)
+    gc_remembered_heap = 0;  // (imported again at the next boot's first chunk set)
     if (gc_miss) { memset(gc_miss, 0, sizeof(uint32_t) * GC_MAX); memset(gc_miss + GC_MAX, 0xFF, sizeof(uint32_t) * GC_MAX); }
     for (int i = 0; i < VC_TAB; i++)  // (the vertex cache: copies of the old pages)
         if (vc_tab[i].buf) vmaDestroyBuffer(g_vk.vma, vc_tab[i].buf, vc_tab[i].mem);

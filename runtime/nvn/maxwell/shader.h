@@ -102,6 +102,10 @@ extern bool maxwell_gmem_lazy;
 // Lazy mode, LARECOMP_VK_GMEM_MEMO=1: the shader keeps the last chunk's address and size in registers and looks the
 // table up only when an access leaves it (a loop over a list in one chunk: one table read, not one per element).
 extern bool maxwell_gmem_memo;
+// Lazy mode, vertex / fragment: the chunks under the draw's storage buffers (where the heap reads are) come as push
+// constants, GDirect { uvec4 gd[GMEM_DIRECT_MAX]; } (x = first word, y = words, 0: unused, z, w = device address): an
+// access in one is a compare and a load, no table read and no miss path (exec.c gmem_direct_push). The table after them.
+#define GMEM_DIRECT_MAX 4
 #define GMEM_CHUNKS_MAX 256  // chunks at most (HEAP_MAX in 16 MB chunks is 208)
 #define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
 #define GMEM_CHUNK_BINDING 0  // windows: GMem<k> at binding k; lazy: the GChunks table
