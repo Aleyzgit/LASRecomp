@@ -23,12 +23,13 @@ Pull requests that include Nintendo files can't be merged. Screenshots and short
 
 Report bugs as a [GitHub issue](https://github.com/peiikai/LASRecomp/issues). Please include:
 
-- your platform (macOS / Windows), hardware (CPU, GPU) and window size / aspect ratio
+- your platform (macOS / Windows / Linux), hardware (CPU, GPU) and window size / aspect ratio
 - what you did, what happened, and what you expected
 - for randomizer problems: the **seed ID** (Randomizer tab, Copy button), the settings, and where you got stuck
   (area / room, which items you had). A seed ID reproduces the exact seed on the same LAS Recomp version.
 - a screenshot or short clip if it's visual
-- for crashes: the log the app prints to the terminal (run it from a terminal to capture it)
+- the log: `lasrecomp.log` in the data folder (see "Where files live" in the README), always the latest run - or if
+  the problem was in an earlier run, that run's `lasrecomp-backup-*.log` (by date modified)
 
 ## Which branch to work from
 
