@@ -293,7 +293,8 @@ static void create_device(void) {
         VK_CHECK(vkCreatePipelineCache(g_vk.dev, &pc, NULL, &g_vk.pcache));
     }
     free(data);
-    pcache_saved = sz;
+    if (pc.initialDataSize) LOG("[vk] pipeline cache: loaded %zu bytes\n", pc.initialDataSize);
+    pcache_saved = pc.initialDataSize;
     pthread_t t;  // (kept every few minutes while it grows, not only at a clean exit)
     pthread_create(&t, NULL, pipeline_cache_saver, NULL);
     pthread_detach(t);
@@ -311,6 +312,7 @@ void vk_pipeline_cache_save(void) {
             pipeline_cache_tag(tag, sizeof tag);
             if (!shader_cache_tag_ok(PCACHE_TAG, tag)) shader_cache_tag_write(PCACHE_TAG, tag);
             pcache_saved = sz;
+            LOG("[vk] pipeline cache: saved %zu bytes\n", sz);
         }
         free(data);
     }
