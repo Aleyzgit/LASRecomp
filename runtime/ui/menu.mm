@@ -15,6 +15,7 @@
 #include "option_rows.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
+#include "pad_nav.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
 #else
@@ -34,7 +35,9 @@ void rando_tab_draw(float scale);
 bool warp_tab_draw(float scale);  // warp_tab.mm: true when a warp started
 extern "C" void cheats_draw(float scale);  // cheats.mm
 extern "C" void difficulty_draw(float scale);  // difficulty.mm
-void controls_bindings_draw(float scale);  // controls_ui.mm
+void controls_tab_draw(float scale);  // controls_ui.mm
+bool controls_ui_took_back(void);
+bool rando_tab_took_back(void);  // rando_tab.mm: B went back from the Triforce hunt's count
 #include "../input_bind.h"
 #include "../paths.h"
 }
@@ -117,28 +120,10 @@ static ImGuiKey key_from_scancode(SDL_Scancode sc) {
     }
 }
 
-// Nintendo layout: the right face button (A) confirms, the bottom one (B) goes back.
-static ImGuiKey key_from_pad(Uint8 b) {
-    switch (b) {
-    case SDL_GAMEPAD_BUTTON_EAST: return ImGuiKey_GamepadFaceDown;   // activate
-    case SDL_GAMEPAD_BUTTON_SOUTH: return ImGuiKey_GamepadFaceRight; // cancel / back
-    case SDL_GAMEPAD_BUTTON_NORTH: return ImGuiKey_GamepadFaceUp;
-    case SDL_GAMEPAD_BUTTON_WEST: return ImGuiKey_GamepadFaceLeft;
-    case SDL_GAMEPAD_BUTTON_DPAD_UP: return ImGuiKey_GamepadDpadUp;
-    case SDL_GAMEPAD_BUTTON_DPAD_DOWN: return ImGuiKey_GamepadDpadDown;
-    case SDL_GAMEPAD_BUTTON_DPAD_LEFT: return ImGuiKey_GamepadDpadLeft;
-    case SDL_GAMEPAD_BUTTON_DPAD_RIGHT: return ImGuiKey_GamepadDpadRight;
-    case SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: return ImGuiKey_GamepadL1;
-    case SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: return ImGuiKey_GamepadR1;
-    case SDL_GAMEPAD_BUTTON_START: return ImGuiKey_GamepadStart;
-    case SDL_GAMEPAD_BUTTON_BACK: return ImGuiKey_GamepadBack;
-    default: return ImGuiKey_None;
-    }
-}
 
 // ---- software keyboard (runtime/hle/swkbd.c: the game's name entry etc.) --------------------------------------
 // The game thread waits in menu_keyboard_run (re-presenting the last frame); this dialog takes the text: typed
-// directly when the player last used a keyboard, an on-screen keyboard (d-pad + A, B deletes, Start / + OK) when
+// directly when the player last used a keyboard, an on-screen keyboard (d-pad + confirm, back deletes, Start / + OK; buttons as in pad_nav.h) when
 // they last used a controller.
 static std::atomic<int> g_kbd{0};  // 1 open, 2 confirmed, 3 cancelled
 static std::atomic<bool> g_last_pad{false};
@@ -205,7 +190,7 @@ bool menu_handle_event(const SDL_Event *e) {
             return true;
         }
         if (!capturing()) return false;
-        ImGuiKey k = key_from_pad(e->gbutton.button);
+        ImGuiKey k = ui_pad_key(e->gbutton.which, e->gbutton.button, down);  // (the controller's layout: pad_nav.h)
         if (k != ImGuiKey_None) { QEvent q = {}; q.kind = QEvent::KEY; q.key = k; q.down = down; push(q); }
         return true;
     }
@@ -378,57 +363,6 @@ static void drain_events(ImGuiIO &io) {
     }
 }
 
-// Section header in the big font.
-static void header(const char *t) {
-    ImGui::PushFont(g_font_big);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", t);
-    ImGui::PopFont();
-    ImGui::Separator();
-    ImGui::Spacing();
-}
-
-static void hint(const char *t) {
-    ImGui::PushTextWrapPos(0);
-    ImGui::TextDisabled("%s", t);
-    ImGui::PopTextWrapPos();
-}
-
-// A row with a label on the left and a choice of options on the right (dpad left/right cycles).
-// reserve: room kept free right of the combo (a button on the same line)
-static bool choice(const char *label, int *value, const char *const *names, int n, float reserve = 0) {
-    ImGui::PushID(label);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(label);
-    ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
-    bool changed = false;
-    ImGui::SetNextItemWidth(reserve > 0 ? -reserve : -1);
-    if (ImGui::BeginCombo("##c", names[*value])) {
-        for (int i = 0; i < n; i++) {
-            if (ImGui::Selectable(names[i], i == *value)) { *value = i; changed = true; }
-            if (i == *value) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-    if (ImGui::IsItemFocused() && !ImGui::IsPopupOpen("##c")) {
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight) || ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
-            *value = (*value + 1) % n; changed = true;
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
-            *value = (*value + n - 1) % n; changed = true;
-        }
-    }
-    ImGui::PopID();
-    return changed;
-}
-
-static bool toggle(const char *label, bool *v) {
-    const char *names[] = {"Off", "On"};
-    int i = *v;
-    bool ch = choice(label, &i, names, 2);
-    *v = i;
-    return ch;
-}
-
 extern "C" void renderer_get_scale(float *sx, float *sy);
 extern "C" int input_pad_family(void);  // runtime/hle/input.c
 extern "C" double output_scale_dynamic_factor(void);
@@ -569,43 +503,6 @@ static void tab_quit(float scale, bool in_game) {
         if (opt_action("Cancel", "", "Stays where you are.")) ask = 0;
     }
     opt_end();
-}
-
-static void tab_about(void) {
-    header("Movement");
-    toggle("D-pad moves Link", &g_settings.dpad_move);
-    toggle("360-degree movement", &g_settings.move_360);
-    hint("Link walks in the exact direction of the stick instead of snapping to 8 directions.");
-    ImGui::Spacing();
-    header("Button prompts");
-    {
-        static const char *const fam[] = {"Nintendo", "Xbox", "PlayStation"};
-        char autol[64];
-        snprintf(autol, sizeof autol, "Auto (%s)", fam[input_pad_family() % 3]);
-        const char *names[] = {autol, "Nintendo", "Xbox", "PlayStation"};
-        choice("Button icons", &g_settings.prompts, names, 4);
-    }
-    ImGui::Spacing();
-    header("System language");
-    {
-        // what the game is told the console's language is: its text follows this (runtime/settings.c)
-        char autol[64];
-        snprintf(autol, sizeof autol, "Auto (%s)", settings_language_name());
-        const char *names[N_LANGUAGES];
-        names[0] = autol;
-        for (int i = 1; i < N_LANGUAGES; i++) names[i] = g_language_names[i];
-        if (choice("Language", &g_settings.language, names, N_LANGUAGES)) settings_save();
-    }
-    hint("The game's text language, as its own system setting. Applies when the game restarts: Quit -> Title "
-         "screen, then Play.");
-    ImGui::Spacing();
-    header("Controls");
-    controls_bindings_draw(ImGui::GetFontSize() / 34);
-    ImGui::Spacing();
-    header("Menu");
-    ImGui::TextUnformatted("Open / close this menu:  F1, Esc, the controller's Home / Xbox / PlayStation button, or Back + Start");
-    ImGui::TextUnformatted("Switch tabs:  L / R  (Q / E)        Back:  B  (Esc)");
-    ImGui::TextUnformatted("Fullscreen:  F11 / Alt+Enter");
 }
 
 extern "C" bool inventory_overlay_wanted(void);
@@ -759,16 +656,9 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 ImGui::Spacing();
                 ImGui::BeginChild("##page", ImVec2(0, 0), ImGuiChildFlags_None,  // (the rest of the window: no hint line)
                                   ImGuiWindowFlags_NavFlattened);
-                // Down from the tab bar, pages that aren't option rows (Prelaunch, Controls, Warp): their first control
+                // Down from the tab bar, pages that aren't option rows (Prelaunch, Warp): their first control
                 // (option-row pages: opt_focus_first)
-                if (down_from_tab && (t.id == -1 || t.id == 8 || t.id == 4)) {
-                    opt_focus_first(false);
-                    ImGui::SetKeyboardFocusHere();
-                    ImGui::SetNavCursorVisible(true);
-                }
-                // Down from the tab bar, pages that aren't option rows (Prelaunch, Controls, Warp): their first control
-                // (option-row pages: opt_focus_first)
-                if (down_from_tab && (t.id == -1 || t.id == 8 || t.id == 4)) {
+                if (down_from_tab && (t.id == -1 || t.id == 4)) {
                     opt_focus_first(false);
                     ImGui::SetKeyboardFocusHere();
                     ImGui::SetNavCursorVisible(true);
@@ -786,7 +676,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
                 case 5: cheats_draw(scale); break;
                 case 6: difficulty_draw(scale); break;
                 case 7: tab_cosmetics(); break;
-                case 8: tab_about(); break;
+                case 8: controls_tab_draw(scale); break;
                 case 9: tab_quit(scale, in_game); break;
                 }
                 static const char *scroll_test = getenv("LARECOMP_MENU_SCROLL");  // test hook: page scroll, 0..1
@@ -920,7 +810,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         tabs_body(scale, true, NULL);                                                                          //  pages run)
         // B with nothing focused-deeper closes the menu (not the Esc / B that ends typing: typing is from the frame
         // before, so it's still true the frame a field lets go)
-        if (!any_popup && !typing && !ui_text_busy() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+        if (!any_popup && !typing && !ui_text_busy() && !controls_ui_took_back() && !rando_tab_took_back() &&
+            ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             set_open(false);
         ImGui::PopFont();

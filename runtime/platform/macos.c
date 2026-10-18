@@ -17,17 +17,19 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../platform.h"
+#include "posix_log.h"
 
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 
 static mach_timebase_info_data_t tb;
 
-// Started as the app (Finder, Dock: no terminal): stdout / stderr go to lasrecomp.log in the data folder (as on Linux
-// / Windows), and a fatal error is explained in an alert instead of the app vanishing. Runs from a terminal or a test
-// script (not the .app's executable) keep their own output.
+// Started as the app (Finder, Dock: no terminal): stdout / stderr go to lasrecomp.log in the data folder, with five
+// backups (posix_log.h; as on Linux / Windows), and a fatal error is explained in an alert instead of the app
+// vanishing. Runs from a terminal or a test script (not the .app's executable) keep their own output.
 static char g_log_path[1024];
 
 static void log_to_file_in_app(void) {
@@ -39,12 +41,7 @@ static void log_to_file_in_app(void) {
     if (env && *env) snprintf(dir, sizeof dir, "%s", env);
     else snprintf(dir, sizeof dir, "%s/Library/Application Support/com.peiikai.lasrecomp", home && *home ? home : "/tmp");
     mkdir(dir, 0755);
-    snprintf(g_log_path, sizeof g_log_path, "%s/lasrecomp.log", dir);
-    bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
-    if (!freopen(g_log_path, append ? "a" : "w", stderr)) { g_log_path[0] = 0; return; }
-    setvbuf(stderr, NULL, _IONBF, 0);
-    dup2(STDERR_FILENO, STDOUT_FILENO);
-    setenv("LASRECOMP_LOG_APPEND", "1", 1);
+    session_log_open(dir, g_log_path, sizeof g_log_path);
 }
 
 void plat_init(void) { log_to_file_in_app(); }
@@ -103,6 +100,8 @@ void plat_thread_realtime(uint64_t period_ns) {
 // the game's frame-critical threads there - the main thread (priority 44) builds and submits every frame. Priorities
 // 44 and more urgent get user-interactive (performance cores first), the rest user-initiated. LARECOMP_THREAD_QOS=0:
 // the default class as before.
+int plat_cpu_count(void) { return 0; }  // (no affinity masks here: the caller uses the machine's count)
+
 void plat_thread_guest(int prio) {
     static int on = -1;
     if (on < 0) on = !getenv("LARECOMP_THREAD_QOS") || atoi(getenv("LARECOMP_THREAD_QOS")) != 0;
@@ -145,6 +144,22 @@ void plat_fatal_notice(void) {
     CFUserNotificationDisplayAlert(0, kCFUserNotificationStopAlertLevel, NULL, NULL, NULL, CFSTR("LAS Recomp"), msg,
                                    CFSTR("OK"), NULL, NULL, NULL);
     if (msg) CFRelease(msg);
+}
+
+static void *notice_thread(void *text) {
+    CFStringRef msg = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);
+    CFUserNotificationDisplayAlert(0, kCFUserNotificationCautionAlertLevel, NULL, NULL, NULL, CFSTR("LAS Recomp"), msg,
+                                   CFSTR("OK"), NULL, NULL, NULL);
+    if (msg) CFRelease(msg);
+    free(text);
+    return NULL;
+}
+void plat_notice(const char *text) {
+    if (!g_log_path[0]) return;
+    pthread_t t;
+    char *copy = strdup(text);
+    if (copy && !pthread_create(&t, NULL, notice_thread, copy)) pthread_detach(t);
+    else free(copy);
 }
 
 void plat_print_backtrace(void) {

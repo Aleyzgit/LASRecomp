@@ -34,6 +34,9 @@ typedef struct {
     bool movie_audio;
     bool show_fps;
     bool dpad_move;      // the d-pad (and arrow keys) move Link like the stick
+    bool rumble;         // controller vibration from the game (runtime/hle/input.c)
+    int rumble_strength; // its intensity, percent (25 / 50 / 75 / 100)
+    bool bg_input;       // controllers keep working while the window isn't in front (SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS)
     bool move_360;       // analog movement in any direction (the game snaps the stick to 8): runtime/hle/qol.c
     bool blur_removal;   // no tilt-shift blur at the top / bottom of the screen
     bool hide_hero_icon; // no Hero Mode icon on the HUD
@@ -53,6 +56,8 @@ typedef struct {
     bool no_buff_drops;  // no Guardian Acorns / Pieces of Power (Gameplay tab; runtime/hle/qol.c; seeds made with it: always)
     // difficulty (runtime/ui/difficulty.mm)
     float diff_damage;   // damage taken multiplier (1 = normal)
+    float walk_speed;    // Link's walking speed multiplier (1 = normal; Gameplay tab, runtime/hle/qol.c)
+    bool walk_speed_dungeons;  // walk speed also indoors: houses, caves, dungeons (Gameplay tab, under Walk speed)
     bool diff_ohko;      // any hit kills
     bool diff_hero;      // Hero Mode flag forced on in the loaded save (2x damage, no recovery hearts)
     // cosmetics (runtime/ui/cosmetics.mm; applied live by runtime/nvn/texpatch.c), never part of a seed

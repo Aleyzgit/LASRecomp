@@ -22,14 +22,21 @@ Settings g_settings = {
     .volume = 1.0f,
     .reverb = true,
     .movie_audio = true,
+    .rumble = true,
+    .rumble_strength = 100,
     .show_fps = false,
     .inv_keys = true,
     .tracker = true,
     .chaos_letters = CHAOS_LETTERS_MAP,
     .diff_damage = 1.0f,
+    .walk_speed = 1.0f,
+    .walk_speed_dungeons = false,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .upscaler_auto = true,
     .res_auto = true,
+#ifndef __APPLE__
+    .bg_input = true,  // (as before the setting; on macOS it needs Input Monitoring permission, so Off there)
+#endif
 };
 
 // The game's own text languages: its RomFS carries these per region (regionUS/USen|USes|USfr, regionEU/EUen|EUes|...,
@@ -154,6 +161,9 @@ void settings_load(void) {
         else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;  // ("fxaa": SMAA now)
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
+        else if (!strcmp(key, "rumble")) g_settings.rumble = atoi(val) != 0;
+        else if (!strcmp(key, "rumble_strength")) g_settings.rumble_strength = atoi(val);
+        else if (!strcmp(key, "background_input")) g_settings.bg_input = atoi(val) != 0;
         else if (!strcmp(key, "move_360")) g_settings.move_360 = atoi(val) != 0;
         else if (!strcmp(key, "blur_removal")) g_settings.blur_removal = atoi(val) != 0;
         else if (!strcmp(key, "hide_hero_icon")) g_settings.hide_hero_icon = atoi(val) != 0;
@@ -178,6 +188,8 @@ void settings_load(void) {
         else if (!strcmp(key, "cheat_hookshot")) g_settings.cheat_hookshot = atoi(val) != 0;
         else if (!strcmp(key, "no_buff_drops")) g_settings.no_buff_drops = atoi(val) != 0;
         else if (!strcmp(key, "diff_damage")) g_settings.diff_damage = (float)atof(val);
+        else if (!strcmp(key, "walk_speed")) g_settings.walk_speed = (float)atof(val);
+        else if (!strcmp(key, "walk_speed_dungeons")) g_settings.walk_speed_dungeons = atoi(val) != 0;
         else if (!strcmp(key, "diff_ohko")) g_settings.diff_ohko = atoi(val) != 0;
         else if (!strcmp(key, "diff_hero")) g_settings.diff_hero = atoi(val) != 0;
         else if (!strcmp(key, "tunic")) { for (int i = 0; i < N_TUNIC_COLOURS; i++) if (!strcmp(val, g_tunic_colours[i])) g_settings.tunic = i; }
@@ -189,6 +201,7 @@ void settings_load(void) {
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
+    if (g_settings.rumble_strength < 25 || g_settings.rumble_strength > 100) g_settings.rumble_strength = 100;
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
@@ -208,6 +221,9 @@ void settings_save(void) {
     fprintf(f, "resolution = %s\n", g_settings.res_auto ? "auto" : res_name(g_settings.res_mode));
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);
+    fprintf(f, "rumble = %d\n", g_settings.rumble);
+    fprintf(f, "rumble_strength = %d\n", g_settings.rumble_strength);
+    fprintf(f, "background_input = %d\n", g_settings.bg_input);
     fprintf(f, "move_360 = %d\nblur_removal = %d\nhide_hero_icon = %d\n", g_settings.move_360, g_settings.blur_removal,
             g_settings.hide_hero_icon);
     static const char *const prompts[] = {"auto", "nintendo", "xbox", "playstation"};
@@ -226,6 +242,8 @@ void settings_save(void) {
     fprintf(f, "no_buff_drops = %d\n", g_settings.no_buff_drops);
     fprintf(f, "diff_damage = %.2f\ndiff_ohko = %d\ndiff_hero = %d\n", g_settings.diff_damage, g_settings.diff_ohko,
             g_settings.diff_hero);
+    fprintf(f, "walk_speed = %.2f\n", g_settings.walk_speed);
+    fprintf(f, "walk_speed_dungeons = %d\n", g_settings.walk_speed_dungeons);
     fprintf(f, "tunic = %s\nhearts = %s\n", g_tunic_colours[g_settings.tunic], g_heart_colours[g_settings.hearts]);
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);

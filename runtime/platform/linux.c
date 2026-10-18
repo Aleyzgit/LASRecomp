@@ -22,6 +22,7 @@
 #include <unistd.h>
 
 #include "../platform.h"
+#include "posix_log.h"
 
 void rt_crash_explain(char *out, size_t n, const char *log_path);  // runtime/crash_explain.c
 
@@ -157,6 +158,11 @@ void plat_sleep_until_ns(uint64_t t) {
 
 // Real-time scheduling where the user may have it (rtkit / limits.conf), else just a higher priority: keeps the
 // vsync thread on time while the guest threads load every core.
+int plat_cpu_count(void) {
+    cpu_set_t set;
+    return sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : 0;
+}
+
 void plat_thread_guest(int prio) { (void)prio; }  // (the OS's default scheduling serves the game here)
 
 void plat_thread_realtime(uint64_t period_ns) {
@@ -168,8 +174,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 
 // ---- process
 // Started from a desktop (the AppImage) there is no terminal: stdout / stderr go to lasrecomp.log in the data folder
-// (runtime/paths.h; rt_paths_init runs later, so the same rule is applied here). Processes started by this one (the
-// start screen re-executing itself for the game) append to the same log.
+// (runtime/paths.h; rt_paths_init runs later, so the same rule is applied here), with five backups (posix_log.h).
 static char g_log_path[1024];
 
 static void log_to_file_without_terminal(void) {
@@ -184,11 +189,7 @@ static void log_to_file_without_terminal(void) {
     for (char *c = dir + 1; *c; c++)
         if (*c == '/') { *c = 0; mkdir(dir, 0755); *c = '/'; }
     mkdir(dir, 0755);
-    snprintf(g_log_path, sizeof g_log_path, "%s/lasrecomp.log", dir);
-    bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
-    if (!freopen(g_log_path, append ? "a" : "w", stderr)) { g_log_path[0] = 0; return; }
-    dup2(STDERR_FILENO, STDOUT_FILENO);
-    setenv("LASRECOMP_LOG_APPEND", "1", 1);
+    session_log_open(dir, g_log_path, sizeof g_log_path);
 }
 
 #if defined(__x86_64__)
@@ -260,6 +261,19 @@ void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
+}
+
+static void *notice_thread(void *text) {
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "LAS Recomp", text, NULL);
+    free(text);
+    return NULL;
+}
+void plat_notice(const char *text) {
+    if (!g_log_path[0]) return;
+    pthread_t t;
+    char *copy = strdup(text);
+    if (copy && !pthread_create(&t, NULL, notice_thread, copy)) pthread_detach(t);
+    else free(copy);
 }
 
 bool plat_module_name(uint64_t pc, char *out, size_t n) {

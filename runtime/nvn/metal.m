@@ -1065,6 +1065,8 @@ void backend_represent(void) {
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
     extern void renderer_submit(void);
+    extern void renderer_texture_will_read(NvnTexture *t);
+    renderer_texture_will_read(t);  // (a recorded clear of the image becomes its pass first)
     renderer_submit();  // same queue: the present pass runs after the frame's work
     TexBackend *b = t->backend;
     if (b) b->presented = true;
@@ -1259,9 +1261,11 @@ void backend_present(NvnTexture *t) {
 // boots) or by ui_run; the game reuses the launcher's window.
 void ui_window_init(void) {
     if (window) return;
-    // (no SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS here: on macOS reading controllers in the background opens them
-    // as HID devices, for which the system asks for Input Monitoring - "receive keystrokes from any application")
     settings_load();
+    // controllers in the background: only when the player turned on "Allow background inputs" (Controls tab) - on
+    // macOS reading them in the background makes the system ask for Input Monitoring ("receive keystrokes from any
+    // application"), so it isn't the default
+    input_apply_background();
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) FATAL("SDL_Init: %s\n", SDL_GetError());
     input_load_user_mappings();
     int win_w = 1280, win_h = 720;
@@ -1305,12 +1309,14 @@ int ui_run(void) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
-            if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+            input_rumble_poll();
+            if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); LOG("window closed\n"); exit(0); }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        input_rumble_poll();
         int w, h;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);

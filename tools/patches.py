@@ -408,18 +408,42 @@ def _bottle3_use(gen, a):
 PATCHES[BOTTLE3_USE_SITE] = _bottle3_use
 
 
+# Hint Book (runtime/hle/hintbook.c): the same predicate of the FIRST bottle (slot 0xd, main+0xd510c0: owned =
+# PlayerStatus+0xa9 bit 5, empty = +0xc0 bit 0). In randomizer seeds that bottle is the Hint Book: used, the runtime
+# shows the next hint in the game's message box and the answer is no (no swing).
+BOTTLE1_USE_SITE = A.BOTTLE1_USE_SITE
+
+
+def _bottle1_use(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x1a9f17e0, hex(w)  # cset w0, eq
+    return ('{ extern int rt_bottle1_use(void); c->x[0] = COND_NE(c) ? 0 : 1; if (c->x[0] && rt_bottle1_use()) c->x[0] = 0; }'
+            f'  /* {a:#x}: cset w0, eq (first bottle used: Hint Book) */')
+
+
+PATCHES[BOTTLE1_USE_SITE] = _bottle1_use
+
+
 # Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
 # create function from the actor table (main+0x1bcc898, 0x58 bytes per type, +0 create fn, +0x50 name); a null fn is
 # its "no such actor" path (the caller gets an empty handle). A dungeon boss whose soul isn't found yet gets that path.
 BOSS_SPAWN_SITE = A.BOSS_SPAWN_SITE
 
 
+# Enemy randomizer, mode Random (runtime/hle/enemy_random.c): the same spot first lets the runtime re-roll a randomized
+# enemy in the spawn info (type +8, the eight parameters +0x10, as in its room file's record), then takes the type
+# again (x23) and its table entry (x8 = x27 + type * 0x58, x27 = the table: main+0x1bcc898).
 def _boss_spawn(gen, a):
     w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
     assert w == 0xf9400118, hex(w)  # ldr x24, [x8]
+    if a - 4 >= gen.base:  # (the address table test gives this one word only)
+        w = struct.unpack_from('<I', gen.nso.image, a - 4 - gen.base)[0]
+        assert w == 0x9b086ee8, hex(w)  # madd x8, x23, x8, x27
     return ('{ extern uint64_t rt_actor_create_fn(uint64_t fn, uint32_t type, uint64_t info); '
+            'extern void rt_enemy_spawn(uint64_t info); rt_enemy_spawn(c->x[2]); '
+            'c->x[23] = LD16(c->x[2] + 8); c->x[8] = c->x[27] + c->x[23] * 0x58ull; '
             'c->x[24] = rt_actor_create_fn(LD64(c->x[8]), (uint32_t)c->x[23], c->x[2]); }'
-            f'  /* {a:#x}: ldr x24, [x8] (actor create fn: boss souls) */')
+            f'  /* {a:#x}: ldr x24, [x8] (actor create fn: boss souls, enemy mode Random) */')
 
 
 PATCHES[BOSS_SPAWN_SITE] = _boss_spawn
@@ -455,6 +479,58 @@ def _snap_dir(gen, a):
 
 
 PATCHES[SNAP_DIR_SITE] = _snap_dir
+
+
+# Walk speed (runtime/hle/qol.c, setting walk_speed): Link's walk state (main+0xdcdae0) and shield walk (main+0xdb7d30)
+# put a speed multiplier in s0 right before these loads - 1.0, or 1.15 with a Piece of Power - and scale the ramped
+# walk speed by it (then by the slow-ground factors 0.25 / 0.75). rt_walk_speed multiplies s0 by the setting. The
+# Pegasus Boots dash, swimming and side-view ladders have their own speeds and are untouched, and so is the hop off a
+# ledge (the same multiplier loaded again at main+0xdce508 / 0xdd0254 / 0xdb86e8 / 0xdb8f3c: left alone, so jump
+# distances stay the game's own).
+WALK_SPEED_SITES = {A.WALK_SPEED_SITES_0: (19, 0), A.WALK_SPEED_SITES_1: (19, 1), A.WALK_SPEED_SITES_2: (20, 2),
+                    A.WALK_SPEED_SITES_3: (20, 3)}
+
+
+def _walk_speed(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    rn, site = WALK_SPEED_SITES[a]
+    assert w == 0xf94ca408 | (rn << 5), hex(w)  # ldr x8, [x19|x20, #0x1948]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[0], 4); '
+            f'm_ = rt_walk_speed(c->x[{rn}], m_, {site}); c->v[0] = 0; memcpy(&c->v[0], &m_, 4); '
+            f'c->x[8] = LD64(c->x[{rn}] + 0x1948); }}'
+            f'  /* {a:#x}: ldr x8, [x{rn}, #0x1948] (walk speed multiplier in s0) */')
+
+
+for _a in WALK_SPEED_SITES:
+    PATCHES[_a] = _walk_speed
+
+
+# Walk animation rate: main+0xdce320 (walk state) has the walk animation's play rate in s8 (1, 0.75 on slow ground,
+# x1.15 with a Piece of Power), handed to the animation layers right after.
+def _walk_anim(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94ab668, hex(w)  # ldr x8, [x19, #0x1568]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[8], 4); '
+            'm_ = rt_walk_speed(c->x[19], m_, 100); c->v[8] = 0; memcpy(&c->v[8], &m_, 4); '
+            'c->x[8] = LD64(c->x[19] + 0x1568); }'
+            f'  /* {a:#x}: ldr x8, [x19, #0x1568] (walk animation rate in s8) */')
+
+
+PATCHES[A.WALK_ANIM_SITE_0] = _walk_anim
+
+
+# The same for the shield walk (main+0xdb8168): s0 = 1 or 0.75 on slow ground (times s1 = 1.15 with a Piece of Power
+# right after).
+def _shield_anim(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94006c8, hex(w)  # ldr x8, [x22, #8]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[0], 4); '
+            'm_ = rt_walk_speed(c->x[20], m_, 101); c->v[0] = 0; memcpy(&c->v[0], &m_, 4); '
+            'c->x[8] = LD64(c->x[22] + 8); }'
+            f'  /* {a:#x}: ldr x8, [x22, #8] (shield walk animation rate in s0) */')
+
+
+PATCHES[A.WALK_ANIM_SITE_1] = _shield_anim
 
 
 # No Guardian Acorns / Pieces of Power (randomizer no-buff-drops, runtime/hle/qol.c): the drop roll main+0x89b960 reads
@@ -687,6 +763,32 @@ for _a in DELEGATE_FORWARDER_SITES:
 # with Warp tab jumps; same family as NO_HANDLER_SITES (the action dispatcher's).
 EMPTY_HANDLER_SITE = A.EMPTY_HANDLER_SITE  # bl main+0x108dfc0
 
+# Issue #19 (the hang): the per-frame kick-off (main+0x15730, four inlined copies, one per owner X) rebuilds X's frame
+# job J (X+0xc8) in place. The job worker (main+0x13c21e0) runs J (main+0x10cceb0: sets X's done flag, wakes the main
+# thread, unlocks) and only then calls J's finish (main+0x10ccfa0 -> slot +0x00: base vtable, delegate cleared). A
+# worker preempted between the two lets the main thread kick off the next frame first; the late finish then wipes the
+# new J, whose release is dropped and the main thread waits for X's done flag forever. The kick-off hooks wait for the
+# previous run's finish (runtime/hle/delegate_null.c); the finish hook only serves a debug delay to force the race.
+FRAME_JOB_KICKOFF_SITES = [A.FRAME_JOB_KICKOFF_SITES_0, A.FRAME_JOB_KICKOFF_SITES_1, A.FRAME_JOB_KICKOFF_SITES_2,
+                           A.FRAME_JOB_KICKOFF_SITES_3]
+FRAME_JOB_FINISH_SITE = A.FRAME_JOB_FINISH_SITE
+
+# Startup hang (Windows, few cores): a call run on its object's owner thread. main+0x1048cf0 (slot +0x48 of the class
+# whose vtable is 0x7001c490b0; a loader thread calls it for an object O the main thread owns) locks O's mutex (O+0x18),
+# posts a task to the owner's queue ([O+8]) and waits on O's condition variable (O+0x38) once, with no predicate. The
+# task (main+0x1049ed0, on the main thread) stores the result at O+0x10 and calls notify_one without taking O's mutex.
+# If the loader thread is preempted between its post and its wait, the notify finds nobody and the loader waits forever,
+# while the main thread waits for that loader's load (key in its own task queue). The hook takes and drops O's mutex
+# before the notify: the loader holds it from before the post until its wait has begun, so the notify always lands.
+OWNER_CALL_NOTIFY_SITE = A.OWNER_CALL_NOTIFY_SITE
+
+
+# Shadow Link's Appear event (main+0xd157f0: requested once Link is within 3 units, ShadowLink.bfevfl) stops Link and
+# turns the camera to him; on the Field (seeds) the request is skipped and runtime/hle/miniboss.c plays his appearance
+# (Sign glow, then he pops up) without an event. The site is right after the function's already-requested check; the
+# skip goes to its return.
+SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
+
 
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
@@ -701,9 +803,16 @@ HOOKS = {
     GOHMA_ARRIVED_SITE: (0x3dc58260, (A.GOHMA_ARRIVED_SKIP,), 'ldr q0, [x19, #0x1600]: Gohma, no track end on the Field'),
     MSTALFOS_BODY_SITE: (0x320003e8, (), 'mov w8, #1: Master Stalfos body collision flag, off on the Field'),
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
+    SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
     HOLE_CAP_SITES[0]: (0xf101451f, (), 'cmp x8, #0x51: dug-hole limit (digs.c)'),
     HOLE_CAP_SITES[1]: (0xf101411f, (), 'cmp x8, #0x50: dug-hole limit (digs.c)'),
     EMPTY_HANDLER_SITE: (0x9400005e, (A.EMPTY_HANDLER_CATCH,), 'bl std::function call: an empty event handler, as its catch'),
+    FRAME_JOB_KICKOFF_SITES[0]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[1]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[2]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_KICKOFF_SITES[3]: (0x910782b3, (), 'add x19, x21, #0x1e0: frame job kick-off, previous finish first'),
+    FRAME_JOB_FINISH_SITE: (0xf9400008, (), 'ldr x8, [x0]: frame job finish (debug delay)'),
+    OWNER_CALL_NOTIFY_SITE: (0x9100e2a0, (), 'add x0, x21, #0x38: owner-thread call done, the caller is waiting first'),
 }
