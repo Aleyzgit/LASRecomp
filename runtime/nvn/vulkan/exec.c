@@ -27,6 +27,7 @@ static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wai
 static uint32_t gc_shift;
 static uint32_t gmem_chunk_shift(void);
 static VkDescriptorSetLayout gmem_chunk_layout(void);
+static void gc_scan_pointers(const uint32_t *w, uint64_t bytes);
 static bool gc_lazy;
 static int gc_imported;
 static uint64_t gc_imported_bytes, stat_gc_misses;
@@ -1945,6 +1946,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
+    if (gc_lazy && si->uses_gmem) gc_scan_pointers((const uint32_t *)(uintptr_t)r.addr, size);
     return ubo_span(guest_copy(r.addr, size), size);
 }
 
@@ -2151,6 +2153,8 @@ static VkDescriptorSetLayout gc_layout;
 static VkDescriptorSet gc_set;
 static uint64_t gc_set_seq;
 static uint32_t gc_gen, gc_set_gen;  // (gen: bumped when a chunk is imported; the set is rebuilt per submission and gen)
+static int gc_scanned;                // chunks imported for a pointer found in a uniform buffer
+static uint8_t gc_remembered[GC_MAX]; // chunks shaders reached without a bind (a miss, a pointer): imported again after a reboot
 static int gc_imported;
 static uint64_t gc_imported_bytes, stat_gc_misses;
 
@@ -2240,6 +2244,33 @@ static bool gc_import(int k) {
     return true;
 }
 
+// Pointers the game keeps in its uniform buffers (the lighting pass's light list, the grass's instance tables): the
+// chunk a shader reaches that way has no storage buffer bound over it, so it is imported from the uniform buffer's
+// contents - which the per-draw copy reads anyway - before the draw. Without this the first frame in such a chunk
+// read 0 (chunk 47 at +752 MB at every scene entry, chunk 50 at the first grass cut: 576 misses over a tour). An
+// 8-byte-aligned word pair that happens to look like a heap address imports a chunk for nothing: bounded, and logged.
+#define GC_SCAN_MAX 48
+static void gc_scan_pointers(const uint32_t *w, uint64_t bytes) {
+    uint64_t heap = gmem_heap_size();
+    for (uint64_t i = 0; i + 1 < bytes / 4; i += 2) {
+        uint64_t v = (uint64_t)w[i] | (uint64_t)w[i + 1] << 32;
+        if (v < HEAP_BASE || v - HEAP_BASE >= heap) continue;
+        int k = (int)((v - HEAP_BASE) >> gc_shift);
+        if (k >= gc_n || gc[k].buf) continue;
+        if (gc_scanned >= GC_SCAN_MAX) {
+            static int warned;
+            if (!warned++) LOG("[vk] guest heap: %d chunks imported for pointers in uniform buffers: no more\n", gc_scanned);
+            return;
+        }
+        if (gc_import(k)) {
+            gc_scanned++;
+            gc_remembered[k] = 1;
+            LOG("[vk] guest heap chunk %d (+%llu MB): a pointer in a uniform buffer (%llx): imported\n", k,
+                (unsigned long long)((uint64_t)k << gc_shift) >> 20, (unsigned long long)v);
+        }
+    }
+}
+
 // A heap range a draw or dispatch binds: its chunks get imported (lazy mode).
 static void gc_touch(uint64_t off, uint64_t size) {
     if (!gc_lazy || !size || off >= HEAP_MAX) return;
@@ -2283,6 +2314,8 @@ static VkDescriptorSet gmem_chunk_set(void) {
         memset(gc_miss + GC_MAX, 0xFF, sizeof(uint32_t) * GC_MAX);
     }
     uint64_t seq = vk_pending_seq();
+    if (gc_lazy && !gc_imported)  // (a boot, or a reboot: the chunks shaders reached without a bind last time, before they miss again)
+        for (int k = 0; k < gc_n; k++) if (gc_remembered[k] && !gc[k].buf) gc_import(k);
     if (gc_set && gc_set_seq == seq && gc_set_gen == gc_gen) return gc_set;
     static VkDescriptorBufferInfo bi[GC_MAX + 1];
     static VkWriteDescriptorSet w[GC_MAX];
@@ -2345,6 +2378,7 @@ static void gc_frame(void) {
         if (nlog++ < 40) LOG("[vk] guest heap chunk %d (+%llu MB): %u shader accesses before its import, lowest %llx: imported for the next frame\n", k,
                              (unsigned long long)((uint64_t)k << gc_shift) >> 20, m, (unsigned long long)HEAP_BASE + ((uint64_t)w << 2));
         gc_touch((uint64_t)k << gc_shift, 1);
+        gc_remembered[k] = 1;
     }
 }
 
@@ -2725,7 +2759,7 @@ void vk_exec_reset(void) {
         if (gc[k].buf) { vkDestroyBuffer(g_vk.dev, gc[k].buf, NULL); vkFreeMemory(g_vk.dev, gc[k].mem, NULL); }
         memset(&gc[k], 0, sizeof gc[k]);
     }
-    gc_imported = 0; gc_imported_bytes = 0; gc_gen++;
+    gc_imported = 0; gc_scanned = 0; gc_imported_bytes = 0; gc_gen++;  // (gc_remembered stays: the same heap layout next boot)
     if (gc_miss) { memset(gc_miss, 0, sizeof(uint32_t) * GC_MAX); memset(gc_miss + GC_MAX, 0xFF, sizeof(uint32_t) * GC_MAX); }
     for (int i = 0; i < VC_TAB; i++)  // (the vertex cache: copies of the old pages)
         if (vc_tab[i].buf) vmaDestroyBuffer(g_vk.vma, vc_tab[i].buf, vc_tab[i].mem);
