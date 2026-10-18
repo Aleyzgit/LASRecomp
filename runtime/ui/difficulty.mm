@@ -85,12 +85,12 @@ extern "C" void difficulty_draw(float scale) {
                    "Mirrors the game world."))
         settings_save();
     {
-        static const char *const names[] = {"Normal", "1.25x", "1.5x", "2x"};
-        static const float mult[] = {1, 1.25f, 1.5f, 2};
+        static const char *const names[] = {"Normal", "Brisk", "Running", "Sprinting", "Zoomies"};
+        static const float mult[] = {1, 1.25f, 1.5f, 1.75f, 2.5f};
         int wi = 0;  // (the closest step to the setting)
-        for (int i = 0; i < 4; i++)
+        for (int i = 0; i < 5; i++)
             if (fabsf(mult[i] - g_settings.walk_speed) < fabsf(mult[wi] - g_settings.walk_speed)) wi = i;
-        if (opt_choice("Walk speed", &wi, names, 4, 0, "How fast Link walks. The Pegasus Boots and swimming are unchanged.")) {
+        if (opt_choice("Walk speed", &wi, names, 5, 0, "How fast Link walks. The Pegasus Boots and swimming are unchanged.")) {
             g_settings.walk_speed = mult[wi];
             settings_save();
         }
