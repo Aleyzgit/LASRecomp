@@ -9,7 +9,7 @@ the logic thinks is open too early - the circular dig-spot gates of #81 / #144. 
 runtime/ui/rando_tab.mm (seed_id_encode, request.json in start_generation): keep the two in step.
 
 usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir] [--stealing M] [--shopsanity N]
-                    [--miniboss-freq F] [--full]
+                     [--souls] [--rooms N ...] [--triforce N] [--miniboss-freq F] [--full]
        (default: the fixed seed IDs below + 40 random option mixes with digsanity on, every logic level)
 --miniboss-freq F: every random mix randomizes enemies with mini-boss frequency F (0 - 3: Normal, 2x, 3x, All), enemy
 mode Seeded or Random; --full: each seed is also generated in full (game files, enemies and all) and must finish.
@@ -42,13 +42,13 @@ FLAGS = ['bomb_bag', 'powder_bag', 'environments', 'pets_in_dungeons', 'skip_sto
          'pots', 'no_buffs', 'bushes', 'pet_rooster', 'pet_ghost', 'pet_marin', 'trendsanity', 'boss_souls',
          'hookshot_any', 'digs', 'miniboss_souls', 'no_start_sword', 'no_start_shield', 'no_start_ocarina',
          'tunic_upgrades']
-BITS = 125
+BITS = 150  # (v5: 30 characters; v4 IDs had 125 - decode reads both)
 TIMEOUT = 900  # (seconds per seed)
 
 
 def _check(bits):
     h = 0x811c9dc5
-    for b in bits[:BITS - 5]:
+    for b in bits[:len(bits) - 5]:
         h = ((h ^ b) * 0x01000193) & 0xffffffff
     return (h ^ (h >> 5) ^ (h >> 10) ^ (h >> 15)) & 31
 
@@ -58,18 +58,21 @@ def decode(text):
     for ch in text.upper().replace('-', '').replace(' ', ''):
         v = B32.index({'O': '0', 'I': '1', 'L': '1'}.get(ch, ch))
         bits += [(v >> k) & 1 for k in range(5)]
-    assert len(bits) == BITS and sum(bits[-5 + k] << k for k in range(5)) == _check(bits), text
+    n = len(bits)
+    assert n in (BITS, 125) and sum(bits[-5 + k] << k for k in range(5)) == _check(bits), text
     pos = [0]
 
     def get(w):
         v = sum(bits[pos[0] + i] << i for i in range(w))
         pos[0] += w
         return v
-    assert get(4) == 4, 'seed ID format 4 only'
+    assert get(4) == (5 if n == BITS else 4), 'seed ID format 4 / 5 only'
     o = {'rng': get(36)}
     o.update((k, get(w)) for k, w in FIELDS)
     o.update((k, bool(get(1))) for k in FLAGS)
-    pos[0] = BITS - 10  # (fixed places before the checksum: rando_tab.mm SEED_ID_STEALSWORD .. SEED_ID_MBFREQ)
+    pos[0] = n - 18  # (fixed places before the checksum: rando_tab.mm id_hunt .. id_mbfreq; v5 only: the hunt)
+    o['triforce_needed'], o['triforce_extra'] = (get(6), get(2)) if n == BITS else (0, 0)
+    pos[0] = n - 10
     o['steal_needs_sword'], o['no_stealing'] = bool(get(1)), bool(get(1))
     o['enemy_mode'], o['miniboss_freq'] = get(1), get(2)
     return o
@@ -80,14 +83,16 @@ def encode(o):
 
     def put(v, w):
         bits.extend((int(v) >> i) & 1 for i in range(w))
-    put(4, 4)
+    put(5, 4)
     put(o['rng'], 36)
     for k, w in FIELDS:
         put(o.get(k, 0), w)
     for k in FLAGS:
         put(o.get(k, False), 1)
     bits.extend([0] * (BITS - 5 - len(bits)))
-    del bits[BITS - 10:]
+    del bits[BITS - 18:]
+    put(o.get('triforce_needed', 0), 6)
+    put(o.get('triforce_extra', 0), 2)
     put(o.get('steal_needs_sword', False), 1)
     put(o.get('no_stealing', False), 1)
     put(o.get('enemy_mode', 0), 1)
@@ -126,6 +131,7 @@ def request(sid, o, logic='basic'):
         'boss-souls': o['boss_souls'], 'miniboss-souls': o['miniboss_souls'], 'hookshot-anything': o['hookshot_any'],
         'entrance-tier': tier, 'entrance-decoupled': tier >= 2 and o['decoupled'],
         'pet-rooster': o['pet_rooster'], 'pet-ghost': o['pet_ghost'], 'open-desert': not o['pet_marin'],
+        'triforce-hunt': o.get('triforce_needed', 0), 'triforce-extra': o.get('triforce_extra', 0) * 25,
         'include': [f'{s}-seashell-reward' for s in shells],
         'exclude': [f'{s}-seashell-reward' for s in shells[o['seashells']:]]}
 
@@ -192,16 +198,20 @@ def playthrough(logic, placements, access, level, extra=None):
     return a, seen
 
 
-def check_seed(out_dir, level, walk):
+def check_seed(out_dir, level, walk, needed=0):
     logic = json.load(open(os.path.join(out_dir, 'logic.json')))
     for k, v in {'D6-4D': 'D6-5D', 'D6-2A': 'D6-4D'}.items():  # (las_headless: rooms LAS's logic never defines)
         logic.setdefault(k, {'type': 'room', 'condition-basic': v})
     p = json.load(open(os.path.join(out_dir, 'placements.json')))
     extra = {name: ' | '.join(sorted(walk[name])) for name in logic if name in walk}
     a, seen = playthrough(logic, p['placements'], p['access'], level)
-    own = [i for i in INSTRUMENTS + ['kill-nightmare'] if not a.get(i)]
+    def missing(acc):  # (Triforce hunt: the pieces are the goal)
+        if needed:
+            return [] if acc.get('triforce-piece', 0) >= needed else [f"triforce {acc.get('triforce-piece', 0)}/{needed}"]
+        return [i for i in INSTRUMENTS + ['kill-nightmare'] if not acc.get(i)]
+    own = missing(a)
     a2, seen2 = playthrough(logic, p['placements'], p['access'], level, extra)
-    strict = [i for i in INSTRUMENTS + ['kill-nightmare'] if not a2.get(i)]
+    strict = missing(a2)
     lost = sorted(k for k in seen - seen2 if k in extra and p['placements'].get(k)
                   and not re.match(r'(pot|dig)-|rupee|heart$|seashell|trap', p['placements'][k]))
     return own, strict, [(k, p['placements'][k], extra[k]) for k in lost]
@@ -222,7 +232,7 @@ def run_one(job):
     if r.returncode != 0:
         tail = (r.stderr.strip().splitlines() or ['?'])[-1]
         return sid, level, f'generator exit {r.returncode}: {tail}', None
-    own, strict, lost = check_seed(os.path.join(tmp, 'out'), level, walk)
+    own, strict, lost = check_seed(os.path.join(tmp, 'out'), level, walk, o.get('triforce_needed', 0))
     if full and not own and not strict:  # (the whole seed: enemies, mini-bosses, every room edit)
         env = dict(os.environ, PYTHONHASHSEED='0')
         env.pop('LARECOMP_CHECK_ONLY', None)
@@ -269,6 +279,11 @@ def main():
     ap.add_argument('--miniboss-freq', type=int, choices=[0, 1, 2, 3], help='every random mix with enemies randomized, '
                     'mini-bosses at this frequency (Normal / 2x / 3x / All)')
     ap.add_argument('--full', action='store_true', help='also generate each seed in full (game files)')
+    ap.add_argument('--souls', action='store_true', help='every random mix with boss and mini-boss souls on')
+    ap.add_argument('--triforce', type=int, metavar='N', help='every random mix a Triforce hunt for N pieces '
+                    '(extra pieces cycled: none / +25%% / +50%%)')
+    ap.add_argument('--rooms', type=int, choices=[0, 1, 2, 3], action='append',
+                    help='dungeon room shuffle of the random mixes (off / coherent / chaos / madness; repeat: cycled)')
     args = ap.parse_args()
     romfs = os.path.abspath(args.romfs)
     if args.keep:
@@ -284,6 +299,12 @@ def main():
         if args.miniboss_freq is not None:
             o.update(randomize_enemies=True, enemy_minibosses=True, miniboss_freq=args.miniboss_freq,
                      enemy_mode=int(rng.random() < 0.5))
+        if args.souls:
+            o['boss_souls'] = o['miniboss_souls'] = True
+        if args.triforce:
+            o['triforce_needed'], o['triforce_extra'] = args.triforce, i % 3
+        if args.rooms:
+            o['room_shuffle'] = args.rooms[(i // len(levels)) % len(args.rooms)]  # (not in step with the levels)
         if args.stealing:
             o['no_stealing'], o['steal_needs_sword'] = args.stealing == 'never', args.stealing == 'normal'
             if args.stealing == 'never' and not o['shopsanity']:
