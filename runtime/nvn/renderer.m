@@ -534,11 +534,67 @@ static id<MTLTexture> view_cached(id<MTLTexture> base, uint64_t params, id<MTLTe
     return v;
 }
 
+// Metal format views: an ordinary colour format can be viewed as another one of the same size, a compressed one only
+// as itself or its sRGB / linear twin, depth and stencil formats only as themselves. Anything else is a Metal
+// assertion (not only with API validation: newTextureViewWithPixelFormat checks it in the driver and aborts).
+static int mtl_color_bytes(MTLPixelFormat f) {  // texel size of an ordinary colour format, 0 = not one
+    switch (f) {
+    case MTLPixelFormatR8Unorm: case MTLPixelFormatR8Unorm_sRGB: case MTLPixelFormatR8Snorm: case MTLPixelFormatR8Uint:
+    case MTLPixelFormatR8Sint: case MTLPixelFormatA8Unorm:
+        return 1;
+    case MTLPixelFormatR16Unorm: case MTLPixelFormatR16Snorm: case MTLPixelFormatR16Uint: case MTLPixelFormatR16Sint:
+    case MTLPixelFormatR16Float: case MTLPixelFormatRG8Unorm: case MTLPixelFormatRG8Unorm_sRGB: case MTLPixelFormatRG8Snorm:
+    case MTLPixelFormatRG8Uint: case MTLPixelFormatRG8Sint: case MTLPixelFormatB5G6R5Unorm: case MTLPixelFormatA1BGR5Unorm:
+    case MTLPixelFormatABGR4Unorm: case MTLPixelFormatBGR5A1Unorm:
+        return 2;
+    case MTLPixelFormatR32Uint: case MTLPixelFormatR32Sint: case MTLPixelFormatR32Float: case MTLPixelFormatRG16Unorm:
+    case MTLPixelFormatRG16Snorm: case MTLPixelFormatRG16Uint: case MTLPixelFormatRG16Sint: case MTLPixelFormatRG16Float:
+    case MTLPixelFormatRGBA8Unorm: case MTLPixelFormatRGBA8Unorm_sRGB: case MTLPixelFormatRGBA8Snorm:
+    case MTLPixelFormatRGBA8Uint: case MTLPixelFormatRGBA8Sint: case MTLPixelFormatBGRA8Unorm:
+    case MTLPixelFormatBGRA8Unorm_sRGB: case MTLPixelFormatRGB10A2Unorm: case MTLPixelFormatRGB10A2Uint:
+    case MTLPixelFormatBGR10A2Unorm: case MTLPixelFormatRG11B10Float: case MTLPixelFormatRGB9E5Float:
+        return 4;
+    case MTLPixelFormatRG32Uint: case MTLPixelFormatRG32Sint: case MTLPixelFormatRG32Float: case MTLPixelFormatRGBA16Unorm:
+    case MTLPixelFormatRGBA16Snorm: case MTLPixelFormatRGBA16Uint: case MTLPixelFormatRGBA16Sint:
+    case MTLPixelFormatRGBA16Float:
+        return 8;
+    case MTLPixelFormatRGBA32Uint: case MTLPixelFormatRGBA32Sint: case MTLPixelFormatRGBA32Float:
+        return 16;
+    default:
+        return 0;
+    }
+}
+static MTLPixelFormat mtl_linear_twin(MTLPixelFormat f) {  // compressed sRGB format -> its linear one
+    switch (f) {
+    case MTLPixelFormatBC1_RGBA_sRGB: return MTLPixelFormatBC1_RGBA;
+    case MTLPixelFormatBC2_RGBA_sRGB: return MTLPixelFormatBC2_RGBA;
+    case MTLPixelFormatBC3_RGBA_sRGB: return MTLPixelFormatBC3_RGBA;
+    case MTLPixelFormatBC7_RGBAUnorm_sRGB: return MTLPixelFormatBC7_RGBAUnorm;
+    default:
+        if (f >= MTLPixelFormatASTC_4x4_sRGB && f <= MTLPixelFormatASTC_12x12_sRGB)
+            return f - MTLPixelFormatASTC_4x4_sRGB + MTLPixelFormatASTC_4x4_LDR;
+        return f;
+    }
+}
+static bool mtl_view_compatible(MTLPixelFormat base, MTLPixelFormat view) {
+    if (base == view) return true;
+    int bb = mtl_color_bytes(base), vb = mtl_color_bytes(view);
+    if (bb || vb) return bb == vb;
+    return mtl_linear_twin(base) == mtl_linear_twin(view);  // (depth / stencil formats have no twin)
+}
+
 static id<MTLTexture> view_texture(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render,
                                    id<MTLBlitCommandEncoder> blit) {
     id<MTLTexture> base = renderer_texture(t, blit, render);
     if (!has_view || !v->setmask) return base;
     MTLPixelFormat pf = (v->setmask & 4) ? renderer_pixel_format(v->format) : base.pixelFormat;
+    if (!mtl_view_compatible(base.pixelFormat, pf)) {  // (see mtl_view_compatible: the base format instead)
+        static int nlog;
+        if (!nlog++)
+            LOG("[view] texture %ux%u fmt %#x (mtl %lu) can't be viewed as nvn %#x (mtl %lu): its own format instead "
+                "(logged once)\n", t->width, t->height, t->format, (unsigned long)base.pixelFormat, v->format, (unsigned long)pf);
+        pf = base.pixelFormat;
+    }
     NSUInteger lv0 = (v->setmask & 1) ? v->base_level : 0;
     NSUInteger nlv = (v->setmask & 1) && v->num_levels ? v->num_levels : base.mipmapLevelCount - lv0;
     NSUInteger ly0 = (v->setmask & 2) ? v->min_layer : 0;
@@ -1622,6 +1678,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            else if (e->dead_format) nvn_dead_slot_sampled(e, tic);
             if (e->tex && stage == 1) {
                 extern int renderer_texpatch_of(NvnTexture *t);
                 extern int texpatch_bottle_kind(int id);
@@ -1923,6 +1980,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
+            else if (e->dead_format) nvn_dead_slot_sampled(e, tic);
             if (e->tex && i < 64) renderer_texture_scale(e->tex, &tex_sc[0][i][0], &tex_sc[0][i][1]);
             for (int k = 0; k < nfeedback; k++)
                 if (e->tex == feedback_tex[k]) {
