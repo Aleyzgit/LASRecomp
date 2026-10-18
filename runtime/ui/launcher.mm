@@ -1110,7 +1110,7 @@ extern "C" void launcher_run(const char *root) {
         rt_remove_game_file(g_root.c_str(), "romfs.bin"))
         fprintf(stderr, "[launcher] removed the old game data image (romfs.bin)\n");
     std::string status = check_game_files(g_root);
-    if (status.empty()) load_background(dev);
+    if (check_copied_files(g_root).empty()) load_background(dev);  // (also behind an update of the game code)
     std::vector<std::string> seeds = list_seeds();
     std::vector<std::string> choices = {"Vanilla"};
     choices.insert(choices.end(), seeds.begin(), seeds.end());
@@ -1254,7 +1254,7 @@ extern "C" void launcher_run(const char *root) {
         if (was_busy && !busy) {
             g_build_cache_changed = true;
             status = check_game_files(g_root);
-            if (status.empty()) { load_background(dev); page = MAIN; }
+            if (status.empty()) { if (!g_bg) load_background(dev); page = MAIN; }
             if (status.empty() && ap && getenv("LARECOMP_LAUNCHER_PREPARE")) play = true;
             g_auto_update = false;
         }
@@ -1300,16 +1300,17 @@ extern "C" void launcher_run(const char *root) {
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
             ImGui::GetIO().FontGlobalScale = s * 0.5f;
             ImDrawList *bg = ImGui::GetBackgroundDrawList();
-            // an update by itself: only its bar, on plain gray (a failure or Cancel then shows the Game Files page)
+            // an update by itself: only its bar, on the start screen's background (gray without it; a failure or
+            // Cancel then shows the Game Files page)
             const bool update_only = g_auto_update && busy;
-            if (update_only) {
-                bg->AddRectFilled(ImVec2(0, 0), ds, IM_COL32(40, 40, 40, 255));
-            } else if (g_bg) {  // cover the window, keep the aspect
+            if (g_bg && (status.empty() || update_only)) {  // cover the window, keep the aspect
                 float ia = (float)g_bg_w / g_bg_h, wa = ds.x / ds.y;
                 ImVec2 uv0(0, 0), uv1(1, 1);
                 if (wa > ia) { float v = ia / wa; uv0.y = (1 - v) / 2; uv1.y = 1 - uv0.y; }
                 else { float u = wa / ia; uv0.x = (1 - u) / 2; uv1.x = 1 - uv0.x; }
                 bg->AddImage(BG_TEXID, ImVec2(0, 0), ds, uv0, uv1);
+            } else if (update_only) {
+                bg->AddRectFilled(ImVec2(0, 0), ds, IM_COL32(40, 40, 40, 255));
             } else {
                 bg->AddRectFilledMultiColor(ImVec2(0, 0), ds, IM_COL32(18, 34, 40, 255), IM_COL32(40, 70, 64, 255),
                                             IM_COL32(12, 20, 24, 255), IM_COL32(8, 12, 16, 255));
