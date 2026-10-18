@@ -1,9 +1,10 @@
 """Overworld copies of a mini-boss whose own flow gives a check (Lanmola: LAS puts Yarna Desert's item in
 Lanmola.bfevfl, mod_generator.lanmolaChanges; Armos Knight: the armos-knight check in DeguArmos.bfevfl,
-armosKnightChanges) must not give it again when beaten (a copy keeps coming back): each copy's switch 2 = a new global
-flag (OverworldMinibossMarker) that the runtime sets when it wakes one (runtime/hle/miniboss.c, settings.json
-"miniboss-marker-flag"); the flow asks CheckSawTheFirstEvent(switchIndex 2) before the item get - the original
-(no switch 2: 0) gets the item as before, a copy (the marker set: 1) goes straight past it.
+armosKnightChanges) must not give it again when beaten (a copy keeps coming back), and copies that would show a hint
+on a hit (QUIET) stay silent: each copy's switch 2 = a new global flag (OverworldMinibossMarker) that the runtime sets
+on the Field (runtime/hle/miniboss.c, settings.json "miniboss-marker-flag"); the flow asks
+CheckSawTheFirstEvent(switchIndex 2) before the item get (or the hint) - the original (no switch 2: 0) gets it as
+before, a copy (the marker set: 1) goes straight past it.
 
     apply(out_dir, romfs, leb, event_tools, oead_tools, settings) -> summary
 """
@@ -14,6 +15,13 @@ import os
 GUARDS = {
     0x57: ('Lanmola.bfevfl', 'Lanmola', 'Event34', 'Event9', 'Field_13O'),
     0x5B: ('DeguArmos.bfevfl', 'DeguArmos', 'Event47', None, None),
+}
+# Copies that would talk on a hit: the Giant Buzz Blob's flow shows "Your sword won't work! Try something else!" (its
+# BossBlobNoDamage entry) - a hint for its own arena. A copy (switch 2 = the marker) shrugs the sword off silently: the
+# entry asks CheckSawTheFirstEvent(switchIndex 2) first, the original (0) still shows it. (The other mini-boss flows
+# only talk in their start / end events.) type -> (event flow, actor name in it, entry point)
+QUIET = {
+    0x61: ('BossBlob.bfevfl', 'BossBlob', 'BossBlobNoDamage'),
 }
 MARKER = 'OverworldMinibossMarker'
 
@@ -38,7 +46,7 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
         if not f.endswith('.leb'):
             continue
         room = leb.Room(open(os.path.join(field, f), 'rb').read())
-        if any(a.type in GUARDS and a.key not in originals for a in room.actors):
+        if any((a.type in GUARDS or a.type in QUIET) and a.key not in originals for a in room.actors):
             rooms.append((f, room))
     if not rooms:
         return 'no copies'
@@ -58,7 +66,7 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
     kinds, copies = set(), 0
     for f, room in rooms:
         for a in room.actors:
-            if a.type in GUARDS and a.key not in originals:
+            if (a.type in GUARDS or a.type in QUIET) and a.key not in originals:
                 sw = list(a.switches)
                 sw[2] = (1, idx)
                 a.switches = sw
@@ -66,7 +74,16 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
                 copies += 1
         with open(os.path.join(field, f), 'wb') as fh:
             fh.write(room.repack())
-    for t in sorted(kinds):
+    for t in sorted(kinds & set(QUIET)):
+        name, actor, entry = QUIET[t]
+        flow = event_tools.readFlow(path(f'event/{name}'))
+        fc = flow.flowchart
+        first = event_tools.findEntryPoint(fc, entry).main_event.v.name
+        sw = event_tools.createSwitchEvent(fc, actor, 'CheckSawTheFirstEvent', {'switchIndex': 2}, {0: first})
+        event_tools.insertEventAfter(fc, entry, sw)
+        os.makedirs(os.path.join(common_out, 'event'), exist_ok=True)
+        event_tools.writeFlow(os.path.join(common_out, f'event/{name}'), flow)
+    for t in sorted(kinds & set(GUARDS)):
         name, actor, before, after, _ = GUARDS[t]
         flow = event_tools.readFlow(path(f'event/{name}'))
         fc = flow.flowchart
