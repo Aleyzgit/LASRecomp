@@ -12,7 +12,8 @@ usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir
                      [--souls] [--rooms N ...] [--triforce N] [--miniboss-freq F] [--full]
        (default: the fixed seed IDs below + 40 random option mixes with digsanity on, every logic level)
 --miniboss-freq F: every random mix randomizes enemies with mini-boss frequency F (0 - 3: Normal, 2x, 3x, All), enemy
-mode Seeded or Random; --full: each seed is also generated in full (game files, enemies and all) and must finish.
+mode Seeded or Random; --full: each seed is also generated in full (game files, enemies and all) and must finish -
+including its room-link check (room_links.py: every actor link within each room sound, else the game crashes there).
 Exit status 1 if any seed fails either check. Run it with the LAS venv's Python (third_party/LAS-Randomizer/venv).
 """
 import argparse
@@ -241,6 +242,13 @@ def run_one(job):
                                 req], env=env, capture_output=True, text=True, timeout=TIMEOUT)
         except subprocess.TimeoutExpired:
             return sid, level, f'full generation timeout ({TIMEOUT} s)', lost
+        if r.returncode == 0:  # (room links: also checked here, should the generator's own check ever be skipped)
+            sys.path.insert(0, os.path.join(HERE, '..', '..', 'third_party', 'LAS-Randomizer'))
+            from RandomizerCore.Tools import leb
+            import room_links
+            problems = room_links.check(os.path.join(tmp, 'full'), leb)
+            if problems:
+                return sid, level, f'room links broken in {len(problems)} place(s), first: {problems[0]}', lost
         if r.returncode != 0:
             tail = (r.stderr.strip().splitlines() or ['?'])[-1]
             return sid, level, f'full generation exit {r.returncode}: {tail}', lost
