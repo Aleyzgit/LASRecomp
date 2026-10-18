@@ -43,6 +43,7 @@ void backend_pool_pop(void *p);
 // (watchdog, rqueue.c) this thread is about to wait on `what` (a static string; arg: a number to show with it),
 // rq_watch(NULL, 0) when done. Cheap: a few stores into the thread's own slot.
 void rq_watch(const char *what, uint64_t arg);
+void rq_watchdog_start(void);  // (nvnDeviceInitialize; once - the render thread's start calls it too)
 
 // (pace.c, LARECOMP_LOG_PACE) per thread, since start: time in rq_wait_item / rq_drain (the game thread waiting for
 // translation), waiting for the queue's lock, and the frontend's split of the presenting thread's frame (objects.c,

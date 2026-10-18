@@ -13,10 +13,11 @@
 // of work; latency stays one frame), and the queue has a fixed size. Waits by guest threads give up while the
 // kernel stops them for a reboot (g_rt_unwind), as kernel waits do.
 //
-// Watchdog (LARECOMP_RQ_WATCHDOG=<seconds>, default 15, 0 = off): when no frame was presented that long after the
-// renderer started, presenting stops for that long, or a wait noted with rq_watch() lasts that long, the log gets
-// both sides' state ("[rq-watchdog]"): the queue (counts, the last items, the one running and for how long), what
-// each noted thread waits on and for how long, and every guest thread's kernel wait - so a hang explains itself.
+// Watchdog (LARECOMP_RQ_WATCHDOG=<seconds>, default 15, 0 = off; runs from the game's GPU device setup, render
+// thread on or off): when no frame was presented twice that long after the device setup, presenting stops for that
+// long, or a wait noted with rq_watch() lasts that long, the log gets both sides' state ("[rq-watchdog]"): the queue
+// (counts, the last items, the one running and for how long), what each noted thread waits on and for how long, and
+// every guest thread's kernel wait - so a hang explains itself.
 #include "rqueue.h"
 
 #include <pthread.h>
@@ -67,7 +68,6 @@ static _Atomic bool started;
 static _Atomic int on = -1;
 
 static void *run(void *arg);
-static void watchdog_start(void);
 static _Atomic uint64_t render_cpu_ns;
 uint64_t rq_render_cpu_ns(void) { return atomic_load_explicit(&render_cpu_ns, memory_order_relaxed); }
 
@@ -85,7 +85,10 @@ static void start(void) {
         pthread_attr_t attr;
         pthread_attr_init(&attr);
         pthread_attr_setstacksize(&attr, 16 << 20);
-        if (pthread_create(&thread, &attr, run, NULL) != 0) {
+        rq_watch("starting the render thread", 0);
+        int r = pthread_create(&thread, &attr, run, NULL);
+        rq_watch(NULL, 0);
+        if (r != 0) {
             LOG("[rq] cannot start the render thread: running on the game thread\n");
             want = 0;
         } else {
@@ -95,7 +98,7 @@ static void start(void) {
     }
     LOG("[rq] render thread %s (first asked by guest thread %llu)\n", want ? "on" : "off", (unsigned long long)asker);
     atomic_store(&on, want);
-    watchdog_start();
+    rq_watchdog_start();
 }
 
 extern uint64_t kernel_current_thread_id(void);
@@ -474,9 +477,9 @@ static void *watchdog(void *arg) {
         uint64_t f = renderer_present_count() + atomic_load(&presents_done);
         if (f != last_frames || g_rt_unwind) last_frames = f, frames_at = now, reported_stall = false;
         bool dumped = false;  // (one dump per check: it shows every wait anyway)
-        if (!f && !reported_first && now - t_start > limit) {
+        if (!f && !reported_first && now - t_start > 2 * limit) {  // (the first frame: twice the time, loading)
             reported_first = dumped = true;
-            watchdog_dump("no frame presented since the renderer started");
+            watchdog_dump("no frame presented since the GPU device was set up");
         } else if (f && !reported_stall && now - frames_at > limit) {
             reported_stall = dumped = true;
             watchdog_dump("presenting stopped");
@@ -499,10 +502,12 @@ static void *watchdog(void *arg) {
     return NULL;
 }
 
-static void watchdog_start(void) {
+static pthread_once_t wd_once = PTHREAD_ONCE_INIT;
+static void watchdog_start_once(void) {
     const char *e = getenv("LARECOMP_RQ_WATCHDOG");
     long s = e ? atol(e) : 15;
     if (s <= 0) return;
     pthread_t t;
     if (pthread_create(&t, NULL, watchdog, (void *)(uintptr_t)s) == 0) pthread_detach(t);
 }
+void rq_watchdog_start(void) { pthread_once(&wd_once, watchdog_start_once); }

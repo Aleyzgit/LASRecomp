@@ -39,6 +39,7 @@ NVN(nvnDeviceInitialize) {
     static bool once;
     if (!once) {
         once = true;
+        rq_watchdog_start();  // (before anything of the renderer can hang: rqueue.c)
         backend_init();
         extern void shader_prep_boot(const char *romfs);
         shader_prep_boot(g_romfs_dir);  // (LARECOMP_SHADER_PREP=1, tests: what the start screen's setup does)
