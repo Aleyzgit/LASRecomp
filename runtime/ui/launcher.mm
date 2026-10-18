@@ -332,6 +332,7 @@ static void build_progress(double f, const char *step) {
 // Shader preparation, after the game files are ready (runtime/nvn/shader_prep.h): its own bar, and Skip
 static std::atomic<float> g_prep_frac{-1};  // -1: not preparing
 static volatile int g_prep_skip;
+static bool g_prep_skip_ask;  // Skip pressed: "are you sure?" in front of the bar (LARECOMP_LAUNCHER_SHOT=<f>:skipask)
 static void prep_progress(int done, int total) { g_prep_frac = total ? (float)done / (float)total : 0.0f; }
 static void prepare_shaders(bool background = false) {
     g_prep_skip = 0, g_prep_frac = 0;
@@ -912,13 +913,43 @@ static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy,
         ImVec2 ks = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, sk);
         ImVec2 ka((a.x + b.x - ks.x) * 0.5f - 22 * sc, b.y - 40 * sc - line_h - 10 * sc);
         ImVec2 kb(ka.x + ks.x + 44 * sc, ka.y + line_h + 16 * sc);
-        bool hover = !g_prep_skip && ImGui::IsMouseHoveringRect(ka, kb, false);
+        bool hover = !g_prep_skip && !g_prep_skip_ask && ImGui::IsMouseHoveringRect(ka, kb, false);
         fg->AddRect(ka, kb, IM_COL32(236, 194, 84, hover ? 255 : 140), 8 * sc, 0, 1.5f * sc);
         fg->AddText(g_font_small, sfs, ImVec2(ka.x + 22 * sc, ka.y + 8 * sc),
                     hover ? IM_COL32(236, 194, 84, 255) : IM_COL32(220, 216, 205, 255), sk);
-        if ((hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
-            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))
-            g_prep_skip = 1;
+        if (!g_prep_skip && !g_prep_skip_ask &&
+            ((hover && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) ||
+             ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+            g_prep_skip_ask = true;
+    }
+    if (preparing && g_prep_skip_ask && !g_prep_skip) {  // what Skip means, before it happens
+        const char *q = "Shaders will compile as you play, but you may experience some pop-in.";
+        const char *yes = "Yes, skip", *no = "No, wait";
+        ImVec2 qs = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, q);
+        ImVec2 ys = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, yes), ns = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, no);
+        float bw = fmaxf(ys.x, ns.x) + 64 * sc, bh = line_h + 20 * sc, gap = 24 * sc;
+        float qw = fminf(fmaxf(qs.x, 2 * bw + gap) + 96 * sc, ds.x - 32 * sc), qh = 40 * sc + line_h + 32 * sc + bh + 36 * sc;
+        fg->AddRectFilled(a, b, IM_COL32(0, 0, 0, 120), 14 * sc);  // (the bar behind it dimmed)
+        ImVec2 qa(o.x + (ds.x - qw) * 0.5f, o.y + (ds.y - qh) * 0.5f), qb(qa.x + qw, qa.y + qh);
+        fg->AddRectFilled(qa, qb, IM_COL32(15, 23, 20, 255), 14 * sc);
+        fg->AddRect(qa, qb, IM_COL32(236, 194, 84, 200), 14 * sc, 0, 1.5f * sc);
+        fg->AddText(g_font_small, sfs, ImVec2((qa.x + qb.x - qs.x) * 0.5f, qa.y + 40 * sc), IM_COL32(236, 232, 220, 255), q);
+        float by = qb.y - 36 * sc - bh, bx = (qa.x + qb.x) * 0.5f;
+        ImVec2 ya(bx - gap * 0.5f - bw, by), yb(bx - gap * 0.5f, by + bh), na(bx + gap * 0.5f, by), nb(bx + gap * 0.5f + bw, by + bh);
+        bool hy = ImGui::IsMouseHoveringRect(ya, yb, false), hn = ImGui::IsMouseHoveringRect(na, nb, false);
+        fg->AddRect(ya, yb, IM_COL32(236, 194, 84, hy ? 255 : 140), 8 * sc, 0, 1.5f * sc);
+        fg->AddRectFilled(na, nb, IM_COL32(236, 194, 84, hn ? 255 : 210), 8 * sc);  // (waiting: the default)
+        fg->AddText(g_font_small, sfs, ImVec2((ya.x + yb.x - ys.x) * 0.5f, ya.y + 10 * sc),
+                    hy ? IM_COL32(236, 194, 84, 255) : IM_COL32(220, 216, 205, 255), yes);
+        fg->AddText(g_font_small, sfs, ImVec2((na.x + nb.x - ns.x) * 0.5f, na.y + 10 * sc), IM_COL32(15, 23, 20, 255), no);
+        bool click = ImGui::IsMouseClicked(ImGuiMouseButton_Left);
+        // A / Enter: the highlighted default (wait); B / Esc: also wait; Yes only by clicking it or Y / Space
+        if ((hy && click) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceUp, false) || ImGui::IsKeyPressed(ImGuiKey_Space, false))
+            g_prep_skip = 1, g_prep_skip_ask = false;
+        else if ((hn && click) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||
+                 ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                 ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+            g_prep_skip_ask = false;
     }
 }
 
@@ -1082,6 +1113,7 @@ extern "C" void launcher_run(const char *root) {
         if (pg && (!strncmp(pg + 1, "settings", 8) || !strcmp(pg + 1, "askdelete"))) page = SETTINGS, menu_tabs_focus(true);
         if (pg && !strcmp(pg + 1, "setup")) page = SETUP;
         if (pg && !strcmp(pg + 1, "preparing")) page = SETUP, g_prep_frac = 0.42f, set_job("Preparing shaders");
+        if (pg && !strcmp(pg + 1, "skipask")) page = SETUP, g_prep_frac = 0.42f, set_job("Preparing shaders"), g_prep_skip_ask = true;
         if (pg && !strncmp(pg + 1, "fail", 4)) page = SETUP, set_failure(atoi(pg + 5));  // (the failure messages)
         if (pg && !strncmp(pg + 1, "settings", 8) && pg[9] == ':') g_tab_request_ext = atoi(pg + 10);  // settings:<tab>
         if (pg && !strcmp(pg + 1, "delete")) page = SETUP, g_confirm_delete = true;
@@ -1603,7 +1635,8 @@ extern "C" void launcher_run(const char *root) {
                     page = MAIN, g_refocus = SETUP;
                 }
                 static bool test_busy = getenv("LARECOMP_LAUNCHER_SHOT") && (strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":extracting") ||
-                                                                         strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":preparing"));
+                                                                         strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":preparing") ||
+                                                                         strstr(getenv("LARECOMP_LAUNCHER_SHOT"), ":skipask"));
                 if (busy || test_busy) draw_busy_overlay(ds, job, test_busy);  // (everything dimmed, a bar in front)
             }
 
