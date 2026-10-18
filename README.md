@@ -167,6 +167,8 @@ Vulkan Memory Allocator from your distribution, Python 3.12. Packages, cross bui
 Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - macOS app: `~/Library/Application Support/com.peiikai.lasrecomp/` (the app itself is never written to).
 - Windows: next to `lasrecomp.exe`, so put the `LAS Recomp` folder somewhere writable (not Program Files).
+  Launches without a terminal write a separate `lasrecomp-<pid>.log` for each session; starting the game from the
+  launcher continues that session's log.
 - Linux: `~/.local/share/lasrecomp/` (`$XDG_DATA_HOME/lasrecomp`); the log is `lasrecomp.log` there when started
   without a terminal.
 - Dev / portable mode: if the folder you start from has `extracted/` (a source checkout), that folder is used, as above.

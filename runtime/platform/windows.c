@@ -122,7 +122,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 }
 
 // ---- process
-// Release builds are GUI-subsystem executables (no console window): stdout / stderr go to lasrecomp.log next to the
+// Release builds are GUI-subsystem executables (no console window): stdout / stderr go to lasrecomp-<pid>.log next to the
 // exe, and a fatal error shows a message box (plat_fatal_notice) instead of vanishing. Processes started by this one
 // (the start screen re-executing itself for the game) append to the same log.
 static char g_log_path[MAX_PATH];
@@ -134,12 +134,23 @@ static void log_to_file_without_console(void) {
     if (!n || n >= sizeof exe) return;
     char *slash = strrchr(exe, '\\');
     if (slash) slash[1] = 0;
-    snprintf(g_log_path, sizeof g_log_path, "%slasrecomp.log", exe);
+    const char *inherited = getenv("LASRECOMP_LOG_FILE");
+    int used = inherited && *inherited ? snprintf(g_log_path, sizeof g_log_path, "%s", inherited)
+                                     : snprintf(g_log_path, sizeof g_log_path, "%slasrecomp-%lu.log", exe,
+                                                (unsigned long)GetCurrentProcessId());
+    if (used < 0 || (size_t)used >= sizeof g_log_path) { g_log_path[0] = 0; return; }
     bool append = getenv("LASRECOMP_LOG_APPEND") != NULL;
-    if (!freopen(g_log_path, append ? "ab" : "wb", stderr)) { g_log_path[0] = 0; return; }
+    if (!append) {
+        FILE *fresh = fopen(g_log_path, "wb");
+        if (!fresh) { g_log_path[0] = 0; return; }
+        fclose(fresh);
+    }
+    // The launcher may log again after its child starts; both writers must append.
+    if (!freopen(g_log_path, "ab", stderr)) { g_log_path[0] = 0; return; }
     setvbuf(stderr, NULL, _IONBF, 0);
     _dup2(_fileno(stderr), _fileno(stdout));
     _putenv("LASRECOMP_LOG_APPEND=1");
+    _putenv_s("LASRECOMP_LOG_FILE", g_log_path);
 }
 
 // The recompiled game code is built for x86-64-v3 (Makefile GENARCH: AVX2, FMA, BMI2): say so instead of crashing
