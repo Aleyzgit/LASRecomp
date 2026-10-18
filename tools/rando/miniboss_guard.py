@@ -23,7 +23,68 @@ GUARDS = {
 QUIET = {
     0x61: ('BossBlob.bfevfl', 'BossBlob', 'BossBlobNoDamage'),
 }
+# Copies' deaths (user 2026-10-18): a mini-boss's <Name>End event turns the camera to it (LookAtGimmick), hides the
+# HUD, stops the music, opens its arena's doors and autosaves - and, as any event, holds Link. A copy (switch 2 = the
+# marker) takes a short path instead: its death effect (PlayTailorOtherChannelEx, as the original's), its item drop and
+# hiding its model, with no camera, HUD, music, door, autosave or wait - the event ends at once, Link keeps control and
+# the camera stays on him. The original in its own room plays the whole event as before. Shadow Link's end only looks
+# at him: a copy's ends at once. Master Stalfos is left out: his switch 2 is his own (which of his four fights).
+# type -> (event flow, actor name in it, entry point)
+DEATH = {
+    0x53: ('Hinox.bfevfl', 'Hinox', 'HinoxEnd'),
+    0x51: ('Rola.bfevfl', 'Rola', 'RolaEnd'),
+    0x56: ('Dodongo.bfevfl', 'Dodongo', 'DodongoEnd'),
+    0x61: ('BossBlob.bfevfl', 'BossBlob', 'BossBlobEnd'),
+    0x5B: ('DeguArmos.bfevfl', 'DeguArmos', 'DeguArmosEnd'),
+    0x57: ('Lanmola.bfevfl', 'Lanmola', 'LanmolaEnd'),
+    0x52: ('Bossblin.bfevfl', 'Bossblin', 'BossblinEnd'),
+    0x5F: ('MightPunch.bfevfl', 'MightPunch', 'MightPunchEnd'),
+    0x5C: ('Jacky.bfevfl', 'Jacky', 'JackyEnd'),
+    0x60: ('StoneHinox.bfevfl', 'StoneHinox', 'StoneHinoxEnd'),
+    0x58: ('HiploopHover.bfevfl', 'HiploopHover', 'HiploopHoverEnd'),
+    0x21E: ('ShadowLink.bfevfl', 'ShadowLink', 'ShadowLinkEnd'),
+}
+ANYWHERE = {0x21E}  # (also a plain enemy in dungeons, caves and houses: copies there too)
+MARKED = set(GUARDS) | set(QUIET) | set(DEATH)
 MARKER = 'OverworldMinibossMarker'
+
+
+def _reachable(fc, entry_event):
+    seen, stack = {}, [entry_event]
+    while stack:
+        ev = stack.pop()
+        if ev is None or ev.name in seen:
+            continue
+        seen[ev.name] = ev
+        d = ev.data
+        kind = type(d).__name__
+        if kind in ('ActionEvent', 'JoinEvent', 'SubFlowEvent'):
+            stack.append(d.nxt.v)
+        elif kind == 'SwitchEvent':
+            stack += [c.v for c in d.cases.values()]
+        elif kind == 'ForkEvent':
+            stack += [f.v for f in d.forks] + [d.join.v]
+    return seen.values()
+
+
+def death_path(event_tools, fc, actor, entry):
+    """The copy's short end: (the original's) death effect, item drop, model hidden. Returns its first event or None."""
+    ep = event_tools.findEntryPoint(fc, entry)
+    first = {}
+    for ev in _reachable(fc, ep.main_event.v):
+        d = ev.data
+        if type(d).__name__ != 'ActionEvent' or d.actor.v.identifier.name != actor:
+            continue
+        act, params = d.actor_action.v.v, dict(d.params.data) if d.params else {}
+        if act == 'ModelVisibility' and params.get('visible', True):
+            continue
+        if act in ('PlayTailorOtherChannelEx', 'BossItemDrop', 'ModelVisibility') and act not in first:
+            first[act] = params
+    nxt = None
+    for act in ('ModelVisibility', 'BossItemDrop', 'PlayTailorOtherChannelEx'):  # (built back to front)
+        if act in first:
+            nxt = event_tools.createActionEvent(fc, actor, act, first[act], nxt)
+    return nxt
 
 
 def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
@@ -40,14 +101,18 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
             continue
         van = leb.Room(open(os.path.join(common_in, 'level', 'Field', f'{room_name}.leb'), 'rb').read())
         originals |= {a.key for a in van.actors if a.type == t}
-    field = os.path.join(common_out, 'level', 'Field')
+    levels = os.path.join(common_out, 'level')
     rooms = []
-    for f in sorted(os.listdir(field)) if os.path.isdir(field) else []:
-        if not f.endswith('.leb'):
+    for lv in sorted(os.listdir(levels)) if os.path.isdir(levels) else []:
+        if not os.path.isdir(os.path.join(levels, lv)) or lv.startswith('Panel'):  # (Dampe's chamber: his own)
             continue
-        room = leb.Room(open(os.path.join(field, f), 'rb').read())
-        if any((a.type in GUARDS or a.type in QUIET) and a.key not in originals for a in room.actors):
-            rooms.append((f, room))
+        types = MARKED if lv == 'Field' else ANYWHERE
+        for f in sorted(os.listdir(os.path.join(levels, lv))):
+            if not f.endswith('.leb'):
+                continue
+            room = leb.Room(open(os.path.join(levels, lv, f), 'rb').read())
+            if any(a.type in types and a.key not in originals for a in room.actors):
+                rooms.append((os.path.join(levels, lv, f), room, types))
     if not rooms:
         return 'no copies'
     # the marker flag (after every other flag: existing indices stay)
@@ -64,15 +129,15 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
         oead_tools.writeSheet(os.path.join(common_out, rel), sheet)
     settings['miniboss-marker-flag'] = idx
     kinds, copies = set(), 0
-    for f, room in rooms:
+    for f, room, types in rooms:
         for a in room.actors:
-            if (a.type in GUARDS or a.type in QUIET) and a.key not in originals:
+            if a.type in types and a.key not in originals:
                 sw = list(a.switches)
                 sw[2] = (1, idx)
                 a.switches = sw
                 kinds.add(a.type)
                 copies += 1
-        with open(os.path.join(field, f), 'wb') as fh:
+        with open(f, 'wb') as fh:
             fh.write(room.repack())
     for t in sorted(kinds & set(QUIET)):
         name, actor, entry = QUIET[t]
@@ -80,6 +145,17 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
         fc = flow.flowchart
         first = event_tools.findEntryPoint(fc, entry).main_event.v.name
         sw = event_tools.createSwitchEvent(fc, actor, 'CheckSawTheFirstEvent', {'switchIndex': 2}, {0: first})
+        event_tools.insertEventAfter(fc, entry, sw)
+        os.makedirs(os.path.join(common_out, 'event'), exist_ok=True)
+        event_tools.writeFlow(os.path.join(common_out, f'event/{name}'), flow)
+    for t in sorted(kinds & set(DEATH)):
+        name, actor, entry = DEATH[t]
+        flow = event_tools.readFlow(path(f'event/{name}'))
+        fc = flow.flowchart
+        first = event_tools.findEntryPoint(fc, entry).main_event.v.name
+        short = death_path(event_tools, fc, actor, entry)
+        sw = event_tools.createSwitchEvent(fc, actor, 'CheckSawTheFirstEvent', {'switchIndex': 2},
+                                           {0: first, 1: short} if short else {0: first})
         event_tools.insertEventAfter(fc, entry, sw)
         os.makedirs(os.path.join(common_out, 'event'), exist_ok=True)
         event_tools.writeFlow(os.path.join(common_out, f'event/{name}'), flow)

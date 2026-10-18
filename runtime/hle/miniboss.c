@@ -213,7 +213,8 @@ static void force_tick(Cpu *c, uint64_t frame) {
 
 // A copy of a mini-boss whose flow gives a check (Lanmola, Armos Knight) skips the item when its switch 2 - the seed's
 // OverworldMinibossMarker flag (settings.json "miniboss-marker-flag", tools/rando/miniboss_guard.py) - is set: set
-// every frame on the Field (an Armos Knight copy fights on its own, nothing wakes it). The originals have no switch 2
+// every frame in a seed (an Armos Knight copy fights on its own, nothing wakes it). Copies also take a short death
+// path on it (no camera, HUD, music or doors: Link keeps control) and a Giant Buzz Blob copy skips its sword hint. The originals have no switch 2
 // set: they give it as before. Written through the flag object (main+0x1CC1388, its byte capacity +0x1CC1390): the
 // flag may be past the game's 2048 (runtime/hle/flags_ext.c).
 static int g_marker = -2;
@@ -452,13 +453,13 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
     extern const char *rando_seed_dir(void);
     if (!rando_seed_dir()) return;  // (only seeds put mini-bosses on the Field)
     shadow_link_tick(c, frame);  // (any level: Shadow Link is a plain enemy in dungeons too)
+    miniboss_marker_set();       // (any level: his copies there have the marker on switch 2 too)
     uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
     if (!ps || strcmp((const char *)(uintptr_t)ps, "Field")) return;  // (dungeon arenas start their own)
     uint64_t pc = doorjump_player(frame);
     if (!pc) return;
     const float *lp = (const float *)(uintptr_t)(pc + 0x80);
     memcpy(g_link, lp, sizeof g_link), g_have_link = true;
-    miniboss_marker_set();
     for (int i = 0; i < MAX_SEEN; i++) {
         Seen *s = &g_seen[i];
         if (!s->obj || frame - s->last > 2 || frame - s->first < 30 || LD64(s->obj) != g_kinds[s->kind].vt) continue;
