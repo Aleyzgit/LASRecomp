@@ -20,6 +20,7 @@
 #include "vk.h"
 #include "../renderer.h"
 #include "../pace.h"
+#include "../shader_prep.h"
 #include "../../settings.h"
 
 static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wait_ns, stat_flushes, stat_feedback_copies;
@@ -2588,6 +2589,10 @@ static CsProg *compute_program(NvnProgram *np) {
         cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!cp->local[i]) cp->local[i] = 1;
     }
+    if (shader_rec_recording()) {
+        ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {cp->local[0], cp->local[1], cp->local[2]}};
+        shader_rec_note(&rec);
+    }
     save_glsl(cp->si->msl, ss->code_addr, "cs");
     run_job(build_compute, cp);
     return cp;
@@ -2672,6 +2677,40 @@ static bool topology(uint32_t mode, VkPrimitiveTopology *t, uint8_t *cls) {
     case 5: *t = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP; *cls = 2; return true;
     default: *t = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST; *cls = 2; return false;
     }
+}
+
+// The draw's state as a variant record (shader_prep.h; as renderer.m: both backends record the same lines)
+static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
+    memset(r, 0, sizeof *r);
+    r->kind = 'G';
+    r->vs = shader_stage_hash(&st.program->stages[0]);
+    r->fs = shader_stage_hash(&st.program->stages[1]);
+    r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0);
+    r->nattrib = (uint8_t)(st.nattrib < 16 ? st.nattrib : 16);
+    memcpy(r->attrib, st.attrib, sizeof r->attrib[0] * r->nattrib);
+    r->nstream = (uint8_t)(st.nstream < 16 ? st.nstream : 16);
+    memcpy(r->stream, st.stream, sizeof r->stream[0] * r->nstream);
+    r->ncolor = (uint8_t)(st.rt.ncolor < 8 ? st.rt.ncolor : 8);
+    r->samples = 1;
+    for (int i = 0; i < r->ncolor; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        r->color[i] = t->format;
+        if (st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4)) r->cview[i] = st.rt.cview[i].format;
+        if (t->samples > 1) r->samples = t->samples;
+        r->channel_mask |= st.channel_mask & (0xFu << (i * 4));
+        if (((st.color_state[0] >> i) & 1) && !rt_kind(t->format)) {
+            r->blend_on |= (uint8_t)(1u << i);
+            memcpy(r->blend[i], st.blend[i], 8);
+        }
+    }
+    if (st.rt.depth) {
+        r->depth = st.rt.depth->format;
+        if (!r->ncolor && st.rt.depth->samples > 1) r->samples = st.rt.depth->samples;
+    }
+    r->a2c = st.ms[0xC] != 0;
+    r->topo = shader_topo_class(mode);
+    r->poly_fill = st.poly[2] != 1;
 }
 
 static void draw_(CmdRec *r, bool indexed);
@@ -2806,6 +2845,11 @@ static void draw_(CmdRec *r, bool indexed) {
     while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
     Pipe *pp = pipe_tab[pslot].pipe;
     if (!pp) {
+        if (shader_rec_recording()) {
+            ShaderRec rec;
+            rec_from_state(&rec, vkey.flip_x, mode);
+            shader_rec_note(&rec);
+        }
         pp = calloc(1, sizeof *pp);
         pp->k = k;
         pipe_tab[pslot].key = ph;

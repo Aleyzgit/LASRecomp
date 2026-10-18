@@ -15,6 +15,7 @@
 #include "nvn.h"
 #include "renderer.h"
 #include "pace.h"
+#include "shader_prep.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandBuffer> cmdbuf;
@@ -1505,6 +1506,10 @@ static CsProg *compute_program(NvnProgram *p) {
         cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!cp->local[i]) cp->local[i] = 1;
     }
+    if (shader_rec_recording()) {
+        ShaderRec rec = {.kind = 'C', .vs = shader_stage_hash(ss), .local = {cp->local[0], cp->local[1], cp->local[2]}};
+        shader_rec_note(&rec);
+    }
     if (sync_shaders()) {
         compile_compute(cp);
         return cp->failed ? NULL : cp;
@@ -1758,6 +1763,40 @@ static uint64_t pipeline_state_hash(Prog *pr) {
     return h ? h : 1;
 }
 
+// The draw's state as a variant record (shader_prep.h): what its program and pipeline depend on, in NVN terms
+static void rec_from_state(ShaderRec *r, bool flip_x, uint32_t mode) {
+    memset(r, 0, sizeof *r);
+    r->kind = 'G';
+    r->vs = shader_stage_hash(&st.program->stages[0]);
+    r->fs = shader_stage_hash(&st.program->stages[1]);
+    r->flags = (nvn_window_origin() == 0 ? SR_FLIP_Y : 0) | (nvn_depth_mode() == 0 ? SR_DEPTH_MINUS_ONE : 0) | (flip_x ? SR_FLIP_X : 0);
+    r->nattrib = (uint8_t)(st.nattrib < 16 ? st.nattrib : 16);
+    memcpy(r->attrib, st.attrib, sizeof r->attrib[0] * r->nattrib);
+    r->nstream = (uint8_t)(st.nstream < 16 ? st.nstream : 16);
+    memcpy(r->stream, st.stream, sizeof r->stream[0] * r->nstream);
+    r->ncolor = (uint8_t)(st.rt.ncolor < 8 ? st.rt.ncolor : 8);
+    r->samples = 1;
+    for (int i = 0; i < r->ncolor; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        r->color[i] = t->format;
+        if (st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4)) r->cview[i] = st.rt.cview[i].format;
+        if (t->samples > 1) r->samples = t->samples;
+        r->channel_mask |= st.channel_mask & (0xFu << (i * 4));
+        if (((st.color_state[0] >> i) & 1) && !rt_kind(t->format)) {
+            r->blend_on |= (uint8_t)(1u << i);
+            memcpy(r->blend[i], st.blend[i], 8);
+        }
+    }
+    if (st.rt.depth) {
+        r->depth = st.rt.depth->format;
+        if (!r->ncolor && st.rt.depth->samples > 1) r->samples = st.rt.depth->samples;
+    }
+    r->a2c = st.ms[0xC] != 0;
+    r->topo = shader_topo_class(mode);
+    r->poly_fill = st.poly[2] != 1;
+}
+
 static void draw(CmdRec *r, bool indexed) {
     if (!st.program) { stat_skipped++; return; }
     static bool logged_modes;
@@ -1950,6 +1989,11 @@ static void draw(CmdRec *r, bool indexed) {
         if (pobj == pending) { stat_skipped++; return; }
     }
     if (!pobj) {
+        if (shader_rec_recording()) {
+            ShaderRec rec;
+            rec_from_state(&rec, vkey.flip_x, (uint32_t)r->x[0]);
+            shader_rec_note(&rec);
+        }
         if (sync_shaders()) {
             NSError *err;
             pobj = TIMED_COMPILE([dev newRenderPipelineStateWithDescriptor:pd error:&err]);
