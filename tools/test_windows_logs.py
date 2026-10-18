@@ -24,29 +24,49 @@ static BOOL hard_link(const char *link, const char *source, LPSECURITY_ATTRIBUTE
     return CreateHardLinkA(link, source, security);
 }
 #define CreateHardLinkA hard_link
+static HANDLE create_file(const char *path, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES security,
+                          DWORD disposition, DWORD flags, HANDLE template) {
+    bool collision = disposition == CREATE_NEW && getenv("TEST_LOG_TIME_COLLISION");
+    HANDLE file = CreateFileA(path, access | (collision ? FILE_WRITE_ATTRIBUTES : 0), share, security, disposition, flags, template);
+    if (file != INVALID_HANDLE_VALUE && collision) {
+        FILETIME same = {.dwLowDateTime = 1, .dwHighDateTime = 1};
+        if (!SetFileTime(file, &same, NULL, NULL)) exit(11);
+    }
+    return file;
+}
+#define CreateFileA create_file
 ''' + logging + r'''
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     bool console = !strcmp(argv[1], "console");
+    bool handoff = !strcmp(argv[1], "handoff");
     // Model a GUI launch without a console while keeping the test runner's own handles untouched.
-    if (!console) SetStdHandle(STD_ERROR_HANDLE, NULL);
+    if (!console && strcmp(argv[1], "child-inherited")) SetStdHandle(STD_ERROR_HANDLE, NULL);
     log_to_file_without_console();
     if (!strcmp(argv[1], "reject")) return g_log_path[0] ? 3 : 0;
     if (console ? g_log_path[0] != 0 : g_log_path[0] == 0) return 4;
     if (fprintf(stdout, "stdout:%s\n", argv[1]) < 0 || fflush(stdout)) return 9;
     if (fprintf(stderr, "stderr:%s\n", argv[1]) < 0 || fflush(stderr)) return 10;
-    if (!strcmp(argv[1], "parent")) {
-        char exe[MAX_PATH], command[MAX_PATH + 20];
+    if (!strcmp(argv[1], "parent") || handoff) {
+        char exe[MAX_PATH], command[MAX_PATH + 32];
         if (!GetModuleFileNameA(NULL, exe, sizeof exe)) return 5;
-        snprintf(command, sizeof command, "\"%s\" child", exe);
+        snprintf(command, sizeof command, "\"%s\" %s", exe, handoff ? "child-inherited" : "child");
         STARTUPINFOA startup = {.cb = sizeof startup};
+        if (handoff) {
+            startup.dwFlags = STARTF_USESTDHANDLES;
+            startup.hStdOutput = (HANDLE)_get_osfhandle(_fileno(stdout));
+            startup.hStdError = (HANDLE)_get_osfhandle(_fileno(stderr));
+            SetHandleInformation(startup.hStdOutput, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+            SetHandleInformation(startup.hStdError, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+        }
         PROCESS_INFORMATION child = {0};
-        if (!CreateProcessA(NULL, command, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &startup, &child)) return 6;
+        if (!CreateProcessA(NULL, command, NULL, NULL, handoff, CREATE_NO_WINDOW, NULL, NULL, &startup, &child)) return 6;
         DWORD waited = WaitForSingleObject(child.hProcess, 10000), status = 7;
         if (waited == WAIT_TIMEOUT) TerminateProcess(child.hProcess, 8);
         GetExitCodeProcess(child.hProcess, &status);
         CloseHandle(child.hThread); CloseHandle(child.hProcess);
         if (waited != WAIT_OBJECT_0 || status) return 7;
+        if (handoff) ExitProcess(0);  // Relaunch bypasses the parent's atexit publisher.
         fprintf(stderr, "parent-after-child\n");
     } else if (!strncmp(argv[1], "independent", 11)) Sleep(500);
     else if (!strcmp(argv[1], "hold")) {
@@ -83,7 +103,14 @@ with tempfile.TemporaryDirectory(prefix='windows-logs-', dir=build) as directory
         assert process.returncode == 0, (process.returncode, out, err)
         return out, err
 
-    processes = [start(f'independent-{i}') for i in range(2)]
+    def session_lines(log):
+        lines = log.read_text().splitlines()
+        assert lines and lines[0] == f'[session] {log.name}', (log.name, lines)
+        return lines[1:]
+
+    # Filesystems and Windows timer resolutions can give simultaneous runs the
+    # same creation time. Neither run may publish over the other one's log.
+    processes = [start(f'independent-{i}', env | {'TEST_LOG_TIME_COLLISION':'1'}) for i in range(2)]
     try:
         for process in processes: finish(process)
     finally:
@@ -92,12 +119,12 @@ with tempfile.TemporaryDirectory(prefix='windows-logs-', dir=build) as directory
     for i, process in enumerate(processes):
         log, = temporary.glob(f'lasrecomp-backup-*-{process.pid}.log')
         assert log.exists(), 'Independent GUI launches did not get separate logs'
-        lines = log.read_text().splitlines()
+        lines = session_lines(log)
         assert lines == [f'stdout:independent-{i}', f'stderr:independent-{i}'], (log.name, lines)
 
     parent = start('parent'); finish(parent)
     parent_log, = temporary.glob(f'lasrecomp-backup-*-{parent.pid}.log')
-    lines = parent_log.read_text().splitlines()
+    lines = session_lines(parent_log)
     assert lines == ['stdout:parent', 'stderr:parent', 'stdout:child', 'stderr:child', 'parent-after-child'], lines
     assert len(list(temporary.glob('lasrecomp-*.log'))) == 3, 'Relaunch created another log'
     assert (temporary/'lasrecomp.log').read_bytes() == parent_log.read_bytes()
@@ -116,7 +143,7 @@ with tempfile.TemporaryDirectory(prefix='windows-logs-', dir=build) as directory
                             creationflags=subprocess.CREATE_NO_WINDOW)
     finish(bare)
     bare_log, = temporary.glob(f'lasrecomp-backup-*-{bare.pid}.log')
-    lines = bare_log.read_text().splitlines()
+    lines = session_lines(bare_log)
     assert lines == ['stdout:bare-gui', 'stderr:bare-gui'], (bare_log.name, lines)
     assert (temporary/'lasrecomp.log').read_bytes() == bare_log.read_bytes()
 
@@ -153,7 +180,7 @@ with tempfile.TemporaryDirectory(prefix='windows-logs-', dir=build) as directory
         if live.poll() is None: release(live, live_log)
 
     # FAT/exFAT fallback copies on exit and still chooses by launch order.
-    fallback_env = env | {'TEST_NO_HARDLINK':'1'}
+    fallback_env = env | {'TEST_NO_HARDLINK':'1', 'TEST_LOG_TIME_COLLISION':'1'}
     old, old_log = held(fallback_env)
     try:
         finish(start('fallback-newest', fallback_env))
@@ -163,6 +190,12 @@ with tempfile.TemporaryDirectory(prefix='windows-logs-', dir=build) as directory
         assert (temporary/'lasrecomp.log').read_bytes() == latest
     finally:
         if old.poll() is None: release(old, old_log)
+    # The relaunched game inherits valid handles and must publish on its own;
+    # the launcher exits through ExitProcess, without invoking atexit.
+    handoff = start('handoff', fallback_env); finish(handoff)
+    handoff_log, = temporary.glob(f'lasrecomp-backup-*-{handoff.pid}.log')
+    assert session_lines(handoff_log) == ['stdout:handoff', 'stderr:handoff', 'stdout:child-inherited', 'stderr:child-inherited']
+    assert (temporary/'lasrecomp.log').read_bytes() == handoff_log.read_bytes()
     # Legacy per-PID names are pruned too; another tool's log must be preserved.
     for i in range(10): (temporary/f'lasrecomp-{100+i}.log').write_text('legacy')
     foreign=temporary/'lasrecomp-custom.log'; foreign.write_text('keep me')

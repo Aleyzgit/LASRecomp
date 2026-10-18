@@ -125,7 +125,7 @@ void plat_thread_realtime(uint64_t period_ns) {
 // GUI launches keep their own append-only log; lasrecomp.log names the latest run, with five recent backups.
 // A launcher and the game it starts share one session, so another launch cannot truncate either writer.
 static char g_log_path[MAX_PATH], g_log_latest[MAX_PATH];
-static FILETIME g_log_created;
+static char g_log_tag[MAX_PATH + 16];
 static HANDLE g_log_mutex;
 
 static bool lock_logs(void) {
@@ -163,13 +163,24 @@ static void keep_legacy_log(const char *dir) {
     WIN32_FILE_ATTRIBUTE_DATA old;
     if (!GetFileAttributesExA(g_log_latest, GetFileExInfoStandard, &old) ||
         old.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) return;
+    // The fallback copy has its own creation time, but still names the original session in its first line.
+    char old_tag[MAX_PATH + 16] = {0};
+    HANDLE old_file = CreateFileA(g_log_latest, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                  NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (old_file != INVALID_HANDLE_VALUE) {
+        DWORD got;
+        ReadFile(old_file, old_tag, sizeof old_tag - 1, &got, NULL); CloseHandle(old_file);
+    }
     char path[MAX_PATH];
     snprintf(path, sizeof path, "%slasrecomp-backup-*.log", dir);
     WIN32_FIND_DATAA data;
     HANDLE find = FindFirstFileA(path, &data);
     bool kept = false;
     if (find != INVALID_HANDLE_VALUE) {
-        do { kept |= !CompareFileTime(&data.ftCreationTime, &old.ftCreationTime); }
+        do {
+            char tag[MAX_PATH + 16]; snprintf(tag, sizeof tag, "[session] %s\n", data.cFileName);
+            kept |= !strncmp(old_tag, tag, strlen(tag)) || !CompareFileTime(&data.ftCreationTime, &old.ftCreationTime);
+        }
         while (!kept && FindNextFileA(find, &data));
         FindClose(find);
     }
@@ -210,17 +221,19 @@ static void prune_logs(const char *dir) {
 }
 
 // NTFS can give the newest session both names, keeping lasrecomp.log current even after a crash. On filesystems
-// without hard links, copy on exit instead. Comparing creation times prevents an older session exiting last
-// from replacing a newer run's report. The startup mutex also covers this replacement.
+// without hard links, copy on exit instead. The unique session header identifies who owns the latest report;
+// creation times can collide for simultaneous launches. The startup mutex also covers this replacement.
 static void publish_log(void) {
     if (!g_log_path[0] || !lock_logs()) return;
     fflush(stdout); fflush(stderr);
-    HANDLE latest = CreateFileA(g_log_latest, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    HANDLE latest = CreateFileA(g_log_latest, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                 NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     BY_HANDLE_FILE_INFORMATION current, session;
     HANDLE source = (HANDLE)_get_osfhandle(_fileno(stderr));
-    bool copy = latest != INVALID_HANDLE_VALUE && GetFileInformationByHandle(latest, &current) &&
-                GetFileInformationByHandle(source, &session) && !CompareFileTime(&current.ftCreationTime, &g_log_created) &&
+    char tag[sizeof g_log_tag]; DWORD got = 0;
+    bool copy = latest != INVALID_HANDLE_VALUE && ReadFile(latest, tag, strlen(g_log_tag), &got, NULL) &&
+                got == strlen(g_log_tag) && !memcmp(tag, g_log_tag, got) && GetFileInformationByHandle(latest, &current) &&
+                GetFileInformationByHandle(source, &session) &&
                 (current.dwVolumeSerialNumber != session.dwVolumeSerialNumber || current.nFileIndexHigh != session.nFileIndexHigh ||
                  current.nFileIndexLow != session.nFileIndexLow);
     if (latest != INVALID_HANDLE_VALUE) CloseHandle(latest);
@@ -230,8 +243,11 @@ static void publish_log(void) {
 
 static void log_to_file_without_console(void) {
     // An inherited pipe/file (tools, terminal) is already somewhere useful. Only the GUI launch needs redirecting.
+    // A relaunched game must still join its GUI session and publish its fallback copy on exit.
+    const char *inherited = getenv("LASRECOMP_LOG_FILE");
+    bool fresh = !inherited || !*inherited;
     HANDLE err = GetStdHandle(STD_ERROR_HANDLE);
-    if (err && err != INVALID_HANDLE_VALUE && GetFileType(err) != FILE_TYPE_UNKNOWN) return;
+    if (fresh && err && err != INVALID_HANDLE_VALUE && GetFileType(err) != FILE_TYPE_UNKNOWN) return;
     char dir[MAX_PATH];
     DWORD n = GetModuleFileNameA(NULL, dir, sizeof dir);
     if (!n || n >= sizeof dir) return;
@@ -244,8 +260,6 @@ static void log_to_file_without_console(void) {
     char mutex[64]; snprintf(mutex, sizeof mutex, "Local\\LASRecomp.logs.%016llx", hash);
     g_log_mutex = CreateMutexA(NULL, FALSE, mutex);
     if (!lock_logs()) return;
-    const char *inherited = getenv("LASRECOMP_LOG_FILE");
-    bool fresh = !inherited || !*inherited;
     FILETIME now; GetSystemTimeAsFileTime(&now);
     unsigned long long stamp = ((unsigned long long)now.dwHighDateTime << 32) | now.dwLowDateTime;
     int used = fresh ? snprintf(g_log_path, sizeof g_log_path, "%slasrecomp-backup-%016llx-%lu.log", dir, stamp,
@@ -260,7 +274,8 @@ static void log_to_file_without_console(void) {
         if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
         g_log_path[0] = 0; ReleaseMutex(g_log_mutex); return;
     }
-    GetFileTime(file, &g_log_created, NULL, NULL);
+    const char *name = strrchr(g_log_path, '\\');
+    snprintf(g_log_tag, sizeof g_log_tag, "[session] %s\n", name ? name + 1 : g_log_path);
     // A GUI-subsystem process with no inherited handles starts with invalid CRT stream descriptors.
     // Give both streams real descriptors before duplicating the shared-delete log handle into them.
     if (!freopen("NUL", "ab", stderr) || !freopen("NUL", "ab", stdout)) {
@@ -277,16 +292,20 @@ static void log_to_file_without_console(void) {
     _putenv("LASRECOMP_LOG_APPEND=1");
     _putenv_s("LASRECOMP_LOG_FILE", g_log_path);
     if (fresh) {
+        fputs(g_log_tag, stderr);
         keep_legacy_log(dir);
         char next[MAX_PATH];
         // A shorter name than the session path, which was already checked above.
         snprintf(next, sizeof next, "%slasrecomp-current-%016llx-%lu.tmp", dir, stamp, (unsigned long)GetCurrentProcessId());
         bool staged = CreateHardLinkA(next, g_log_path, NULL) != 0;
         if (!staged) {
-            // A marker with this run's creation time lets its exit copy prove it still owns the latest log.
+            // Keep the session header in the placeholder too; the full copy at exit preserves it.
             HANDLE marker = CreateFileA(next, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
             if (marker != INVALID_HANDLE_VALUE) {
-                SetFileTime(marker, &g_log_created, NULL, NULL); CloseHandle(marker); staged = true;
+                DWORD written;
+                staged = WriteFile(marker, g_log_tag, strlen(g_log_tag), &written, NULL) && written == strlen(g_log_tag);
+                CloseHandle(marker);
+                if (!staged) DeleteFileA(next);
             }
         }
         if (staged) {
