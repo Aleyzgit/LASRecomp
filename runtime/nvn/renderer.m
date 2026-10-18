@@ -1325,9 +1325,13 @@ static Prog *get_program(NvnProgram *p, ShaderKey *vkey, ShaderKey *fkey) {
     uint32_t slot = (uint32_t)(h ^ (h >> 31)) & (PROG_TAB - 1);
     while (prog_tab[slot].key && prog_tab[slot].key != h) slot = (slot + 1) & (PROG_TAB - 1);
     if (prog_tab[slot].key) { Prog *fp = (__bridge Prog *)prog_tab[slot].prog; return fp->failed ? nil : fp; }
-    NSString *key = [NSString stringWithFormat:@"%llx/%llx/%@/%@%s", p->stages[0].code_addr, p->stages[1].code_addr,
-                     [NSData dataWithBytes:vkey length:sizeof *vkey], [NSData dataWithBytes:fkey->rt_kind length:8],
-                     vkey->flip_x ? "/mirror" : ""];  // (NSData's description elides the middle of the key's bytes)
+    // (every byte of the keys, in hex: NSData's description shows only the first 16 and last 8 bytes of the 52-byte
+    // key, so variants differing in attr_kind[16..], depth_minus_one, flip_y or a later field shared one entry -
+    // whichever variant came first served the others)
+    char kb[2 * (sizeof *vkey + 8) + 1], *kp = kb;
+    for (size_t i = 0; i < sizeof *vkey; i++) kp += snprintf(kp, 3, "%02x", vb[i]);
+    for (int i = 0; i < 8; i++) kp += snprintf(kp, 3, "%02x", fkey->rt_kind[i]);
+    NSString *key = [NSString stringWithFormat:@"%llx/%llx/%s", p->stages[0].code_addr, p->stages[1].code_addr, kb];
     Prog *pr = cache[key];
     if (!pr) {  // prepared before the game (the same code and keys)
         uint64_t vh = shader_stage_hash(&p->stages[0]), fh = shader_stage_hash(&p->stages[1]), ck = prog_content_key(vh, fh, vkey, fkey);
