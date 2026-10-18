@@ -11,13 +11,14 @@
 // The game advances its world one fixed step per frame in its 60 fps mode, and two steps per frame in its 30 fps mode
 // (measured: Link walks twice as far per frame there) - so a 60-mode frame that takes 20 ms plays in slow motion, while
 // the 30 mode plays at full speed. The game reads its timing counters (GPU time per frame) as on the Switch: they set
-// its dynamic resolution (main pass 1920x1080 down to 1280x720 from ~12 ms, the floor from ~15 ms) and, with frames
-// really missing 60, keep it in the 30 fps mode (only from ~15 ms: below that it keeps trying 60 - slow motion half the
-// time). But our frames can be slow for reasons GPU time doesn't show (command translation, a slower CPU). So each
-// presented frame's busy time is measured (present to present, minus the time the presenting thread was blocked in
-// kernel waits, sleeps and the window's image: idle); when frames don't fit 60 (12 of the last 60 over 16.2 ms), the
-// counters report a frame of at least PACE_SLOW_NS: the game takes its 30 fps mode, at full speed (and its lower
-// resolution with it - the same reading). Back to the real times after 120 frames with headroom (busy under 13 ms on average,
+// its dynamic resolution (main pass 1920x1080 down to 1280x720 from ~12 ms, the floor from ~15 ms - off here:
+// tools/patches.py GAME_DYNRES_SITE, the resolution is ours) and, with frames really missing 60, keep it in the 30 fps
+// mode (only from ~15 ms: below that it keeps trying 60 - slow motion half the time). But our frames can be slow for
+// reasons GPU time doesn't show (command translation, a slower CPU). So each presented frame's busy time is measured
+// (present to present, minus the time the presenting thread was blocked in kernel waits, sleeps and the window's image:
+// idle); when frames don't fit 60 (12 of the last 60 over 16.2 ms), the counters report a frame of at least
+// PACE_SLOW_NS: the game takes its 30 fps mode, at full speed (its resolution stays: its own dynamic resolution, which
+// read the same counters, is off). Back to the real times after 120 frames with headroom (busy under 13 ms on average,
 // at most 2 of the last 60 frames over). The game itself also tries 60 again now and then.
 // Backoff (issue #70): a machine right at the edge (a handheld on a low power profile) gains headroom at 30 fps just by
 // cooling down, goes back to 60, and doesn't fit again a few seconds later - 60 / 30 flicker. Falling back within 10 s

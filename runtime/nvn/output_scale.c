@@ -21,6 +21,14 @@
 
 #define MAX_TEX 16384.0
 
+// The game's own dynamic resolution (tools/patches.py GAME_DYNRES_SITE) is off: the resolution is the one chosen here,
+// and only our Dynamic changes it. LARECOMP_GAME_DYNRES=1 (test): the game lowers its main pass under GPU load again.
+int rt_game_dynres(void) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_GAME_DYNRES") && atoi(getenv("LARECOMP_GAME_DYNRES"));
+    return on;
+}
+
 // Dynamic resolution: a factor on the Match display scale, 0.5 .. 1 in 0.05 steps. Down quickly while over budget;
 // up only after sustained headroom, and the wait before the next raise doubles each time a raise is undone within
 // 10 s (hunting between two steps: 24-33 changes a minute in the field before).
