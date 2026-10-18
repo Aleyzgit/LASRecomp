@@ -256,7 +256,9 @@ PLACE = {'tarin': 'with Tarin in Mabe Village', 'marin': 'with Marin in Mabe Vil
          'lanmola': 'with Lanmola in Yarna Desert', 'armos-knight': 'with the Armos Knight in the Ancient Ruins',
          'kanalet-crow': 'with the crow at Kanalet Castle', 'kanalet-mad-bomber': 'with the bomber at Kanalet Castle',
          'mad-batter-woods': 'with the Mad Batter in the woods', 'mad-batter-bay': "with the Mad Batter of Martha's Bay",
-         'mad-batter-taltal': 'with the Mad Batter on the mountain'}
+         'mad-batter-taltal': 'with the Mad Batter on the mountain',
+         'doghouse-dig': "buried by BowWow's kennel in Mabe Village", 'ghost-grave-dig': "buried by the Ghost's grave",
+         'goponga-west-dig': "buried near Mr. Write's house"}
 
 
 PLURAL = {'boots', 'flippers', 'bomb', 'bananas'}
@@ -274,6 +276,75 @@ def item_phrase(item):
 
 def _words(s):
     return re.sub(r'(?<=[a-z])(?=[A-Z0-9])', ' ', s)
+
+
+# Landmarks for bushes and digs (user 2026-10-18: "buried near the Mabe Village library", "under a bush by Tarin's
+# house"): the outsides of houses / caves / dungeons (entrance_data.yml doors, by the level they lead into - an entrance
+# shuffle changes what's inside, never the building) and a few Field objects (the screens' .leb actors).
+DOOR_NAME = {
+    'Lv08TurtleRock': 'Turtle Rock', 'Lv09WindFishsEgg': "the Wind Fish's Egg", 'CuccoHouse': 'the hen house',
+    'Lv07EagleTower': "Eagle's Tower", 'MadBattersWell': "the Mad Batter's well", 'FairyFountain': 'the fairy fountain',
+    'Lv02BottleGrotto': 'Bottle Grotto', 'MamboCave': "Manbo's cave", 'Lv04AnglersTunnel': "Angler's Tunnel",
+    'DrWrightHouse': "Mr. Write's house", 'MoriblinCave': 'the Moblin hideout', 'DanpeiHouse': "Dampe's shack",
+    'RapidsRideTicket': 'the raft shop', 'TracyHouse': "Crazy Tracy's house", 'KanaletCastle': 'Kanalet Castle',
+    'MagicPowderHouse': "the witch's hut", 'Lv06FaceShrine': 'Face Shrine', 'Lv10ClothesDungeon': 'the Color Dungeon',
+    'QuadupletHouse': "the quadruplets' house", 'BedRoom': 'the Dream Shrine', 'SeashellHouse': 'the Seashell Mansion',
+    'FlyingCuccoCave': "the rooster's grave", 'Shop': 'the Mabe Village shop', 'DogHouse': "BowWow's kennel",
+    'MadamHouse': "Madam MeowMeow's house", 'MarinTarinHouse': "Tarin's house", 'ArmosShrine': 'the Southern Face Shrine',
+    'Library': 'the Mabe Village library', 'UlriraHouse': "Ulrira's house", 'CraneGame': 'the Trendy Game',
+    'Lv03KeyCavern': 'Key Cavern', 'RabbitBigHouse': "the rabbits' house", 'SchuleDonavitchHouse': "Schule Donavitch's house",
+    'ChristineHouse': "Christine's house", 'HiddenZoraHouse': "the Zora's house", 'Lv01TailCave': 'Tail Cave',
+    'MamuCave': "Mamu's cave", 'RichardHouse': "Richard's villa", 'Lv05CatfishsMaw': "Catfish's Maw",
+    'BearHouse': "the bear chef's house", 'BananaHouse': "Sale's house", 'MermaidStatue': 'the mermaid statue',
+    'FishingBoat': "the fisherman's boat", 'GhostHouse': "the Ghost's house", 'TelephoneBox': 'a telephone booth',
+    'UnderGrave': 'a grave'}
+ACTOR_NAME = {b'ObjSignboard-': 'a signpost', b'ObjFieldOwlS': 'an owl statue', b'ObjWeathercock': 'the weathervane',
+              b'ObjGhostsGrave': "the Ghost's grave", b'ObjMarthaSta': 'the mermaid statue', b'ObjWarpManbo': 'a warp hole',
+              b'ObjDesertBone': 'the whale bones', b'ObjTabahlTree': 'a lone tree', b'ObjRaft-': 'the raft',
+              b'ObjGrave-': 'a gravestone', b'ObjTreasureBox': 'a treasure chest', b'ObjCactus-': 'a cactus',
+              b'ObjDesertTree': 'a lone tree'}
+GENERIC = ('a ', 'an ')  # (generic landmarks also name the area: "by a signpost in Ukuku Prairie")
+
+
+def landmarks(romfs, leb):
+    """[(name, x, z)] in Field coordinates (a screen is 15 x 12; row r, column c start at c * 15, (r - 1) * 12)"""
+    import yaml
+    out = []
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'entrance_data.yml')) as f:
+        for d in yaml.safe_load(f)['doors']:
+            lv = d.get('dest_level') or ''
+            name = DOOR_NAME.get(lv) or DOOR_NAME.get(re.sub(r'\d+(_.*)?$', '', lv)) or 'a cave'
+            out.append((name, d['pos_xz'][0], d['pos_xz'][1]))
+    for f in sorted(glob.glob(os.path.join(romfs, 'region_common', 'level', 'Field', 'Field_*.leb'))):
+        with open(f, 'rb') as fh:
+            room = leb.Room(fh.read())
+        for a in room.actors:
+            for k, name in ACTOR_NAME.items():
+                if a.name.startswith(k):
+                    out.append((name, a.posX, a.posZ))
+    return out
+
+
+def tile_xz(room, tile):
+    """centre of tile 0-79 (10 x 8 of 1.5) of Field screen `room` ('12C' or 'Field_12C')"""
+    m = re.search(r'(\d\d)([A-P])$', room)
+    row, col = int(m.group(1)), ord(m.group(2)) - 65
+    return col * 15 + (tile % 10) * 1.5 + 0.75, (row - 1) * 12 + (tile // 10) * 1.5 + 0.75
+
+
+def nearest(marks, x, z):
+    """the landmark on the same screen closest to (x, z), else one just over the screen edge (within 6), else None"""
+    sx, sz = int(x // 15), int(z // 12)
+    best = None
+    for name, lx, lz in marks:
+        d = ((lx - x) ** 2 + (lz - z) ** 2) ** 0.5
+        same = int(lx // 15) == sx and int(lz // 12) == sz
+        if not same and d > 6:
+            continue
+        key = (not same, d)
+        if best is None or key < best[0]:
+            best = (key, name)
+    return best[1] if best else None
 
 
 def place_phrase(step, dungeon_of, entered_via):
@@ -297,9 +368,14 @@ def place_phrase(step, dungeon_of, entered_via):
         if lv in LEVEL_DUNGEON:
             return 'in a pot ' + dungeon(dungeon_of.get(loc, LEVEL_DUNGEON[lv]))
         return f'in a pot in {_words(lv)}' + (f' ({area})' if area else '')
-    if loc.startswith('bush-'):
-        return f'under a bush in {area or "the wilds"}'
-    if loc.startswith('dig-') or loc.endswith('-dig'):
+    if loc.startswith(('bush-', 'dig-')):
+        lm = step.get('landmark')
+        if lm and lm.startswith(GENERIC) and area:
+            lm += f' in {area}'
+        if loc.startswith('bush-'):
+            return f'under a bush by {lm}' if lm else f'under a bush in {area or "the wilds"}'
+        return f'buried near {lm}' if lm else f'buried in {area or "the ground"}'
+    if loc.endswith('-dig'):
         return f'buried in {area or "the ground"}'
     if loc.startswith('shop-'):
         return 'in the Mabe Village shop'
@@ -482,6 +558,16 @@ def apply(out_dir, romfs, settings):
             event_tools.addEntryPoint(flow.flowchart, n)
             event_tools.createActionChain(flow.flowchart, n, [('Dialog', 'Show', {'message': f'System:{n}'})])
     event_tools.writeFlow(cp, flow)
+    if any(s['loc'].startswith(('bush-', 'dig-')) for s in steps_):  # (their nearest landmark)
+        from RandomizerCore.Tools import leb
+        import bushes
+        marks = landmarks(romfs, leb)
+        bush_tile = {bushes.location_name(b): (b['room'], b['tile']) for b in bushes.scan(romfs, leb, pits=True)}
+        for st in steps_:
+            m = re.match(r'^dig-(\d\d[A-P])-(\d+)$', st['loc'])
+            spot = (m.group(1), int(m.group(2))) if m else bush_tile.get(st['loc'])
+            if spot and spot[1] is not None:
+                st['landmark'] = nearest(marks, *tile_xz(*spot))
     texts = {n: hint_text(s, dungeon_of, entered_via) for n, s in zip(names, steps_)}
     texts[DONE] = DONE_TEXT
     nfiles = 0
