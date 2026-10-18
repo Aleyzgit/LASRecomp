@@ -986,6 +986,13 @@ static void vk_end_pass_at(int line) {
 }
 
 static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v : 1; }
+// The part of a level extent `e` a scalable image's contents occupy (Dynamic resolution: drawn at scale `sc` into an
+// image allocated at scale `al`, the top-left part); the whole extent otherwise.
+static int content_extent(int e, bool scalable, float sc, float al) {
+    if (!scalable || sc == al || al <= 0) return e;
+    int c = (int)lroundf(e * sc / al);
+    return c < 1 ? 1 : c > e ? e : c;
+}
 
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
@@ -3786,15 +3793,23 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     uint32_t sly = src->has_view && (src->view.setmask & 2) ? src->view.min_layer : 0;
     uint32_t dly = dst->has_view && (dst->view.setmask & 2) ? dst->view.min_layer : 0;
     if (slv >= s->levels || dlv >= d->levels || sly >= s->layers || dly >= d->layers) return;
-    {   // whole-image regions are the level's extent, and every region stays inside its level: scaled allocations
-        // (internal resolution below 1x) round guest regions past the edge, and out-of-bounds copies / blits are
-        // undefined in Vulkan (garbage that changed every frame on NVIDIA: flicker in the depth pyramid's users)
+    {   // whole-image regions are the contents' extent in the level, and every region stays inside its level: scaled
+        // allocations (internal resolution below 1x) round guest regions past the edge, and out-of-bounds copies /
+        // blits are undefined in Vulkan (garbage that changed every frame on NVIDIA: flicker in the depth pyramid's
+        // users). Dynamic resolution draws into the top-left part of the allocation: the rest holds older frames, and
+        // a whole-image copy of it into a texture of another scale (the save slot's screenshot, 192x108) took those
+        // along (the frame small in a corner, stale frames around it)
         int slw = (int)level_extent(s->width, slv), slh = (int)level_extent(s->height, slv);
         int dlw = (int)level_extent(d->width, dlv), dlh = (int)level_extent(d->height, dlv);
-        if (!sr[3]) sw = slw - sx0;
-        if (!sr[4]) sh = slh - sy0;
-        if (!dr[3]) dw = dlw - dx0;
-        if (!dr[4]) dh = dlh - dy0;
+        int scw = content_extent(slw, s->scalable, s->sx, s->ax), sch = content_extent(slh, s->scalable, s->sy, s->ay);
+        int dcw = content_extent(dlw, d->scalable, d->sx, d->ax), dch = content_extent(dlh, d->scalable, d->sy, d->ay);
+        bool same_part = slw == dlw && slh == dlh && scw == dcw && sch == dch;  // (contents in the same part of equal images)
+        if (!sr[3]) sw = scw - sx0;
+        if (!sr[4]) sh = sch - sy0;
+        if (!dr[3]) dw = dcw - dx0;
+        if (!dr[4]) dh = dch - dy0;
+        if (same_part && sx0 == 0 && sy0 == 0 && dx0 == 0 && dy0 == 0 && sw == scw && sh == sch && dw == dcw && dh == dch)
+            sw = dw = slw, sh = dh = slh;  // (the same part of images of one size: the whole image, which may alias)
         if (sx0 + sw > slw) sw = slw - sx0;
         if (sy0 + sh > slh) sh = slh - sy0;
         if (dx0 + dw > dlw) dw = dlw - dx0;
@@ -4232,11 +4247,15 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
 }
 
 // Screenshot of a game texture (presented crop applied to build/frame_* shots), via the present shader into RGBA8.
+// Only the part its contents occupy (Dynamic resolution: the top-left part; the rest holds older frames).
 void renderer_save_texture_tex(TexBackend *b, const char *path) {
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
     extern const float *vk_shot_crop(void);
     float crop[4] = {0, 0, 1, 1};
     if (strstr(path, "frame_")) memcpy(crop, vk_shot_crop(), sizeof crop);
+    float fx = (float)content_extent((int)b->width, b->scalable, b->sx, b->ax) / (float)b->width;
+    float fy = (float)content_extent((int)b->height, b->scalable, b->sy, b->ay) / (float)b->height;
+    crop[0] *= fx; crop[1] *= fy; crop[2] *= fx; crop[3] *= fy;
     uint32_t w = (uint32_t)(b->width * crop[2]), h = (uint32_t)(b->height * crop[3]);
     if (!w || !h) return;
     vk_end_pass();
