@@ -2602,6 +2602,8 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                     view = feedback_view[k];
                     if (st_->type == TEXTYPE_2D_ARRAY) view = vk_dummy_view(TEXTYPE_2D_ARRAY);  // (2D snapshot as array: rare)
                 }
+        } else if (e->dead_format) {
+            nvn_dead_slot_sampled(e, tic);
         }
     }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) smp = vk_sampler(&((NvnSamplerDesc *)st.spool->entries)[tsc]);
