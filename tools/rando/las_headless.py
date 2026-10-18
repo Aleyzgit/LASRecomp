@@ -289,7 +289,7 @@ def main():
         import entrance_logic as el
         ed = el.load()
         decoupled = bool(settings.get('entrance-decoupled', False))
-        # (decoupled with the desert shut by the sleeping Walrus: its doors stay vanilla - entrance_logic.pool)
+        # (decoupled with the desert shut by the sleeping Walrus: its door, the Lanmola cave, stays vanilla - entrance_logic.pool)
         ent_doors = el.pool(ed, ('desert',) if decoupled and not settings.get('open-desert', True) else ())
         ent_entry, ent_exit = el.shuffle(ent_doors, decoupled, _random.Random(f"{settings['seed']}-entrances"))
         extra = {k: list(v) for k, v in sanity_inside.items()}
