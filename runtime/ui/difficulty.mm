@@ -1,5 +1,5 @@
-// Gameplay tab (was Difficulty): damage taken multiplier / one-hit KO (applied where the game computes Link's damage, see
-// tools/patches.py DAMAGE_*_SITES); rt_hero_mode() reads the game's own Hero Mode flag (PlayerStatus+0x120 = save
+// Gameplay tab (was Difficulty): walk speed (runtime/hle/qol.c rt_walk_speed), damage taken multiplier / one-hit KO
+// (applied where the game computes Link's damage, see tools/patches.py DAMAGE_*_SITES); rt_hero_mode() reads the game's own Hero Mode flag (PlayerStatus+0x120 = save
 // 0x55E0). Settings persist in larecomp.ini (g_settings.diff_*).
 #include "../game_addresses.h"
 #include <math.h>
@@ -84,6 +84,17 @@ extern "C" void difficulty_draw(float scale) {
     if (opt_toggle("Mirror mode", &g_settings.mirror_mode, false,
                    "Mirrors the game world."))
         settings_save();
+    {
+        static const char *const names[] = {"Normal", "1.25x", "1.5x", "2x"};
+        static const float mult[] = {1, 1.25f, 1.5f, 2};
+        int wi = 0;  // (the closest step to the setting)
+        for (int i = 0; i < 4; i++)
+            if (fabsf(mult[i] - g_settings.walk_speed) < fabsf(mult[wi] - g_settings.walk_speed)) wi = i;
+        if (opt_choice("Walk speed", &wi, names, 4, 0, "How fast Link walks. The Pegasus Boots and swimming are unchanged.")) {
+            g_settings.walk_speed = mult[wi];
+            settings_save();
+        }
+    }
     opt_section("Difficulty");
     static const char *const names[] = {"Half", "Default", "2x", "3x", "4x", "5x", "6x", "7x", "8x"};
     static const float mult[] = {0.5f, 1, 2, 3, 4, 5, 6, 7, 8};
