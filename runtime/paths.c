@@ -178,9 +178,22 @@ bool rt_remove_game_files(const char *game_dir) {
     return ok;
 }
 
+#ifdef _WIN32
+// Sizes skip only real links (symlinks, junctions): OneDrive's cloud files are reparse points too, but they're files
+static bool size_link(const char *p) {
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(p, &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    FindClose(h);
+    return (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && IsReparseTagNameSurrogate(fd.dwReserved0);
+}
+#else
+#define size_link is_link
+#endif
+
 static unsigned long long tree_size(const char *p) {
     struct stat st;
-    if (is_link(p) || stat(p, &st) != 0) return 0;
+    if (size_link(p) || stat(p, &st) != 0) return 0;
     if (!S_ISDIR(st.st_mode)) return (unsigned long long)st.st_size;
     unsigned long long n = 0;
     DIR *d = opendir(p);
@@ -196,6 +209,8 @@ static unsigned long long tree_size(const char *p) {
     }
     return n;
 }
+
+unsigned long long rt_tree_size(const char *path) { return tree_size(path); }
 
 unsigned long long rt_game_files_size(const char *game_dir) {
     unsigned long long n = 0;

@@ -218,3 +218,4 @@ static int rm_entry(const char *path, const struct stat *sb, int flag, struct FT
     return remove(path);
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
+bool plat_onedrive_synced(const char *dir) { (void)dir; return false; }

@@ -39,6 +39,8 @@ bool rt_remove_game_file(const char *game_dir, const char *name);
 bool rt_remove_game_files(const char *game_dir);
 // Bytes taken by the extracted game files in game_dir (links not followed).
 unsigned long long rt_game_files_size(const char *game_dir);
+// Bytes taken by everything under path (links not followed).
+unsigned long long rt_tree_size(const char *path);
 
 typedef struct SDL_Window SDL_Window;
 void rt_window_icon(SDL_Window *w);  // the shipped icon.png, if any

@@ -454,6 +454,68 @@ static void SDLCALL picked(void *, const char *const *files, int) {
     pthread_mutex_unlock(&g_lock);
 }
 
+// ------------------------------------------------------------------ OneDrive (Windows)
+// A data root inside a OneDrive folder uploads every game file to the player's OneDrive: a warning on the start screen
+// with roughly how much, until Keep here (settings.onedrive_kept). Checked once per launch (plat_onedrive_synced); the
+// size in the background: the data root's own once set up, before that the picked game files (or a typical copy) plus
+// what the setup adds. LARECOMP_TEST_ONEDRIVE=1 (test): shown on any system.
+#define GAME_FILES_GB 5.9   // exefs + romfs, as players bring them
+#define SETUP_ADDS_GB 0.0   // the built game code, its kept pieces and the shader caches (measured: a beta_5 setup)
+static int g_onedrive = -1;                // -1: not checked yet
+static std::atomic<double> g_od_gb{-1};    // the estimate (-1: not known yet)
+static std::atomic<int> g_od_job;
+static std::string g_od_for = "\x02";      // what the estimate is for: "" set up, "\x01" nothing picked, else the folder
+
+static void *onedrive_size_thread(void *arg) {
+    std::string *src = (std::string *)arg;
+    int job = g_od_job;
+    double gb;
+    if (src->empty()) gb = rt_tree_size(rt_data_root()) / 1e9;
+    else {
+        std::string exefs, romfs;
+        bool unusable = false;
+        if (*src != "\x01") find_game(*src, 0, exefs, romfs, unusable);
+        gb = (exefs.empty() || romfs.empty() ? GAME_FILES_GB : (rt_tree_size(exefs.c_str()) + rt_tree_size(romfs.c_str())) / 1e9)
+             + SETUP_ADDS_GB;
+    }
+    if (job == g_od_job) g_od_gb = gb;
+    delete src;
+    return NULL;
+}
+
+// The warning (upper right of the start screen); true once Keep here is pressed
+static bool onedrive_notice(float s, ImVec2 ds, bool ready) {
+    std::string src;
+    pthread_mutex_lock(&g_lock);
+    src = ready ? "" : g_src.empty() ? "\x01" : g_src;
+    pthread_mutex_unlock(&g_lock);
+    if (src != g_od_for) {  // (set up, or another folder picked: estimate again)
+        g_od_for = src, g_od_job++;
+        pthread_t th;
+        if (pthread_create(&th, NULL, onedrive_size_thread, new std::string(src)) == 0) pthread_detach(th);
+    }
+    double gb = g_od_gb;
+    if (gb < 0) return false;
+    float w = fminf(ds.x * 0.42f, 560 * s);
+    ImGui::SetCursorPos(ImVec2(ds.x - w - 60 * s, 60 * s));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.86f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 18 * s));
+    ImGui::BeginChild("##onedrive", ImVec2(w, 0), ImGuiChildFlags_AlwaysUseWindowPadding | ImGuiChildFlags_AutoResizeY,
+                      ImGuiWindowFlags_NavFlattened);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  This folder is synced by OneDrive");
+    ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "All game files (about %.0f GB) will be uploaded to your OneDrive. "
+                       "Moving the LAS Recomp folder somewhere not synced, like C:\\Games, avoids that.", fmax(1.0, gb));
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 4 * s));
+    bool keep = ImGui::Button("Keep here", ImVec2(160 * s, 0));
+    ImGui::EndChild();
+    return keep;
+}
+
 // ------------------------------------------------------------------ the user's own Nintendo fonts (not shipped)
 // runtime/hle/pl.c loads fonts/ first, else a close substitute of the requested language. Import copies recognized
 // files only: the console's own names for the shared fonts (Standard, Chinese Simplified / its Ext, Chinese
@@ -1177,6 +1239,12 @@ extern "C" void launcher_run(const char *root) {
         fprintf(stderr, "[launcher] delete %.1f GB: %s -> %s\n", gb, ok ? "ok" : "refused", status.c_str());
         if (!status.empty()) { g_bg = 0; page = SETUP; }
     }
+    if (g_onedrive < 0) {  // (once per launch: a "Title screen" reboot keeps it)
+        const char *t = getenv("LARECOMP_TEST_ONEDRIVE");
+        g_onedrive = t ? atoi(t) != 0 : plat_onedrive_synced(rt_data_root());
+        if (g_onedrive) fprintf(stderr, "[launcher] the data folder is synced by OneDrive%s: %s\n",
+                                g_settings.onedrive_kept ? " (kept there)" : "", rt_data_root());
+    }
     // the shader preparation of every later start: in the background (first setups and updates do theirs above)
     if (status.empty() && !g_busy && !getenv("LARECOMP_LAUNCHER_PREPARE")) start_background_prep();
     // (test) LARECOMP_LAUNCHER_PLAY_AT=<s>: PLAY that many seconds in; LARECOMP_LAUNCHER_SKIP_AT=<s>: Skip then
@@ -1661,6 +1729,11 @@ extern "C" void launcher_run(const char *root) {
                 ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  %s", busy ? "Setting up the game files..." : status.c_str());
                 ImGui::SetCursorPosX(x0);
                 ImGui::TextDisabled("%s", busy ? "Set up the game files to play." : status_hint(status));
+            }
+            if (g_onedrive > 0 && !g_settings.onedrive_kept && onedrive_notice(s, ds, status.empty())) {
+                g_settings.onedrive_kept = true;
+                settings_save();
+                fprintf(stderr, "[launcher] OneDrive warning: kept here\n");
             }
             if (const char *f = getenv("LARECOMP_LAUNCHER_FONT")) {  // (test) which typeface this window shows
                 const char *b = strrchr(f, '/');

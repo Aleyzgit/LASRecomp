@@ -7,6 +7,7 @@
 #include <shellapi.h>
 #include <timeapi.h>
 #include <io.h>
+#include <wchar.h>
 
 #include "../platform.h"
 
@@ -551,6 +552,52 @@ bool plat_remove_tree(const char *dir) {
     for (wchar_t *p = w; *p; p++) if (*p == L'/') *p = L'\\';
     SHFILEOPSTRUCTW op = {.wFunc = FO_DELETE, .pFrom = w, .fFlags = FOF_NO_UI};
     return SHFileOperationW(&op) == 0 && !op.fAnyOperationsAborted;
+}
+
+// ---- OneDrive
+// A folder's final path (links and junctions resolved), without the \\?\ prefix, backslashes, no trailing one
+static bool final_path(const wchar_t *p, wchar_t *out, DWORD n) {
+    HANDLE h = CreateFileW(p, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+                           FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    DWORD k = 0;
+    if (h != INVALID_HANDLE_VALUE) {
+        k = GetFinalPathNameByHandleW(h, out, n, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+        CloseHandle(h);
+    }
+    if (!k || k >= n) k = GetFullPathNameW(p, n, out, NULL);  // (can't be opened: as written)
+    if (!k || k >= n) return false;
+    if (!wcsncmp(out, L"\\\\?\\UNC\\", 8)) memmove(out + 2, out + 8, (wcslen(out + 8) + 1) * sizeof *out);
+    else if (!wcsncmp(out, L"\\\\?\\", 4)) memmove(out, out + 4, (wcslen(out + 4) + 1) * sizeof *out);
+    for (wchar_t *c = out; *c; c++) if (*c == L'/') *c = L'\\';
+    for (size_t l = wcslen(out); l > 3 && out[l - 1] == L'\\';) out[--l] = 0;
+    return true;
+}
+
+#ifndef FILE_ATTRIBUTE_PINNED
+#define FILE_ATTRIBUTE_PINNED 0x00080000
+#define FILE_ATTRIBUTE_UNPINNED 0x00100000
+#endif
+#ifndef FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+#define FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS 0x00400000
+#endif
+
+// Under one of the OneDrive folders the environment names (personal, work / school), or a cloud file itself
+bool plat_onedrive_synced(const char *dir) {
+    wchar_t w[MAX_PATH], d[1024], r[1024], v[1024];
+    if (MultiByteToWideChar(CP_UTF8, 0, dir, -1, w, MAX_PATH) <= 1 || !final_path(w, d, 1024)) return false;
+    DWORD a = GetFileAttributesW(d);
+    if (a != INVALID_FILE_ATTRIBUTES &&
+        (a & (FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_PINNED | FILE_ATTRIBUTE_UNPINNED)))
+        return true;
+    static const wchar_t *const vars[] = {L"OneDrive", L"OneDriveConsumer", L"OneDriveCommercial"};
+    for (int i = 0; i < 3; i++) {
+        DWORD k = GetEnvironmentVariableW(vars[i], v, 1024);
+        if (!k || k >= 1024 || !final_path(v, r, 1024)) continue;
+        size_t l = wcslen(r);
+        if (r[l - 1] == L'\\') l--;  // (a drive's root: "D:\")
+        if (!_wcsnicmp(d, r, l) && (!d[l] || d[l] == L'\\')) return true;
+    }
+    return false;
 }
 
 // End the process at once, skipping DLL teardown (from an atexit handler, after flushing). Exit status 0.
