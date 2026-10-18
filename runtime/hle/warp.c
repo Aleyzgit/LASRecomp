@@ -681,6 +681,7 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     actor_scan_tick(frame);
     { extern void miniboss_tick(Cpu *, uint64_t); miniboss_tick(c, frame); }
     { extern void escape_tick(Cpu *, uint64_t); escape_tick(c, frame); }
+    { extern void hint_sheet_tick(Cpu *, uint64_t); hint_sheet_tick(c, frame); }  // (runtime/hle/hint_sheet.c)
     { extern void rescue_tick(uint64_t); rescue_tick(frame); }  // (softlock rescues: runtime/hle/rescue.c)
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
