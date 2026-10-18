@@ -88,9 +88,10 @@ typedef struct {
                      // [GMAP_MAX].x = count)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes in two cases:
-// - windows of one import where a storage buffer can't span the heap (Intel: 1 GB, issue #8): one binding per window
-//   (GMEM_CHUNK_BINDING + k in set GMEM_CHUNK_SET) and plain branches, cheap to run and to compile;
-// - chunks imported as the game binds them (AMD APUs: vulkan/exec.c gmem_lazy; maxwell_gmem_lazy): the shader takes
+// - windows of one import where a storage buffer can't span the heap (issue #8) and lazy chunks aren't possible (or
+//   LARECOMP_VK_GMEM_LAZY=0): one binding per window (GMEM_CHUNK_BINDING + k in set GMEM_CHUNK_SET) and plain
+//   branches, each word picking its own window (a wide access over a window's end reads both);
+// - chunks imported as the game binds them (AMD APUs, Intel: vulkan/exec.c gmem_lazy; maxwell_gmem_lazy): the shader takes
 //   the chunk's device address and size from a table (GChunks, binding 0) and goes through a buffer reference after
 //   one bounds check per LDG / STG (an aligned 8 or 16 byte access never crosses a chunk). A chunk not imported has
 //   size 0: the access reads 0 / drops the store and counts in GMiss (binding 1), with the lowest word index hit.
@@ -99,9 +100,6 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // 0: one buffer.
 extern uint32_t maxwell_gmem_chunk_shift;
 extern bool maxwell_gmem_lazy;
-// Lazy mode, LARECOMP_VK_GMEM_MEMO=1: the shader keeps the last chunk's address and size in registers and looks the
-// table up only when an access leaves it (a loop over a list in one chunk: one table read, not one per element).
-extern bool maxwell_gmem_memo;
 // Lazy mode, fragment: a shader without discard / depth output / stores declares early fragment tests (its GMiss
 // atomics would turn them off); one with discard / depth output (no stores) counts no misses - the
 // runtime imports the bound storage buffers' chunks before the draw. true (LARECOMP_VK_GMEM_FS_MISS=1): every shader

@@ -25,7 +25,6 @@
 uint64_t maxwell_gmem_base, maxwell_gmem_size;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
-bool maxwell_gmem_memo;
 bool maxwell_gmem_fs_miss;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
@@ -1935,9 +1934,6 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GDir%d { uint w[]; } gdir%d_;\n", cs, GMEM_DIRECT_BINDING + k,
                    c->uses_gmem_store ? "" : "readonly ", k, k);
         }
-        if (maxwell_gmem_memo)  // the last chunk looked up stays in registers (shader.h maxwell_gmem_memo)
-            sp(&s, "uint gmc_ = 0xFFFFFFFFu, gmz_ = 0u; uint64_t gma_ = 0ul;\n"
-                   "void gmsel(uint c) { if (c != gmc_) { uvec4 e = gchunk[c]; gmc_ = c; gmz_ = e.z; gma_ = (uint64_t(e.y) << 32) | uint64_t(e.x); } }\n");
         // Each access: the draw's storage buffer chunks first (gd, uniform: no table read, no miss path), then the table.
         static const struct { const char *head, *act, *miss; int last; bool store; } fn[] = {
             {"uint GMR1(uint i)", "return p.w[o];", "return 0u;", 0, false},
@@ -1964,10 +1960,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                 }
             char lim[16];
             if (fn[f].last) snprintf(lim, sizeof lim, "o + %du", fn[f].last); else snprintf(lim, sizeof lim, "o");
-            if (maxwell_gmem_memo)
-                sp(&s, " uint c = GMC(i); o = GMO(i); gmsel(c); if (%s < gmz_) { GW p = GW(gma_); %s } gmiss(c, i); %s }\n", lim, fn[f].act, fn[f].miss);
-            else
-                sp(&s, " uint c = GMC(i); o = GMO(i); uvec4 e = gchunk[c]; if (%s < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); %s } "
+            sp(&s, " uint c = GMC(i); o = GMO(i); uvec4 e = gchunk[c]; if (%s < e.z) { GW p = GW((uint64_t(e.y) << 32) | uint64_t(e.x)); %s } "
                        "gmiss(c, i); %s }\n", lim, fn[f].act, fn[f].miss);
         }
         sp(&s, "#define GMR(i) GMR1(i)\n");

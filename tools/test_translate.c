@@ -216,9 +216,8 @@ int main(int argc, char **argv) {
     maxwell_gmem_size = old_maxwell_gmem_size = 0x10000000ull;
     // TT_GMEM_CHUNK_SHIFT=<n>: the GLSL output with the heap in chunks of 1 << n bytes (shader.h: AMD APUs, Intel)
     if (getenv("TT_GMEM_CHUNK_SHIFT")) maxwell_gmem_chunk_shift = (uint32_t)atoi(getenv("TT_GMEM_CHUNK_SHIFT"));
-    // TT_GMEM_LAZY=1: chunks imported lazily (table, buffer references, GDirect push constants); TT_GMEM_MEMO=1 its memo
+    // TT_GMEM_LAZY=1: chunks imported lazily (table, buffer references, GDirect push constants)
     maxwell_gmem_lazy = getenv("TT_GMEM_LAZY") && atoi(getenv("TT_GMEM_LAZY")) != 0;
-    maxwell_gmem_memo = maxwell_gmem_lazy && getenv("TT_GMEM_MEMO") && atoi(getenv("TT_GMEM_MEMO")) != 0;
     // TT_GMEM_FS_MISS=1: every fragment shader counts misses, no early tests (LARECOMP_VK_GMEM_FS_MISS)
     maxwell_gmem_fs_miss = maxwell_gmem_lazy && getenv("TT_GMEM_FS_MISS") && atoi(getenv("TT_GMEM_FS_MISS")) != 0;
 #ifdef WITH_GLSL

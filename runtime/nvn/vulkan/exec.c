@@ -2296,9 +2296,10 @@ static VkDescriptorBufferInfo gmem_info(void) {
 
 // ---- the guest heap for shaders in chunks (shader.h maxwell_gmem_chunk_shift)
 // Chunks for two reasons:
-// - a GPU whose storage buffers can't span HEAP_MAX (maxStorageBufferRange: 1 GB on Intel) gets windows of the one
-//   imported heap, one binding each. Binding one range past that limit is out of spec, and the UHD 630's driver then
-//   read garbage beyond 1 GB: dark lighting, black objects (issue #8). 512 MB windows there;
+// - a GPU whose storage buffers can't span HEAP_MAX (maxStorageBufferRange: 1 GB on Intel): binding one range past
+//   that limit is out of spec, and the UHD 630's driver then read garbage beyond 1 GB: dark lighting, black objects
+//   (issue #8). Lazy chunks as below (device.c lazy_heap_predicted); where they aren't possible (or with
+//   LARECOMP_VK_GMEM_LAZY=0), windows of the one imported heap, one binding each;
 // - lazy import (gmem_lazy): on Linux/AMD the import is a userptr buffer and amdgpu checks every page of such a buffer
 //   again on each submission - 3.2 GB of heap, ~45 ms of driver time a frame (issues #40, #51). The dma-buf heap
 //   (guest_heap_dmabuf) avoids that, but needs a cached host-visible memory type that can hold HEAP_MAX, and APUs
@@ -2315,7 +2316,8 @@ static VkDescriptorBufferInfo gmem_info(void) {
 //   about) is imported for the next frame, and the count is in the stats (after a chunk's first use it should stay 0).
 //   Buffer device addresses are enabled only where this mode will be used (device.c lazy_heap_predicted): on RADV
 //   they put every allocation on the driver's global BO list.
-//   Default on RADV when the dma-buf heap doesn't apply; LARECOMP_VK_GMEM_LAZY=1 anywhere (tests), =0 off.
+//   Default on RADV when the dma-buf heap doesn't apply and wherever one storage buffer can't span the heap;
+//   LARECOMP_VK_GMEM_LAZY=1 anywhere (tests), =0 off.
 // LARECOMP_VK_GMEM_CHUNK_MB=<n> forces chunks of n MB (a power of two, 1 GB at most), =0 one buffer.
 #define GC_MAX GMEM_CHUNKS_MAX
 static struct {
@@ -2420,8 +2422,6 @@ static uint32_t gmem_chunk_shift(void) {
     gc_shift = (uint32_t)shift;
     gc_n = shift ? n : 0;
     maxwell_gmem_lazy = gc_lazy;
-    maxwell_gmem_memo = gc_lazy && getenv("LARECOMP_VK_GMEM_MEMO") && atoi(getenv("LARECOMP_VK_GMEM_MEMO")) != 0;
-    if (maxwell_gmem_memo) LOG("[vk] lazy chunks: shaders keep the last chunk looked up (LARECOMP_VK_GMEM_MEMO)\n");
     maxwell_gmem_fs_miss = gc_lazy && getenv("LARECOMP_VK_GMEM_FS_MISS") && atoi(getenv("LARECOMP_VK_GMEM_FS_MISS")) != 0;
     if (maxwell_gmem_fs_miss) LOG("[vk] lazy chunks: every fragment shader counts misses, no early tests (LARECOMP_VK_GMEM_FS_MISS)\n");
     if (shift) LOG("[vk] guest heap bound to shaders in %llu MB %s (storage buffers up to %llu MB here)\n",
@@ -2557,7 +2557,10 @@ static VkDescriptorSet gmem_chunk_set(const int dk[GMEM_DIRECT_MAX]) {
     static struct { VkDescriptorSet set; int dk[GMEM_DIRECT_MAX]; } cache[GC_SET_CACHE];
     static int ncache, next;
     static VkSpan tab_span;  // (the table for this submission and generation, shared by its sets)
-    if (gc_set_seq != seq || gc_set_gen != gc_gen) { ncache = 0; next = 0; gc_set = VK_NULL_HANDLE; }
+    // (windows: also when the heap was imported again since - guest_direct / gfast_prepare re-import as it grows
+    // mid-submission, and a set still on the old import read zeros past its end for the rest of the submission)
+    static VkBuffer gc_set_heap;
+    if (gc_set_seq != seq || gc_set_gen != gc_gen || (!gc_lazy && gc_set_heap != gmem_buf)) { ncache = 0; next = 0; gc_set = VK_NULL_HANDLE; }
     if (!gc_lazy) {
         if (gc_set) return gc_set;
     } else {
@@ -2605,7 +2608,7 @@ static VkDescriptorSet gmem_chunk_set(const int dk[GMEM_DIRECT_MAX]) {
         }
     }
     vkUpdateDescriptorSets(g_vk.dev, nw, w, 0, NULL);
-    gc_set = set; gc_set_seq = seq; gc_set_gen = gc_gen;
+    gc_set = set; gc_set_seq = seq; gc_set_gen = gc_gen; gc_set_heap = gmem_buf;
     return set;
 }
 
