@@ -359,7 +359,10 @@ static int g_wait_kind;
 static void wait_cb(id<MTLCommandBuffer> c) {
     if (!c) return;
     uint64_t t0 = mach_absolute_time();
+    extern void rq_watch(const char *what, uint64_t arg);
+    rq_watch("waitUntilCompleted (GPU)", 0);
     [c waitUntilCompleted];
+    rq_watch(NULL, 0);
     uint64_t d = mach_absolute_time() - t0;
     stat_wait_ns += d;
     stat_wait_by[g_wait_kind] += d;
@@ -2588,7 +2591,8 @@ static void draw(CmdRec *r, bool indexed) {
             reads_scene = true;
         extern uint64_t renderer_present_count(void);
         static uint64_t wide_frame = ~0ull;  // the latest draw this frame filled the window (nothing boxed since)
-        if (reads_scene) wide_frame = renderer_present_count();
+        extern uint64_t renderer_exec_frame(void);  // (the frame being translated)
+        if (reads_scene) wide_frame = renderer_exec_frame();
         // Black or white fills are fades and flashes: always the whole window. Coloured ones (the file-select
         // tint) stay boxed unless they directly follow the composite. Colour = first fragment cbuf (rgb).
         bool fade_fill = false;
@@ -2597,7 +2601,7 @@ static void draw(CmdRec *r, bool indexed) {
             bool black = c[0] < 0.01f && c[1] < 0.01f && c[2] < 0.01f, white = c[0] > 0.99f && c[1] > 0.99f && c[2] > 0.99f;
             fade_fill = black || white;
         }
-        bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_present_count());
+        bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_exec_frame());
         if (!composite) wide_frame = ~0ull;
         static int log_fills = -1;  // LARECOMP_LOG_FILLS: every full-screen untextured fill (fs hash, colour cbuf, decision)
         if (log_fills < 0) log_fills = getenv("LARECOMP_LOG_FILLS") != NULL;

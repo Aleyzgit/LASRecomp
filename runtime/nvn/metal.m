@@ -216,7 +216,10 @@ static void dump_largest_textures(const char *why) {
 }
 
 static uint64_t frames, total_frames;
-uint64_t renderer_present_count(void) { return total_frames; }
+uint64_t renderer_present_count(void) { return total_frames; }  // (the game thread's frame: the HLE hooks')
+// The frame whose work is being translated (rqueue.h rq_frame): "once per frame" state of the translation. Without the
+// render thread, total_frames.
+uint64_t renderer_exec_frame(void) { return rq_current_item() ? rq_frame() : total_frames; }
 
 // Output resolution: render targets the game sizes for the 1920x1080 screen are allocated at
 // (sx, sy) times their guest size. Shaders and the renderer keep working in guest ("logical") units.
@@ -241,9 +244,9 @@ bool renderer_texture_first_write(NvnTexture *t) {
     extern bool g_debug_frame;
     if (g_debug_frame && b && b->presented)
         LOG("[fw] tex %p %ux%u f%#x sx %.2f sy %.2f touched %llu now %llu\n", (void *)t, t->width, t->height, t->format,
-            b->sx, b->sy, (unsigned long long)b->touched_frame, (unsigned long long)total_frames + 1);
-    if (!b || !b->presented || (b->sx == b->sy) || b->touched_frame == total_frames + 1) return false;
-    b->touched_frame = total_frames + 1;
+            b->sx, b->sy, (unsigned long long)b->touched_frame, (unsigned long long)renderer_exec_frame() + 1);
+    if (!b || !b->presented || (b->sx == b->sy) || b->touched_frame == renderer_exec_frame() + 1) return false;
+    b->touched_frame = renderer_exec_frame() + 1;
     return true;
 }
 
@@ -270,8 +273,8 @@ bool renderer_texture_frame_fresh(NvnTexture *t) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_NO_FRAME_CLEAR") == NULL;
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
-    if (!on || !b || !b->scalable || b->frame_cleared == total_frames + 1) return false;
-    b->frame_cleared = total_frames + 1;
+    if (!on || !b || !b->scalable || b->frame_cleared == renderer_exec_frame() + 1) return false;
+    b->frame_cleared = renderer_exec_frame() + 1;
     return true;
 }
 
@@ -285,7 +288,7 @@ bool renderer_texture_level_fresh(NvnTexture *t) {
     bool fresh = b->level_gen != 0;  // first use ever: nothing stale to hide
     b->level_gen = g_level_gen;
     if (fresh && getenv("LARECOMP_LOG_LEVELCLEAR"))
-        LOG("[levelclear] gen %u frame %llu tex %p %ux%u fmt %#x addr %llx\n", g_level_gen, (unsigned long long)total_frames, (void *)t,
+        LOG("[levelclear] gen %u frame %llu tex %p %ux%u fmt %#x addr %llx\n", g_level_gen, (unsigned long long)renderer_exec_frame(), (void *)t,
             t->width, t->height, t->format, (unsigned long long)t->addr);
     return fresh;
 }
@@ -418,7 +421,7 @@ void backend_texture_destroyed(NvnTexture *t) {
     t->backend = NULL;
 }
 
-static uint64_t g_frame_counter;  // presents so far (texture change detection runs once per frame)
+static uint64_t g_frame_counter;  // presents so far (the game thread)
 static uint64_t full_hash_budget, full_hash_budget_frame;
 
 static uint64_t hash_full(const uint8_t *p, uint64_t n) {
@@ -445,6 +448,7 @@ static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
 // Upload all levels/layers from block-linear guest memory.
 static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncoder> blit) {
     if (!t->addr || t->target == 10) return;
+    const uint64_t g_frame_counter = renderer_exec_frame();  // (the frame being translated)
     if (b->uploaded && b->checked_frame == g_frame_counter) return;  // (fast exits before any layout math)
     if (b->uploaded && !b->dynamic && ((g_frame_counter + ((uintptr_t)b >> 6)) & 7)) return;
     const FormatInfo *fi = t->layout.fmt;
@@ -1098,7 +1102,7 @@ void backend_present(NvnTexture *t);
 // keeps drawing and taking input.
 void backend_represent(void) {
     if (!g_last_presented) { SDL_Delay(16); return; }
-    if (rq_on()) rq_present(g_last_presented, total_frames);
+    if (rq_on()) rq_present(g_last_presented, total_frames, false);
     else backend_present_now(g_last_presented, total_frames);
 }
 
@@ -1113,7 +1117,9 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     if (b) b->presented = true;
     @autoreleasepool {
         uint64_t nd0 = SDL_GetTicksNS();
+        rq_watch("nextDrawable", frame);
         id<CAMetalDrawable> drawable = [layer nextDrawable];
+        rq_watch(NULL, 0);
         uint64_t nd = SDL_GetTicksNS() - nd0;
         extern __thread uint64_t g_blocked_ns;  // (kernel.c: waiting, not work - for the frame pacer, as Vulkan's acquire)
         g_blocked_ns += nd;
@@ -1303,10 +1309,13 @@ static void present_hooks(void) {
 
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
-    uint64_t frame = total_frames;
-    if (rq_on()) rq_present(t, frame);
+    uint64_t frame = total_frames, t0 = plat_now_ns();
+    if (rq_on()) rq_present(t, frame, true);
     else backend_present_now(t, frame);
+    uint64_t t1 = plat_now_ns();
+    g_present_ns += t1 - t0;  // (LARECOMP_LOG_PACE, pace.c)
     present_hooks();
+    g_hooks_ns += plat_now_ns() - t1;
 }
 
 // ================================================================== UI thread

@@ -418,11 +418,11 @@ static void recreate_swapchain(void) {
 // every frame look ~16.6 ms: the game's 30 fps mode outdoors on a fast GPU (issue #44). GPU-bound frames still show
 // in the game's GPU counters.
 extern __thread uint64_t g_blocked_ns;  // kernel.c
-#define WAITING(x) do { uint64_t w0_ = plat_now_ns(); x; g_blocked_ns += plat_now_ns() - w0_; } while (0)
+#define WAITING(x) do { uint64_t w0_ = plat_now_ns(); rq_watch(#x, 0); x; rq_watch(NULL, 0); g_blocked_ns += plat_now_ns() - w0_; } while (0)
 // the same, also counted by place (dynamic resolution's log / LARECOMP_VK_PROF: 0 frame slot, 1 acquire, 2 present)
 uint64_t g_vk_frame_waits[4];
-#define WAITING_AT(i, x) do { uint64_t w0_ = plat_now_ns(); x; uint64_t w1_ = plat_now_ns() - w0_; g_blocked_ns += w1_; \
-                              g_vk_frame_waits[i] += w1_; } while (0)
+#define WAITING_AT(i, x) do { uint64_t w0_ = plat_now_ns(); rq_watch(#x, 0); x; rq_watch(NULL, 0); uint64_t w1_ = plat_now_ns() - w0_; \
+                              g_blocked_ns += w1_; g_vk_frame_waits[i] += w1_; } while (0)
 
 // ================================================================== frames (start screen and game)
 // Acquire semaphores rotate per frame in flight; a slot is reused once the submission that waited on it is done.
@@ -576,8 +576,11 @@ uint64_t renderer_present_count(void);
 void renderer_save_texture_tex(TexBackend *b, const char *path);
 
 static uint64_t frames, total_frames, g_frame_counter;
-uint64_t renderer_present_count(void) { return total_frames; }
-uint64_t vk_frame_counter(void) { return g_frame_counter; }
+uint64_t renderer_present_count(void) { return total_frames; }  // (the game thread's frame: the HLE hooks')
+// The frame whose work is being translated (rqueue.h rq_frame): "once per frame" state of the translation. Without the
+// render thread, total_frames.
+uint64_t renderer_exec_frame(void) { return rq_current_item() ? rq_frame() : total_frames; }
+uint64_t vk_frame_counter(void) { return renderer_exec_frame(); }  // (the translation's: g_frame_counter == total_frames)
 static float g_shot_crop[4] = {0, 0, 1, 1};
 static double last_fps_time;
 static NvnTexture *g_last_presented;
@@ -589,7 +592,7 @@ void *backend_pool_push(void) { return NULL; }
 void backend_pool_pop(void *p) { (void)p; }
 void backend_represent(void) {
     if (!g_last_presented) { SDL_Delay(16); return; }
-    if (rq_on()) rq_present(g_last_presented, total_frames);
+    if (rq_on()) rq_present(g_last_presented, total_frames, false);
     else backend_present_now(g_last_presented, total_frames);
 }
 
@@ -764,10 +767,13 @@ static void present_hooks(void) {
 
 void backend_present(NvnTexture *t) {
     g_last_presented = t;
-    uint64_t frame = total_frames;
-    if (rq_on()) rq_present(t, frame);
+    uint64_t frame = total_frames, t0 = plat_now_ns();
+    if (rq_on()) rq_present(t, frame, true);
     else backend_present_now(t, frame);
+    uint64_t t1 = plat_now_ns();
+    g_present_ns += t1 - t0;  // (LARECOMP_LOG_PACE, pace.c)
     present_hooks();
+    g_hooks_ns += plat_now_ns() - t1;
 }
 
 // ================================================================== UI thread

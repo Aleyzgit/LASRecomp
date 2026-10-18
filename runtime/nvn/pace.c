@@ -1,6 +1,5 @@
 // Frame pacing, shared by the Metal (metal.m) and Vulkan (vulkan/device.c) presents: each presented frame calls
 // pace_frame() on the presenting thread, and the backends pass the game's timing counters through pace_end_counter().
-#include <time.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -71,18 +70,19 @@ void pace_frame(void) {
     static uint64_t last_rq;
     uint64_t rqw = g_rq_wait_ns - last_rq;
     last_rq = g_rq_wait_ns;
-    if (log) {  // (plus this thread's CPU time per frame and the render thread's: work, independent of waits)
+    if (log) {  // (plus this thread's CPU time per frame and the render thread's: work, independent of waits; and where
+                // this thread's frame went in the renderer's frontend - rqueue.h)
         extern uint64_t rq_render_cpu_ns(void);
-        static uint64_t last_cpu, last_rcpu;
-        uint64_t cpu = 0, rcpu = rq_render_cpu_ns();
-#ifndef _WIN32
-        struct timespec ts;
-        if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0) cpu = (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
-#endif
-        LOG("[pace] period %.2f blocked %.2f busy %.2f ms (queue wait %.2f, cpu %.2f, render cpu %.2f)\n", p / 1e6, wt / 1e6, busy,
-            rqw / 1e6, last_cpu ? (cpu - last_cpu) / 1e6 : 0.0, last_rcpu ? (rcpu - last_rcpu) / 1e6 : 0.0);
+        extern __thread uint64_t g_rq_lock_ns, g_submit_ns, g_gpu_wait_ns, g_present_ns, g_hooks_ns;
+        static uint64_t last_cpu, last_rcpu, l_lock, l_sub, l_gpu, l_pres, l_hooks;
+        uint64_t cpu = plat_thread_cpu_ns(), rcpu = rq_render_cpu_ns();
+        LOG("[pace] period %.2f blocked %.2f busy %.2f ms (queue wait %.2f, cpu %.2f, render cpu %.2f, gpu wait %.2f, submit %.2f, "
+            "present %.2f, hooks %.2f, lock %.2f)\n", p / 1e6, wt / 1e6, busy, rqw / 1e6, last_cpu ? (cpu - last_cpu) / 1e6 : 0.0,
+            last_rcpu ? (rcpu - last_rcpu) / 1e6 : 0.0, (g_gpu_wait_ns - l_gpu) / 1e6, (g_submit_ns - l_sub) / 1e6,
+            (g_present_ns - l_pres) / 1e6, (g_hooks_ns - l_hooks) / 1e6, (g_rq_lock_ns - l_lock) / 1e6);
         last_cpu = cpu;
         last_rcpu = rcpu;
+        l_lock = g_rq_lock_ns, l_sub = g_submit_ns, l_gpu = g_gpu_wait_ns, l_pres = g_present_ns, l_hooks = g_hooks_ns;
     }
     int o = busy > 16.2;
     stat_pace_over += o;

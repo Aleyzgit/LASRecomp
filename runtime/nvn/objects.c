@@ -122,13 +122,24 @@ NVN(nvnQueueSubmitCommands) {
     int n = (int)A(1);
     const uint64_t *handles = AP(2);
     bool rq = rq_on();
+    uint64_t t0 = plat_now_ns();
     for (int i = 0; i < n; i++) {
         if (rq) rq_submit(handles[i]);  // the render thread translates it (rqueue.c)
         else backend_execute(handles[i]);
     }
+    g_submit_ns += plat_now_ns() - t0;
 }
+__thread uint64_t g_submit_ns, g_gpu_wait_ns;
 NVN(nvnQueueFlush) { (void)c; }
-NVN(nvnQueueFinish) { (void)c; if (rq_on()) rq_drain(); renderer_sync(); }
+NVN(nvnQueueFinish) {
+    (void)c;
+    if (rq_on()) rq_drain();
+    uint64_t t0 = plat_now_ns();
+    rq_watch("QueueFinish: the GPU", 0);
+    renderer_sync();
+    rq_watch(NULL, 0);
+    g_gpu_wait_ns += plat_now_ns() - t0;
+}
 
 static NvnSync *sync_of(uint64_t guest) {
     NvnSync *s = HOST(NvnSync, guest);
@@ -140,7 +151,9 @@ void renderer_wait_seq(uint64_t seq);
 // A fence's seq: the render thread's item number when it's on (rqueue.c), else the backend's submission number.
 NVN(nvnQueueFenceSync) { NvnSync *s = sync_of(A(1)); s->signaled = 1; s->seq = rq_on() ? rq_fence_seq() : renderer_fence_seq(); }
 void nvn_sync_set_seq(uint64_t guest, uint64_t seq) {
-    if (rq_on()) { uint64_t q = rq_current_item(); if (q) seq = q; }  // (set by the submit's pre-scan already)
+    // (the render thread: the list's number was set when it was queued; the game may have placed this sync again in
+    // a later list since, and that number must stay)
+    if (rq_current_item()) return;
     NvnSync *s = sync_of(guest);
     s->signaled = 1;
     s->seq = seq;
@@ -159,13 +172,55 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     if (getenv("LARECOMP_LOG_SYNC") && n++ % 60 == 0) LOG("[nvn] SyncWait #%llu (lr %llx)\n", (unsigned long long)n, c->x[30]);
     static int whole = -1;  // LARECOMP_SYNC_ALL=1: old behaviour, wait for all submitted work
     if (whole < 0) whole = getenv("LARECOMP_SYNC_ALL") ? 1 : 0;
-    if (flush) { if (rq_on()) rq_flush(); else renderer_flush(); }
-    else if (whole) { if (rq_on()) rq_drain(); renderer_sync(); }
+    uint64_t t0 = 0;
+    if (flush) { if (rq_on()) rq_flush(); else { t0 = plat_now_ns(); renderer_flush(); } }
+    else if (whole) { if (rq_on()) rq_drain(); t0 = plat_now_ns(); rq_watch("SyncWait (all): the GPU", 0); renderer_sync(); }
     else {  // only the submission that holds this fence
-        uint64_t seq = sync_of(A(0))->seq;
-        if (seq && rq_on()) seq = rq_wait_item(seq);  // translated and submitted; then its GPU work
+        uint64_t seq = sync_of(A(0))->seq, q = seq;
+        static int stats = -1;  // (LARECOMP_LOG_PACE: which fences the game waits on, and how long)
+        if (stats < 0) stats = getenv("LARECOMP_LOG_PACE") != NULL;
+        uint64_t behind = 0, w0 = 0;
+        bool cur = false, untranslated = false;
+        if (seq && rq_on()) {
+            if (stats) { cur = rq_fence_info(seq, &behind, &untranslated); w0 = plat_now_ns(); }
+            seq = rq_wait_item(seq);  // translated and submitted; then its GPU work
+        }
+        t0 = plat_now_ns();
+        rq_watch("SyncWait: the GPU, submission", seq);
         renderer_wait_seq(seq);
+        static long tr_at = -1;  // (debug, rqueue.c LARECOMP_RQ_TRACE) the game thread's fence waits in those frames
+        if (tr_at < 0) tr_at = getenv("LARECOMP_RQ_TRACE") ? atol(getenv("LARECOMP_RQ_TRACE")) : 0;
+        extern uint64_t renderer_present_count(void);
+        if (tr_at && renderer_present_count() >= (uint64_t)tr_at && renderer_present_count() < (uint64_t)tr_at + 4)
+        {
+            extern uint64_t rq_trace_t0;
+            LOG("[rq-trace] game frame %llu: fence wait item %llu (gpu %llu) from %.3f, translation %.3f ms, GPU %.3f ms\n",
+                (unsigned long long)renderer_present_count(), (unsigned long long)q, (unsigned long long)seq,
+                ((w0 ? w0 : t0) - rq_trace_t0) / 1e6, w0 ? (t0 - w0) / 1e6 : 0.0, (plat_now_ns() - t0) / 1e6);
+        }
+        if (stats && q && rq_on()) {
+            static struct { uint64_t n, untranslated, behind, rq_ns, gpu_ns, tr_ns, head_ns; } st[2];
+            static uint64_t total;
+            uint64_t t1 = plat_now_ns(), tr, head;
+            extern void rq_fence_times(uint64_t wait_start, uint64_t *translate_ns, uint64_t *head_ns);
+            rq_fence_times(w0, &tr, &head);
+            st[cur].n++, st[cur].untranslated += untranslated, st[cur].behind += behind;
+            st[cur].rq_ns += t0 - w0, st[cur].gpu_ns += t1 - t0, st[cur].tr_ns += tr, st[cur].head_ns += head;
+            if (++total % 600 == 0) {
+                for (int k = 1; k >= 0; k--)
+                    if (st[k].n)
+                        LOG("[rq] fence waits (%s frame): %llu, not translated yet %llu, avg %.1f items queued after it, "
+                            "avg wait for translation %.3f ms, for the GPU %.3f ms; its list: queued to translated %.3f ms, "
+                            "translated %.3f ms before the wait\n", k ? "this" : "an earlier",
+                            (unsigned long long)st[k].n, (unsigned long long)st[k].untranslated, (double)st[k].behind / st[k].n,
+                            st[k].rq_ns / 1e6 / st[k].n, st[k].gpu_ns / 1e6 / st[k].n, st[k].tr_ns / 1e6 / st[k].n,
+                            st[k].head_ns / 1e6 / st[k].n);
+                memset(st, 0, sizeof st);
+            }
+        }
     }
+    rq_watch(NULL, 0);
+    if (t0) g_gpu_wait_ns += plat_now_ns() - t0;
     RET(0);
 }
 NVN(nvnSyncCreateGLSync) { RET(0); }
