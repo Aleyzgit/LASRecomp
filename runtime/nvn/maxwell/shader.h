@@ -87,25 +87,22 @@ typedef struct {
 #define GMAP_MAX 16  // ranges in the table (GMap { uvec4 gmap[GMAP_MAX + 1]; }: [i] = addr lo, addr hi, size, word offset;
                      // [GMAP_MAX].x = count)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
-// (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes when one storage buffer
-// can't span it (maxStorageBufferRange: 1 GB on Intel, issue #8) or when it is imported chunk by chunk as the game
-// binds it (AMD APUs: vulkan/exec.c gmem_lazy): a descriptor array in a set of its own after the stages' sets, which
-// the shader indexes with constants only (a switch on the address's chunk: no per-invocation descriptor indexing,
-// which Intel runs as a loop over the wave - 13.6 vs 8 ms for the main pass - and which needs features of its own).
-// A chunk that isn't bound holds a small dummy buffer; an access to one counts in GMiss. 0: one buffer.
+// (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes in two cases:
+// - windows of one import where a storage buffer can't span the heap (Intel: 1 GB, issue #8): one binding per window
+//   (GMEM_CHUNK_BINDING + k in set GMEM_CHUNK_SET) and plain branches, cheap to run and to compile;
+// - chunks imported as the game binds them (AMD APUs: vulkan/exec.c gmem_lazy; maxwell_gmem_lazy): the shader takes
+//   the chunk's device address and size from a table (GChunks, binding 0) and goes through a buffer reference after
+//   one bounds check per LDG / STG (an aligned 8 or 16 byte access never crosses a chunk). A chunk not imported has
+//   size 0: the access reads 0 / drops the store and counts in GMiss (binding 1), with the lowest word index hit.
+//   (A per-access switch over constant descriptors, tried first, took the NVIDIA driver ~40 s to compile for the
+//   chain chomps' compute shader with 87 access sites, and Intel ran it as a loop over the wave.)
+// 0: one buffer.
 extern uint32_t maxwell_gmem_chunk_shift;
-// (diagnostic, exec.c LARECOMP_VK_GMEM_CHECK=1, windows of one import only) every chunked read is compared with the
-// same word read through the whole heap at GMEM_BUFFER_INDEX; a difference counts as a miss of that chunk (with its address)
-extern bool maxwell_gmem_check;
-// (=2: stores and atomics also go through the whole heap, after the chunked one: if that mends the picture, the chunked store is at fault)
-extern bool maxwell_gmem_check_store;
-// One binding per chunk (GMEM_CHUNK_BINDING + k, GMiss after the last) and plain if-chains without the dummy / miss
-// logic: beta_5's form, for windows of one import (exec.c: LARECOMP_VK_GMEM_FORM=bindings)
-extern bool maxwell_gmem_bindings;
-#define GMEM_CHUNKS_MAX 256  // descriptors in the array (HEAP_MAX in 16 MB chunks is 208)
+extern bool maxwell_gmem_lazy;
+#define GMEM_CHUNKS_MAX 256  // chunks at most (HEAP_MAX in 16 MB chunks is 208)
 #define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
-#define GMEM_CHUNK_BINDING 0  // GMem gmem_[chunks]
-#define GMEM_MISS_BINDING 1   // GMiss: uint n[GMEM_CHUNKS_MAX] (accesses), w[GMEM_CHUNKS_MAX] (lowest word hit)
+#define GMEM_CHUNK_BINDING 0  // windows: GMem<k> at binding k; lazy: the GChunks table
+#define GMEM_MISS_BINDING 1   // lazy: GMiss { uint n[GMEM_CHUNKS_MAX]; uint w[GMEM_CHUNKS_MAX]; } (accesses, lowest word hit)
 static inline int maxwell_gmem_chunks(void) {
     return maxwell_gmem_chunk_shift ? (int)((maxwell_gmem_size + (1ull << maxwell_gmem_chunk_shift) - 1) >> maxwell_gmem_chunk_shift) : 1;
 }
