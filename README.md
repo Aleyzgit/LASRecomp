@@ -232,6 +232,9 @@ none of their files are used):
 - **Ryujinx** by the Ryujinx Team and Contributors (MIT, `third_party/ryujinx/LICENSE.txt`) - the audio renderer's
   reverb is a port of its ReverbState / reverb command and the mixer is modelled on its AudioRenderer; its shader
   instruction decoders were the bit-layout reference for parts of the shader translator
+- **SuperMarioWonderRecomp** by BelmanteGu (https://github.com/BelmanteGu/SuperMarioWonderRecomp) - its
+  ahead-of-time shader approach is what the first-launch shader preparation follows (a shipped list of shader variants,
+  built on the player's machine from their own game files)
 - The Switch homebrew community's documentation ([Switchbrew](https://switchbrew.org))
 
 ## Legal
