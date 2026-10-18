@@ -35,7 +35,7 @@ https://discord.gg/DhrgdYqdcY
 
 ## Status
 
-This is a beta release. That means bugs are likely, crashes could occur, randomizer seeds could possibly be unsolvable (dungeon room shuffle modes are especially experimental at this point) and some graphics issues remain (especially in wide and ultrawide aspect ratios). This is a work in progress, hence the beta designation. To report a bug or a possible randomizer logic issue, use either the [Discord](https://discord.gg/DhrgdYqdcY) or a [GitHub issue](https://github.com/peiikai/LASRecomp/issues) - see [CONTRIBUTING.md](CONTRIBUTING.md#reporting-bugs) for what to include.
+This is a beta release. That means bugs are likely, crashes could occur, randomizer seeds could possibly be unsolvable (dungeon room shuffle modes are especially experimental at this point) and some graphics issues remain (especially in wide and ultrawide aspect ratios). This is a work in progress, hence the beta designation. To report a bug or a possible randomizer logic issue, open a [GitHub issue](https://github.com/peiikai/LASRecomp/issues) - see [CONTRIBUTING.md](CONTRIBUTING.md#reporting-bugs) for what to include.
 
 ### Known issues
 
@@ -173,6 +173,23 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - `LARECOMP_DATA_ROOT=<dir>` overrides all of these.
 
 ## Credits
+
+**Contributors** - thank you to everyone who has sent code (GitHub handles, in order of first contribution):
+- **[@dvilelaf](https://github.com/dvilelaf)** - the System language setting (#15), packaging fix for the game code
+  generator helper (#10), and the task forwarder fix for the level-transition crash (#34, issue #19)
+- **[@Tensorlong](https://github.com/Tensorlong)** - Metal half-precision fix for the white Link on M1 Macs (#18)
+- **[@mansarip](https://github.com/mansarip)** - support for unrecognised controllers through a simple mapping file (#26)
+- **[@we11adam](https://github.com/we11adam)** - shared fonts served per language instead of one Japanese font (#27),
+  and the zh-Hans / zh-Hant codes for Chinese (#25)
+- **[@Maganra](https://github.com/Maganra)** - Linux page write tracking (userfaultfd + PAGEMAP_SCAN) for the Vulkan
+  vertex cache and texture checks (#42)
+- **[@hjqcan](https://github.com/hjqcan)** - centralized game patch and runtime addresses (#57), CRLF settings
+  parsing plus Traditional Chinese locale detection (#53), and Windows game thread stacks reserved instead of
+  committed, about 9 GB less memory committed (#107)
+- **[@gitarre1234rr5](https://github.com/gitarre1234rr5)** - controller rumble: the game's vibration on your controller
+  (#104), and a regression test for the kernel's timed condition-variable wait (#88)
+
+Thanks also to everyone who reports issues and tests builds; your logs and screenshots find most of the bugs.
 
 **LAS-Randomizer** - the randomizer at the heart of this project's randomizer features, vendored (with local
 changes) in `third_party/LAS-Randomizer` under the MIT license. Huge thanks to its authors and community:
