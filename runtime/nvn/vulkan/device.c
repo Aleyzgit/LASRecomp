@@ -742,7 +742,9 @@ int ui_run(void) {
         if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
+            input_rumble_poll();
             if (e.type == SDL_EVENT_QUIT) {
+                input_rumble_stop();
                 LOG("window closed\n");
                 exit(0);
             }
@@ -752,5 +754,6 @@ int ui_run(void) {
             input_handle_event(&e);
         }
         menu_apply_window_requests(window);
+        input_rumble_poll();
     }
 }
