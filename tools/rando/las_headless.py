@@ -241,10 +241,6 @@ def main():
                                                   settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-pots"))
         print('pots:', len(pot_locs), 'locations', ('(no logic for: ' + ', '.join(sorted(skipped)) + ')') if skipped else '',
               flush=True)
-        for name, p in pot_locs.items():  # (pots Link may lose the way to: junk only)
-            if p['room'] in pots_mod.MISSABLE_ROOMS:
-                settings.setdefault('junk-locations', set()).add(name)
-                settings['excluded-locations'].add(name)
 
     bush_locs = {}
     if settings.get('bushes'):  # bushsanity: every overworld bush hides an item (tools/rando/bushes.py)
