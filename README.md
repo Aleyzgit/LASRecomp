@@ -212,6 +212,9 @@ none of their files are used):
   (GPL 2.0; Python bindings BSD; runs small pieces of code to resolve jump tables) and
   [python-lz4](https://github.com/python-lz4/python-lz4) (BSD 3-clause, with the LZ4 library: BSD 2-clause)
 - [envytools](https://github.com/envytools/envytools) - NVIDIA GPU documentation used for the shader translator
+- **Ryujinx** by the Ryujinx Team and Contributors (MIT, `third_party/ryujinx/LICENSE.txt`) - the audio renderer's
+  reverb is a port of its ReverbState / reverb command and the mixer is modelled on its AudioRenderer; its shader
+  instruction decoders were the bit-layout reference for parts of the shader translator
 - The Switch homebrew community's documentation ([Switchbrew](https://switchbrew.org))
 
 ## Legal
@@ -223,7 +226,7 @@ this repository and not in release builds. You must provide your own legally obt
 ## License
 
 LAS Recomp's own code (the recompiler tools, the runtime, the randomizer additions) is open source under the
-[MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), Dear ImGui (MIT),
+[MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), code ported from Ryujinx (MIT), Dear ImGui (MIT),
 Vulkan Memory Allocator (MIT), SMAA (MIT), AMD FSR 1 (MIT), the Baloo 2 font (SIL OFL 1.1), the DejaVu Sans font (Bitstream Vera / DejaVu license), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), the
 Zig compiler (MIT; its LLVM / Clang / LLD: Apache 2.0 with LLVM exceptions; its C library headers keep their own
 licenses), and the generator helpers' bundled libraries listed under Credits (oead / evfl / Keystone in the seed
