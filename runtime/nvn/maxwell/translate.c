@@ -1904,8 +1904,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         sp(&s, "void gmiss(uint c, uint i) { atomicAdd(gmiss_.n[c], 1u); atomicMin(gmiss_.w[c], i); }\n");
         // (gchunk[c]: x, y = device address, z = words; the first word's chunk holds the whole aligned access)
         sp(&s, "#define GMC(i) ((i) >> %du)\n#define GMO(i) ((i) & 0x%xu)\n", ws, (1u << ws) - 1);
-        if (direct)  // (gd[k]: x = the chunk's first word, y = its words (0: unused), z, w = its device address)
+        if (direct) {  // (gd[k]: x = the chunk's first word, y = its words (0: unused), z, w = its device address; GDir<k>: it)
             sp(&s, "layout(push_constant) uniform GDirect { uvec4 gd[%d]; };\n", GMEM_DIRECT_MAX);
+            for (int k = 0; k < GMEM_DIRECT_MAX; k++)
+                sp(&s, "layout(std430, set = %d, binding = %d) %sbuffer GDir%d { uint w[]; } gdir%d_;\n", cs, GMEM_DIRECT_BINDING + k,
+                   c->uses_gmem_store ? "" : "readonly ", k, k);
+        }
         if (maxwell_gmem_memo)  // the last chunk looked up stays in registers (shader.h maxwell_gmem_memo)
             sp(&s, "uint gmc_ = 0xFFFFFFFFu, gmz_ = 0u; uint64_t gma_ = 0ul;\n"
                    "void gmsel(uint c) { if (c != gmc_) { uvec4 e = gchunk[c]; gmc_ = c; gmz_ = e.z; gma_ = (uint64_t(e.y) << 32) | uint64_t(e.x); } }\n");
@@ -1923,9 +1927,16 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         for (int f = 0; f < (int)(sizeof fn / sizeof fn[0]); f++) {
             if (fn[f].store && !c->uses_gmem_store) continue;
             sp(&s, "%s { uint o;", fn[f].head);
-            if (direct)  // (whole chunks: an aligned access in one never leaves it)
-                for (int k = 0; k < GMEM_DIRECT_MAX; k++)
-                    sp(&s, " o = i - gd[%d].x; if (o < gd[%d].y) { GW p = GW((uint64_t(gd[%d].w) << 32) | uint64_t(gd[%d].z)); %s }", k, k, k, k, fn[f].act);
+            if (direct)  // (whole chunks: an aligned access in one never leaves it; the storage buffer, not the address)
+                for (int k = 0; k < GMEM_DIRECT_MAX; k++) {
+                    char act[192], *d = act;
+                    for (const char *a = fn[f].act; *a && d < act + sizeof act - 8; a++) {
+                        if (a[0] == 'p' && a[1] == '.') d += snprintf(d, 8, "gdir%d_", k);
+                        else *d++ = *a;
+                    }
+                    *d = 0;
+                    sp(&s, " o = i - gd[%d].x; if (o < gd[%d].y) { %s }", k, k, act);
+                }
             char lim[16];
             if (fn[f].last) snprintf(lim, sizeof lim, "o + %du", fn[f].last); else snprintf(lim, sizeof lim, "o");
             if (maxwell_gmem_memo)

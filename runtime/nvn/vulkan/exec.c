@@ -2478,7 +2478,8 @@ static void gc_touch(uint64_t off, uint64_t size) {
     for (int k = k0; k <= k1; k++) if (!gc[k].buf) gc_import(k);
 }
 
-// The chunk set's layout: lazy mode the table (GChunks) and GMiss; windows one storage binding each (shader.h).
+// The chunk set's layout: lazy mode the table (GChunks), GMiss and the draw's chunks (GDir<k>); windows one storage
+// binding each (shader.h).
 static VkDescriptorSetLayout gmem_chunk_layout(void) {
     if (gc_layout) return gc_layout;
     VkShaderStageFlags st_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
@@ -2487,6 +2488,8 @@ static VkDescriptorSetLayout gmem_chunk_layout(void) {
     if (gc_lazy) {
         lb[nb++] = (VkDescriptorSetLayoutBinding){GMEM_CHUNK_BINDING, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, st_, NULL};
         lb[nb++] = (VkDescriptorSetLayoutBinding){GMEM_MISS_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, st_, NULL};
+        for (int k = 0; k < GMEM_DIRECT_MAX; k++)
+            lb[nb++] = (VkDescriptorSetLayoutBinding){GMEM_DIRECT_BINDING + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, st_, NULL};
     } else {
         for (int k = 0; k < gc_n; k++) lb[nb++] = (VkDescriptorSetLayoutBinding){GMEM_CHUNK_BINDING + k, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, st_, NULL};
     }
@@ -2495,8 +2498,15 @@ static VkDescriptorSetLayout gmem_chunk_layout(void) {
     return gc_layout;
 }
 
-// The chunk set for the pending submission: the table of imported chunks and GMiss (lazy), or the windows.
-static VkDescriptorSet gmem_chunk_set(void) {
+// The chunk set for the pending submission: the table of imported chunks, GMiss and the draw's chunks dk[k] (-1: none)
+// as GDir<k> (lazy), or the windows. Lazy sets are kept per submission and chunk generation, keyed by dk: a frame has a
+// handful of storage buffer chunk combinations, so a draw binds a set it already has (no allocation, no update).
+#define GC_SET_CACHE 32
+static uint64_t gc_direct_bytes(int k) {  // (GDir<k>'s range: the chunk, within the storage buffer range limit)
+    uint64_t lim = g_vk.props.limits.maxStorageBufferRange;
+    return lim && gc[k].size > lim ? lim & ~3ull : gc[k].size;
+}
+static VkDescriptorSet gmem_chunk_set(const int dk[GMEM_DIRECT_MAX]) {
     if (!gc_dummy) {
         VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4096,
                                  .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT};
@@ -2521,24 +2531,45 @@ static VkDescriptorSet gmem_chunk_set(void) {
         gc_remembered_load();
         for (int k = 0; k < gc_n; k++) if (gc_remembered[k] && !gc[k].buf) gc_import(k);
     }
-    if (gc_set && gc_set_seq == seq && gc_set_gen == gc_gen) return gc_set;
-    static VkDescriptorBufferInfo bi[GC_MAX + 1];
-    static VkWriteDescriptorSet w[GC_MAX];
+    static struct { VkDescriptorSet set; int dk[GMEM_DIRECT_MAX]; } cache[GC_SET_CACHE];
+    static int ncache, next;
+    static VkSpan tab_span;  // (the table for this submission and generation, shared by its sets)
+    if (gc_set_seq != seq || gc_set_gen != gc_gen) { ncache = 0; next = 0; gc_set = VK_NULL_HANDLE; }
+    if (!gc_lazy) {
+        if (gc_set) return gc_set;
+    } else {
+        for (int j = 0; j < ncache; j++)
+            if (!memcmp(cache[j].dk, dk, sizeof cache[j].dk)) return cache[j].set;
+    }
+    static VkDescriptorBufferInfo bi[GC_MAX + 2 + GMEM_DIRECT_MAX];
+    static VkWriteDescriptorSet w[GC_MAX + 2 + GMEM_DIRECT_MAX];
     VkDescriptorSet set = vk_alloc_set(gmem_chunk_layout());
     uint32_t nw = 0;
     if (gc_lazy) {  // GChunks: uvec4 per chunk = device address lo, hi, words (0: not imported), 0
-        static uint32_t tab[GC_MAX * 4];
-        for (int k = 0; k < gc_n; k++) {
-            tab[k * 4 + 0] = (uint32_t)gc[k].addr; tab[k * 4 + 1] = (uint32_t)(gc[k].addr >> 32);
-            tab[k * 4 + 2] = gc[k].buf ? (uint32_t)(gc[k].size >> 2) : 0; tab[k * 4 + 3] = 0;
+        if (!ncache) {
+            static uint32_t tab[GC_MAX * 4];
+            for (int k = 0; k < gc_n; k++) {
+                tab[k * 4 + 0] = (uint32_t)gc[k].addr; tab[k * 4 + 1] = (uint32_t)(gc[k].addr >> 32);
+                tab[k * 4 + 2] = gc[k].buf ? (uint32_t)(gc[k].size >> 2) : 0; tab[k * 4 + 3] = 0;
+            }
+            tab_span = vk_transient_copy(tab, sizeof tab, 256);
         }
-        VkSpan t = vk_transient_copy(tab, sizeof tab, 256);
-        bi[0] = (VkDescriptorBufferInfo){t.buf, t.off, sizeof tab};
+        bi[0] = (VkDescriptorBufferInfo){tab_span.buf, tab_span.off, sizeof(uint32_t) * GC_MAX * 4};
         bi[1] = (VkDescriptorBufferInfo){gc_miss_buf, 0, sizeof(uint32_t) * 2 * GC_MAX};
         w[nw++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_CHUNK_BINDING,
                                          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bi[0]};
         w[nw++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_MISS_BINDING,
                                          .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[1]};
+        for (int j = 0; j < GMEM_DIRECT_MAX; j++) {  // (GDir<j>: the chunk's own import, whole; unused: the zero buffer)
+            int k = dk[j];
+            bi[2 + j] = k >= 0 && k < gc_n && gc[k].buf ? (VkDescriptorBufferInfo){gc[k].buf, 0, gc_direct_bytes(k)}
+                                                       : (VkDescriptorBufferInfo){gc_dummy, 0, 4096};
+            w[nw++] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set, .dstBinding = GMEM_DIRECT_BINDING + j,
+                                             .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi[2 + j]};
+        }
+        int slot = ncache < GC_SET_CACHE ? ncache++ : (next++ % GC_SET_CACHE);
+        cache[slot].set = set;
+        memcpy(cache[slot].dk, dk, sizeof cache[slot].dk);
     } else {  // windows of the one import; one past it is the dummy (reads 0, as the zero buffer before the import)
         VkDescriptorBufferInfo all = gmem_info();
         for (int k = 0; k < gc_n; k++) {
@@ -2555,16 +2586,18 @@ static VkDescriptorSet gmem_chunk_set(void) {
     return set;
 }
 
-// Lazy mode, a draw: the imported chunks under its vertex / fragment storage buffers, in slot order, as the shaders'
-// GDirect push constants (shader.h GMEM_DIRECT_MAX): reads there skip the table. A range over two chunks gives both.
+// Lazy mode, a draw: the imported chunks under its vertex / fragment storage buffers, in slot order (shader.h
+// GMEM_DIRECT_MAX): gd[] for the shaders' GDirect push constants (the range each GDir<k> covers), dk[] the chunks for
+// the set's GDir<k> bindings. A range over two chunks gives both. Accesses there are storage buffer loads, not the table.
 // LARECOMP_VK_GMEM_DIRECT=0: none (every access through the table, as before; no shader change).
-static void gmem_direct_push(VkCommandBuffer cb, VkPipelineLayout layout, uint32_t stages) {
+static void gmem_direct_pick(uint32_t stages, uint32_t gd[GMEM_DIRECT_MAX * 4], int dk[GMEM_DIRECT_MAX]) {
     static int on = -1;
     if (on < 0) {
         on = !getenv("LARECOMP_VK_GMEM_DIRECT") || atoi(getenv("LARECOMP_VK_GMEM_DIRECT")) != 0;
         if (!on) LOG("[vk] lazy chunks: storage buffer chunks through the table too (LARECOMP_VK_GMEM_DIRECT=0)\n");
     }
-    uint32_t gd[GMEM_DIRECT_MAX * 4] = {0};
+    memset(gd, 0, sizeof(uint32_t) * GMEM_DIRECT_MAX * 4);
+    for (int j = 0; j < GMEM_DIRECT_MAX; j++) dk[j] = -1;
     int n = 0;
     for (int stage = 0; on && stage < 2; stage++) {
         if (!(stages & (1u << stage))) continue;
@@ -2576,17 +2609,17 @@ static void gmem_direct_push(VkCommandBuffer cb, VkPipelineLayout layout, uint32
             for (int k = k0; k <= k1 && k < gc_n && n < GMEM_DIRECT_MAX; k++) {
                 if (!gc[k].buf) continue;
                 int j = 0;
-                while (j < n && gd[j * 4] != (uint32_t)(((uint64_t)k << gc_shift) >> 2)) j++;
+                while (j < n && dk[j] != k) j++;
                 if (j < n) continue;
+                dk[n] = k;
                 gd[n * 4 + 0] = (uint32_t)(((uint64_t)k << gc_shift) >> 2);
-                gd[n * 4 + 1] = (uint32_t)(gc[k].size >> 2);
+                gd[n * 4 + 1] = (uint32_t)(gc_direct_bytes(k) >> 2);
                 gd[n * 4 + 2] = (uint32_t)gc[k].addr;
                 gd[n * 4 + 3] = (uint32_t)(gc[k].addr >> 32);
                 n++;
             }
         }
     }
-    vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof gd, gd);
 }
 
 // Binds the chunk set for a draw / dispatch whose shaders (stages: a mask of 1 << stage) use global memory: their storage
@@ -2608,9 +2641,13 @@ static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeli
             gc_touch(a - HEAP_BASE, sz);
         }
     }
-    VkDescriptorSet set = gmem_chunk_set();
+    uint32_t gd[GMEM_DIRECT_MAX * 4];
+    int dk[GMEM_DIRECT_MAX] = {-1, -1, -1, -1};
+    bool direct = gc_lazy && bp == VK_PIPELINE_BIND_POINT_GRAPHICS;
+    if (direct) gmem_direct_pick(stages, gd, dk);
+    VkDescriptorSet set = gmem_chunk_set(dk);
     vkCmdBindDescriptorSets(cb, bp, layout, set_index, 1, &set, 0, NULL);
-    if (gc_lazy && bp == VK_PIPELINE_BIND_POINT_GRAPHICS) gmem_direct_push(cb, layout, stages);
+    if (direct) vkCmdPushConstants(cb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof gd, gd);
 }
 
 // Once a frame (the present's submission): a chunk shaders missed is imported for the next frame; the lowest address
