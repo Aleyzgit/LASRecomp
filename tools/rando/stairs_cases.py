@@ -4,8 +4,9 @@ AreaUpstairs (a side-view passage's ladder top) and AreaDownstairs (a room's sta
 rando/<seed>/dungeon_map.tsv, with where Link must end up.
 
     python3 stairs_cases.py <game romfs> <seed dir>
-    -> level  kind(up/down)  from room  trigger x y z  target locator  target area x0 z0 x1 z1  gate flag
-       (gate flag: the event flag the trigger waits for - stairs that appear once a room is cleared - or -1)
+    -> level  kind(up/down)  from room  trigger x y z  target locator  target area x0 z0 x1 z1  gate flag  mode
+       (gate flag: the event flag the trigger waits for - stairs that appear once a room is cleared - or -1;
+       mode: how Link goes, e.g. LadderUp / LadderDown / DefaultDownStairs / WaterSideIn)
 
 The trigger's room is warped into by its own start (a side-view room's 'LadderDown' start is at its ladder top);
 the target area is the room named after the target locator, as the seed's level file has it.
@@ -54,7 +55,8 @@ def main(romfs, seed):
                 x0, _, z0, x1, _, z1 = areas[area]
                 gate = a.switches[0][1] if a.switches[0][0] == 1 else -1  # (switch type 1: a global event flag)
                 print('\t'.join([lv, kind, room, '%.2f' % a.posX, '%.2f' % a.posY, '%.2f' % a.posZ, tgt,
-                                 '%g' % x0, '%g' % z0, '%g' % x1, '%g' % z1, str(gate)]))
+                                 '%g' % x0, '%g' % z0, '%g' % x1, '%g' % z1, str(gate),
+                                 (a.parameters[1].decode() if isinstance(a.parameters[1], bytes) else '') or '-']))
 
 
 if __name__ == '__main__':
