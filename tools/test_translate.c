@@ -219,6 +219,8 @@ int main(int argc, char **argv) {
     // TT_GMEM_LAZY=1: chunks imported lazily (table, buffer references, GDirect push constants); TT_GMEM_MEMO=1 its memo
     maxwell_gmem_lazy = getenv("TT_GMEM_LAZY") && atoi(getenv("TT_GMEM_LAZY")) != 0;
     maxwell_gmem_memo = maxwell_gmem_lazy && getenv("TT_GMEM_MEMO") && atoi(getenv("TT_GMEM_MEMO")) != 0;
+    // TT_GMEM_FS_MISS=1: every fragment shader counts misses, no early tests (LARECOMP_VK_GMEM_FS_MISS)
+    maxwell_gmem_fs_miss = maxwell_gmem_lazy && getenv("TT_GMEM_FS_MISS") && atoi(getenv("TT_GMEM_FS_MISS")) != 0;
 #ifdef WITH_GLSL
     shaderc_compiler_t comp = shaderc_compiler_initialize();
     shaderc_compile_options_t opt = shaderc_compile_options_initialize();

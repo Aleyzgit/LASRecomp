@@ -1218,6 +1218,7 @@ typedef struct {
     uint64_t code[2], cmax[2];  // translation inputs (copied: translated on the translator thread)
     ShaderKey vkey, fkey;
     VkShaderModule vs, fs;
+    VkShaderModule fs_late;  // (lazy chunks) fs without early fragment tests, for alpha to coverage pipelines; or NULL
     VkBindingInfo binds[MAX_BIND];
     int nbinds;
     VkDescriptorSetLayout set_layout[3];  // [2] (compute: [1]): the heap chunk set (gmem_chunk_layout)
@@ -1261,6 +1262,24 @@ static void slow_build(uint64_t t0, const char *what, uint64_t code0, uint64_t c
     if (n++ < 40) LOG("[shader] slow build: %s %llx %llx took %llu ms\n", what, (unsigned long long)code0, (unsigned long long)code1, (unsigned long long)ms);
 }
 
+// A fragment shader the translator gave early fragment tests (lazy chunks, translate.c glsl_early_tests): removes the
+// OpExecutionMode EarlyFragmentTests (in place; true if there was one). Alpha to coverage drops samples after the
+// shader, and with early tests their depth / stencil would already be written: those pipelines take this module.
+static bool spirv_strip_early_tests(uint32_t *w, size_t *nwords) {
+    for (size_t i = 5; i < *nwords;) {
+        uint32_t n = w[i] >> 16, op = w[i] & 0xFFFF;
+        if (!n || i + n > *nwords) return false;
+        if (op == 54) return false;  // OpFunction: past the execution modes
+        if (op == 16 && n == 3 && w[i + 2] == 9) {  // OpExecutionMode %main EarlyFragmentTests
+            memmove(w + i, w + i + n, (*nwords - i - n) * sizeof *w);
+            *nwords -= n;
+            return true;
+        }
+        i += n;
+    }
+    return false;
+}
+
 static void compile_program(void *arg) {
     Prog *p = arg;
     uint64_t t0 = SDL_GetTicksNS();
@@ -1272,6 +1291,7 @@ static void compile_program(void *arg) {
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
     p->fs = vk_module(sf, nf);
+    if (spirv_strip_early_tests(sf, &nf)) p->fs_late = vk_module(sf, nf);
     free(sv);
     free(sf);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1674,7 +1694,8 @@ static void build_pipeline(void *arg) {
     PipeKey *k = &pp->k;
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = k->prog->vs, .pName = "main"},
-        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = k->prog->fs, .pName = "main"}};
+        {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
+         .module = k->a2c && k->prog->fs_late ? k->prog->fs_late : k->prog->fs, .pName = "main"}};
     VkVertexInputAttributeDescription va[32];
     VkVertexInputBindingDescription vb[17];
     VkVertexInputBindingDivisorDescriptionEXT vd[17];
@@ -2401,6 +2422,8 @@ static uint32_t gmem_chunk_shift(void) {
     maxwell_gmem_lazy = gc_lazy;
     maxwell_gmem_memo = gc_lazy && getenv("LARECOMP_VK_GMEM_MEMO") && atoi(getenv("LARECOMP_VK_GMEM_MEMO")) != 0;
     if (maxwell_gmem_memo) LOG("[vk] lazy chunks: shaders keep the last chunk looked up (LARECOMP_VK_GMEM_MEMO)\n");
+    maxwell_gmem_fs_miss = gc_lazy && getenv("LARECOMP_VK_GMEM_FS_MISS") && atoi(getenv("LARECOMP_VK_GMEM_FS_MISS")) != 0;
+    if (maxwell_gmem_fs_miss) LOG("[vk] lazy chunks: every fragment shader counts misses, no early tests (LARECOMP_VK_GMEM_FS_MISS)\n");
     if (shift) LOG("[vk] guest heap bound to shaders in %llu MB %s (storage buffers up to %llu MB here)\n",
                    (unsigned long long)(1ull << shift) >> 20, gc_lazy ? "chunks, imported as the game binds them" : "windows", (unsigned long long)lim >> 20);
     return (uint32_t)shift;

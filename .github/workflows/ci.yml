@@ -164,5 +164,7 @@ jobs:
         run: TT_GMEM_CHUNK_SHIFT=24 TT_GMEM_LAZY=1 REF=HEAD tools/test_translate.sh 2000 "$(nproc)" glsl
       - name: Shader translator fuzz (GLSL, guest heap in lazy chunks, memo)
         run: TT_GMEM_CHUNK_SHIFT=24 TT_GMEM_LAZY=1 TT_GMEM_MEMO=1 REF=HEAD tools/test_translate.sh 1000 "$(nproc)" glsl
+      - name: Shader translator fuzz (GLSL, guest heap in lazy chunks, misses counted in every fragment shader)
+        run: TT_GMEM_CHUNK_SHIFT=24 TT_GMEM_LAZY=1 TT_GMEM_FS_MISS=1 REF=HEAD tools/test_translate.sh 500 "$(nproc)" glsl
       - name: Vulkan synchronization failure regression
         run: python tools/test_vulkan_sync_errors.py

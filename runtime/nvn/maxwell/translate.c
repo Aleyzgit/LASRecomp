@@ -26,6 +26,7 @@ uint64_t maxwell_gmem_base, maxwell_gmem_size;
 uint32_t maxwell_gmem_chunk_shift;  // 0: one buffer for the whole heap (GLSL; shader.h)
 bool maxwell_gmem_lazy;
 bool maxwell_gmem_memo;
+bool maxwell_gmem_fs_miss;
 const uint8_t *maxwell_dbg_code;
 uint32_t maxwell_dbg_pc;
 int maxwell_dbg_reg;
@@ -1836,6 +1837,17 @@ static const char *glsl_sampler_type(const ShaderTexture *t) {
     return names[ty][t->shadow ? 1 : 0];
 }
 
+// (GLSL fragment, lazy heap chunks) Early depth / stencil tests for a shader that counts chunk misses (GMiss atomics):
+// only where the tests' outcome can't depend on the shader - no discard, no depth output (a sample mask output
+// isn't translated) - and the shader has no side effect of its own (stores), so whether a hidden fragment runs it is
+// not observable. (Alpha to
+// coverage with early tests would write depth for samples it drops: the renderer uses this shader's module without
+// the execution mode for those pipelines, vulkan/exec.c fs_late.)
+static bool glsl_early_tests(const Ctx *c) {
+    return c->glsl && c->stage == STAGE_FRAGMENT && c->info->uses_gmem && maxwell_gmem_chunk_shift && maxwell_gmem_lazy &&
+           !maxwell_gmem_fs_miss && !c->info->uses_discard && !c->omap_depth && !c->uses_gmem_store;
+}
+
 // Declarations + entry point around the (rewritten) body; mirrors the MSL assembly in maxwell_translate.
 static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     ShaderInfo *info = c->info;
@@ -1899,9 +1911,22 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         bool direct = stage != STAGE_COMPUTE;  // (compute: its storage buffers are in gfast_ already)
         sp(&s, "layout(std140, set = %d, binding = %d) uniform GChunks { uvec4 gchunk[%d]; };\n", cs, GMEM_CHUNK_BINDING, GMEM_CHUNKS_MAX);
         sp(&s, "layout(buffer_reference, std430, buffer_reference_align = 4) %sbuffer GW { uint w[]; };\n", c->uses_gmem_store ? "" : "readonly ");
-        sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint n[%d]; uint w[%d]; } gmiss_;\n", cs, GMEM_MISS_BINDING,
-           GMEM_CHUNKS_MAX, GMEM_CHUNKS_MAX);
-        sp(&s, "void gmiss(uint c, uint i) { atomicAdd(gmiss_.n[c], 1u); atomicMin(gmiss_.w[c], i); }\n");
+        // Misses are counted with atomics on GMiss: a side effect, which in a fragment shader turns early depth / stencil
+        // tests off - every overdrawn fragment ran in full (UHD 770 main pass 13.3 ms vs 8.4). So a fragment shader
+        // whose own result can't depend on late tests (no discard or depth output, no stores) declares
+        // early tests (glsl_early_tests) and keeps its counter; one that can't (discard / depth, no stores)
+        // counts nothing - it would cost those tests - and relies on the runtime bringing its chunks in before the draw:
+        // the bound storage buffers' chunks (gmem_chunk_bind), pointers in uniform buffers, the chunks other shaders
+        // missed (cache/gmem_chunks.txt). LARECOMP_VK_GMEM_FS_MISS=1 (maxwell_gmem_fs_miss): every shader counts, no
+        // early tests (as before; to find a chunk only such a shader reaches).
+        bool count = stage != STAGE_FRAGMENT || maxwell_gmem_fs_miss || c->uses_gmem_store || glsl_early_tests(c);
+        if (count) {
+            sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint n[%d]; uint w[%d]; } gmiss_;\n", cs, GMEM_MISS_BINDING,
+               GMEM_CHUNKS_MAX, GMEM_CHUNKS_MAX);
+            sp(&s, "void gmiss(uint c, uint i) { atomicAdd(gmiss_.n[c], 1u); atomicMin(gmiss_.w[c], i); }\n");
+        } else {
+            sp(&s, "void gmiss(uint c, uint i) { }\n");
+        }
         // (gchunk[c]: x, y = device address, z = words; the first word's chunk holds the whole aligned access)
         sp(&s, "#define GMC(i) ((i) >> %du)\n#define GMO(i) ((i) & 0x%xu)\n", ws, (1u << ws) - 1);
         if (direct) {  // (gd[k]: x = the chunk's first word, y = its words (0: unused), z, w = its device address; GDir<k>: it)
@@ -2001,6 +2026,7 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
             sp(&s, "layout(location = %d) out %s c%d;\n", rt, kind == 1 ? "ivec4" : kind == 2 ? "uvec4" : "vec4", rt);
         }
         if (c->omap_depth) info->writes_depth = true;
+        if (glsl_early_tests(c)) sp(&s, "layout(early_fragment_tests) in;\n");
     } else {
         sp(&s, "layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;\n");
     }

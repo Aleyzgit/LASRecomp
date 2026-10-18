@@ -102,6 +102,11 @@ extern bool maxwell_gmem_lazy;
 // Lazy mode, LARECOMP_VK_GMEM_MEMO=1: the shader keeps the last chunk's address and size in registers and looks the
 // table up only when an access leaves it (a loop over a list in one chunk: one table read, not one per element).
 extern bool maxwell_gmem_memo;
+// Lazy mode, fragment: a shader without discard / depth output / stores declares early fragment tests (its GMiss
+// atomics would turn them off); one with discard / depth output (no stores) counts no misses - the
+// runtime imports the bound storage buffers' chunks before the draw. true (LARECOMP_VK_GMEM_FS_MISS=1): every shader
+// counts, none declares early tests.
+extern bool maxwell_gmem_fs_miss;
 // Lazy mode, vertex / fragment: the chunks under the draw's storage buffers (where the heap reads are) come as push
 // constants, GDirect { uvec4 gd[GMEM_DIRECT_MAX]; } (x = first word, y = words, 0: unused, z, w = device address), and
 // as storage buffers GDir<k> at GMEM_DIRECT_BINDING + k of the chunk set: an access in one is a compare and a plain
