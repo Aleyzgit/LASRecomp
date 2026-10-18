@@ -634,10 +634,8 @@ extern "C" void rando_tab_draw(float scale) {
     static const char *ditems[] = {"Shuffled", "Start with stone beaks", "Start with maps + compasses", "Start with all three"};
     opt_choice("Dungeon items", &g_opts.dungeon_items, ditems, 4, 0,
                "Maps, compasses and stone beaks: shuffled into the item pool, or given at the start.");
-    opt_toggle("Bombs must be found first", &g_opts.bomb_bag, false,
-               "Bombs are an item in the pool: until you find them, shops don't sell bombs and none drop.");
-    opt_toggle("Magic Powder must be found first", &g_opts.powder_bag, false,
-               "Magic Powder is an item in the pool: until you find it, none can be bought or found.");
+    opt_toggle("Bomb bag", &g_opts.bomb_bag, false, "You must find your bomb bag to collect and carry bombs.");
+    opt_toggle("Powder bag", &g_opts.powder_bag, false, "You must find your powder bag to collect and carry Magic Powder.");
     static const char *traps[] = {"None", "Few", "Several", "Many", "Trapsanity"};
     opt_choice("Traps", &g_opts.traps, traps, 5, 1, "How many traps hide among the items.");
     static const char *shells[] = {"None", "Up to 5", "Up to 15", "Up to 30", "Up to 40", "All (50)"};
