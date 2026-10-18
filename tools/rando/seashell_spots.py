@@ -6,18 +6,28 @@ vanilla_locations). Logic: LAS's own conditions (shovel, bracelet, boots, bombs,
 
 In the game each one is the Secret Seashell actor (ItemSecretSeashell 0x87, parameter 0 = its seashell index):
   dig    placed in the room file, buried until the shovel digs its tile
-  drop   spawned by the bush / rock / pot / tree / bomb hole through ItemDrop.gsheet's Seashell<n> entry (the item
-         appears where the shell would; out of a tree - the shell falls out of its crown - or a bomb hole - it jumps out -
-         on a free tile beside it)
-The runtime (runtime/hle/shell_spots.c) turns it into the seed's item: a SinkingSword item actor (the actor LAS uses
-for standing items) with the item's model, comes up out of the dug hole / drops where the shell would. Picking it up
-runs its entry in SinkingSword.bfevfl - LAS's item-get, the game's message box - and sets the spot's own flag.
+  drop   spawned by the bush / rock / pot / tree / bomb hole through ItemDrop.gsheet's Seashell<n> entry
+The Seashell Sensor rings for a buried shell and for a bush / rock / pot / tree / bomb hole whose drop is a shell not
+yet owned. So:
+  - a Secret Seashell placed at a spot stays the game's own shell there, with the seashell index LAS gave it (buried
+    shell / bomb hole: that index; a host: its own ItemDrop entry LARShell<index>): the sensor rings until it is found
+  - any other item: the buried shell is taken out (the runtime brings the item up when the spot is dug); a host drops
+    ItemDrop LARShellSpot<n> - a Heart Piece tagged TAG + the spot's vanilla index; a bomb hole keeps its index (with
+    any other it drops nothing) and its ItemDrop Seashell<n> is retagged the same way, its sensor beacon switched off
+    by the runtime. The runtime (runtime/hle/shell_spots.c) turns the tagged drop into the seed's item: a SinkingSword
+    item actor (the actor LAS uses for standing items) with the item's model, where the shell would appear (out of a
+    tree's crown / a bomb hole: on a free tile beside it). Picking it up runs its entry in SinkingSword.bfevfl - LAS's
+    item-get, the game's message box - and sets the spot's own flag.
+A spot holding a shell gets its found flag from the runtime once that shell is owned (the tracker); so does a
+digsanity tile holding one (digs.py makes it a buried shell: the shells argument).
 
-rando/<seed>/shell_spots.tsv: location, seashell index, kind (dig / drop / land: lands at x y z - trees, bomb holes), level, room, x, y, z, model path, model
-name, flow entry, flag symbol, flag index, seashell (1/0), scale, turn.
+rando/<seed>/shell_spots.tsv: location, seashell index (shell: the placed shell's), kind (dig / drop / land: lands at
+x y z - trees / hole: a bomb hole, lands at x y z / shell: a Secret Seashell there), level, room, x, y, z, model path,
+model name, flow entry, flag symbol, flag index, seashell (1/0), scale, turn (, a bomb hole's actor key: the runtime
+switches its Seashell Sensor beacon off).
 
 Bushsanity / potsanity leave the bushes and the pot holding a Secret Seashell out (their check is this one), and
-digsanity the buried shells' tiles (shell_tiles): one check per spot.
+digsanity the buried shells' tiles: one check per spot.
 
     apply(locations(logic_defs), mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data) -> spoiler lines
 """
@@ -33,6 +43,7 @@ T_SHELL_DROP_AREA = 0x233  # AreaShellDrop: the bomb holes (parameter 0 = the se
 BURIED_LEVELS = ('Field', 'DogHouse')  # (levels whose rooms place a buried Secret Seashell)
 LAWN = 0xb5  # ObjLawn: tall grass (an item may land in it)
 TREES = (0xbb, 0xbc)  # ObjTree, ObjPalmTree: the shell falls out when Link dashes into one (Pegasus Boots)
+TAG = 200  # a retagged drop: a Heart Piece (or a bomb hole's shell) with index TAG + the spot's vanilla seashell index
 DROP_KEY = re.compile(rb'Seashell(\d+)$')  # a bush's / rock's / tree's / pot's ItemDrop key
 
 
@@ -88,28 +99,29 @@ def _landing(romfs, leb, room, host, tree):
 
 
 def scan(romfs, leb):
-    """{seashell index: (kind, level, room, x, y, z)}: the buried shells (dig: where), what drops the others (drop:
-    the host's position; the item appears where the shell would), the trees and bomb holes (land: where the item lands)."""
+    """{seashell index: (kind, level, room, x, y, z, actor key, parameter)}: the buried shells (dig: where), what drops
+    the others (drop: the host's position; the item appears where the shell would), the trees (land) and bomb
+    holes (hole): where the item lands; the actor holding the shell and which of its parameters is the index / ItemDrop key."""
     out = {}
     for level, room, r in _rooms(romfs, leb):
         for a in r.actors:
             if a.type == T_SHELL and level in BURIED_LEVELS and isinstance(a.parameters[0], int):
-                out[a.parameters[0]] = ('dig', level, room, a.posX, a.posY, a.posZ)
+                out[a.parameters[0]] = ('dig', level, room, a.posX, a.posY, a.posZ, a.key, 0)
             elif a.type == T_SHELL_DROP_AREA and isinstance(a.parameters[0], int):
                 spot = _landing(romfs, leb, room, a, False)
                 if not spot:
                     raise RuntimeError(f'{room}: no free tile beside the bomb hole {a.name}')
-                out.setdefault(a.parameters[0], ('land', level, room) + spot)
+                out.setdefault(a.parameters[0], ('hole', level, room) + spot + (a.key, 0))
             else:
-                for p in a.parameters[:2]:
+                for k, p in enumerate(a.parameters[:2]):
                     m = isinstance(p, bytes) and DROP_KEY.match(p)
                     if not m:
                         continue
                     spot = a.type in TREES and level == 'Field' and _landing(romfs, leb, room, a, True)
                     if a.type in TREES and not spot:
                         raise RuntimeError(f'{room}: no free tile beside the tree {a.name}')
-                    out.setdefault(int(m.group(1)), ('land', level, room) + spot if spot else
-                                   ('drop', level, room, a.posX, a.posY, a.posZ))
+                    out.setdefault(int(m.group(1)), (('land', level, room) + spot if spot else
+                                                     ('drop', level, room, a.posX, a.posY, a.posZ)) + (a.key, k))
     return out
 
 
@@ -118,8 +130,23 @@ def holds_shell(actor):
     return any(isinstance(p, bytes) and DROP_KEY.match(p) for p in actor.parameters[:2])
 
 
-def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
-    """locs: locations(logic_defs)."""
+def _tag_drop(oead_tools, sheet, key, index):
+    """ItemDrop entry <key>: the Seashell<index> entry's copy dropping a Heart Piece tagged TAG + index (the runtime
+    turns it into the spot's item; a dropped Secret Seashell would make the Seashell Sensor ring)."""
+    base = next(v for v in sheet['values'] if v['mKey'] == f'Seashell{index}')
+    if not any(v['mKey'] == key for v in sheet['values']):
+        entry = oead_tools.parseStruct(base)
+        entry['mKey'] = key
+        entry['mLotTable'] = [{'mType': 'HeartPiece', 'mCookie': TAG + index, 'mWeight': 1}]
+        sheet['values'].append(oead_tools.dictToStruct(entry))
+
+
+def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data, shells=()):
+    """locs: locations(logic_defs). A Secret Seashell placed at a spot stays the game's own shell there, with its
+    seashell index (the Seashell Sensor rings for it until it is found, as for any shell); any other item: its own
+    flow entry, the shell taken out (buried) / the drop retagged (ItemDrop LARShellSpot<n>). shells: more spots
+    holding a Secret Seashell [(location, seashell index, found flag)] (digsanity tiles: digs.py) - shell_spots.tsv
+    rows the runtime sets the flag of once that shell is found (the tracker)."""
     common_out = os.path.join(out_dir, 'romfs', 'region_common')
     common_in = os.path.join(romfs, 'region_common')
 
@@ -139,10 +166,23 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
 
     sheet = oead_tools.readSheet(path('datasheets/GlobalFlags.gsheet'))
     names = {str(v['symbol']): int(v['index']) for v in sheet['values']}
+    drops = oead_tools.readSheet(path('datasheets/ItemDrop.gsheet'))
     flow = event_tools.readFlow(path('event/SinkingSword.bfevfl'))
+    rooms = {}
+
+    def room_of(level, room):
+        if (level, room) not in rooms:
+            with open(path(f'level/{level}/{room}.leb'), 'rb') as fh:
+                rooms[(level, room)] = leb.Room(fh.read())
+        return rooms[(level, room)]
+
     rows = ['# location\tindex\tkind\tlevel\troom\tx\ty\tz\tmodel\tname\tentry\tflag\tflag index\tshell\tscale\tturn'
             '  (tools/rando/seashell_spots.py)\n']
     checks, spoiler = [], []
+    # a bomb hole holding something else keeps its index (it drops ItemDrop Seashell<index>, retagged here; with any
+    # other index it drops nothing) - a shell placed at the other hole whose index is that one is given like an item
+    holes = {i for n, i in locs.items() if spots[i][0] == 'hole' and n in mods.placements
+             and mods.placements[n] != 'seashell'}
     for name, index in sorted(locs.items(), key=lambda kv: kv[1]):
         if name not in mods.placements:
             continue
@@ -151,6 +191,35 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
             names[flag] = seed_tables.next_flag(sheet, out_dir)
             sheet['values'].append({'symbol': flag, 'index': names[flag]})
         item_key, item_index, model_path, model_name = mods.getItemInfo(name, mods.trap_models)
+        kind, level, room, x, y, z, key, k = spots[index]
+        host = next(a for a in room_of(level, room).actors if a.key == key)
+        checks.append(f'{name}\t{names[flag]}\n')
+        spoiler.append(f'{name}: {mods.placements[name]}')
+        hole = kind == 'hole'
+        if mods.placements[name] == 'seashell' and not (hole and item_index in holes):
+            # the game's own shell, with the index LAS gave it (a host's own ItemDrop entry: Seashell<n> may be retagged)
+            if isinstance(host.parameters[k], int):
+                host.parameters[k] = item_index
+            else:
+                host.parameters[k] = b'LARShell%d' % item_index
+                if not any(v['mKey'] == f'LARShell{item_index}' for v in drops['values']):
+                    e = oead_tools.parseStruct(next(v for v in drops['values'] if v['mKey'] == 'Seashell0'))
+                    e['mKey'] = f'LARShell{item_index}'
+                    e['mLotTable'] = [{'mType': 'Seashell', 'mCookie': item_index, 'mWeight': 1}]
+                    drops['values'].append(oead_tools.dictToStruct(e))
+            rows.append(f'{name}\t{item_index}\tshell\t{level}\t{room}\t-\t-\t-\t-\t-\t-\t{flag}\t{names[flag]}'
+                        f'\t1\t1\t0\n')
+            continue
+        if kind == 'dig':  # (no buried shell: the runtime brings the item up when the spot is dug)
+            room_of(level, room).actors.remove(host)
+        elif hole:  # (its index stays: its ItemDrop entry is retagged; the runtime keeps its sensor beacon off)
+            host.parameters[k] = index
+            e = next(v for v in drops['values'] if v['mKey'] == f'Seashell{index}')
+            e['mLotTable'][0]['mType'] = 'HeartPiece'
+            e['mLotTable'][0]['mCookie'] = TAG + index
+        else:
+            host.parameters[k] = b'LARShellSpot%d' % index
+            _tag_drop(oead_tools, drops, f'LARShellSpot{index}', index)
         if item_key[:3] == 'Rup':
             get_anim = event_tools.createActionEvent(flow.flowchart, 'Inventory', 'AddItemByKey',
                                                      {'itemKey': item_key, 'count': 1, 'index': item_index,
@@ -161,17 +230,22 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
         event_tools.createActionChain(flow.flowchart, name, [  # (the flag first: found, whatever the get does)
             ('EventFlags', 'SetFlag', {'symbol': flag, 'value': True}),
             ('SinkingSword', 'Destroy', {})], get_anim)
-        kind, level, room, x, y, z = spots[index]
         rows.append('\t'.join(str(v) for v in (
             name, index, kind, level, room, f'{x:g}', f'{y:g}', f'{z:g}', model_path, model_name, name, flag,
             names[flag], 1 if item_key == 'Seashell' else 0, f'{data.MODEL_SIZES.get(model_name, 1.0):g}',
-            f'{data.MODEL_ROTATIONS.get(model_name, 0):g}')) + '\n')
-        checks.append(f'{name}\t{names[flag]}\n')
-        spoiler.append(f'{name}: {mods.placements[name]}')
+            f'{data.MODEL_ROTATIONS.get(model_name, 0):g}')) + (f'\t{key:x}' if hole else '') + '\n')
+    for name, index, flag_index in shells:
+        rows.append(f'{name}\t{index}\tshell\t-\t-\t-\t-\t-\t-\t-\t-\t-\t{flag_index}\t1\t1\t0\n')
+    for (level, room), r in rooms.items():
+        with open(out(f'level/{level}/{room}.leb'), 'wb') as fh:
+            fh.write(r.repack())
     oead_tools.writeSheet(out('datasheets/GlobalFlags.gsheet'), sheet)
+    oead_tools.writeSheet(out('datasheets/ItemDrop.gsheet'), drops)
     event_tools.writeFlow(out('event/SinkingSword.bfevfl'), flow)
     with open(os.path.join(out_dir, 'shell_spots.tsv'), 'w') as f:
         f.writelines(rows)
     with open(os.path.join(out_dir, 'check_flags.tsv'), 'a') as f:  # tracker.py: location -> found flag
         f.writelines(checks)
+    with open(os.path.join(out_dir, 'flags_ext'), 'a') as f:  # (the runtime sets found flags: ours, any index)
+        f.write('seashell spots: found flags set by the runtime (runtime/hle/shell_spots.c)\n')
     return spoiler

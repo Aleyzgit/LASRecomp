@@ -2,22 +2,26 @@
 // shovel), under a bush / rock / pot, in a tree (dash into it), in a hole a bomb goes into - hold the seed's item
 // there (tools/rando/seashell_spots.py writes rando/<seed>/shell_spots.tsv; no file: vanilla shells).
 //
-// Every one of them is the Secret Seashell actor ItemSecretSeashell (type 0x87, parameter 0 = its seashell index):
-//   dig   placed in the room file and buried until the shovel digs its tile. Here the actor isn't created at all
-//         (rt_shell_skip, from the factory's create-function hook in souls.c); the shovel's dig commit
+// A Secret Seashell placed at a spot stays the game's own shell (its seashell index the one LAS gave it), so the
+// Seashell Sensor rings for it until it is found - and for no spot holding anything else: the sensor's beacons are the
+// buried shell actors and the hosts whose ItemDrop entry drops a shell not yet owned. Any other item:
+//   dig   the generator takes the buried shell (ItemSecretSeashell 0x87) out of the room; the shovel's dig commit
 //         (rt_dig_hole -> shell_spots_dig) on its tile brings the item up out of the hole: a SinkingSword item actor
 //         (the actor LAS uses for standing items, pots, bushes, digsanity: digs.c digs_spawn_item).
-//   drop  spawned by the bush / rock / pot / tree / bomb hole through its ItemDrop entry (Seashell<n>). The factory's
-//         spawn info is rewritten before the type is read (rt_shell_swap, from enemy_random.c's rt_enemy_spawn):
-//         a SinkingSword item actor with the item's model, flow entry and flag in its type-5 (string pool) parameters.
-//         (kind 'land': the shell falls out of a tree's crown / jumps out of a bomb hole - the item, which doesn't, is put
-//         on the ground beside it)
+//   drop  the bush / rock / pot / tree / bomb hole drops a Heart Piece tagged TAG + the spot's vanilla seashell index
+//         (ItemDrop LARShellSpot<n>; a bomb hole drops through ItemDrop Seashell<its index>, retagged - see hole_beacons
+//         for its sensor beacon). The
+//         factory's spawn info is rewritten before the type is read (rt_shell_swap, from enemy_random.c's
+//         rt_enemy_spawn): a SinkingSword item actor with the item's model, flow entry and flag in its type-5 (string
+//         pool) parameters. (kind 'land': the shell falls out of a tree's crown / jumps out of a bomb hole - the
+//         item, which doesn't, is put on the ground beside it)
 // Picking it up runs its entry in SinkingSword.bfevfl (LAS's item-get: held up, the game's message box) and sets the
-// spot's own flag; a spot whose flag is set gives nothing again.
+// spot's own flag; a spot whose flag is set gives nothing again. A 'shell' row (a Secret Seashell there, also on a
+// digsanity tile) only has its found flag set here once that seashell is owned (the tracker).
 //
-// shell_spots.tsv: location, seashell index, kind (dig / drop), level, room, x, y, z, model path, model name, flow
-// entry, flag symbol, flag index, seashell (1/0), scale, turn (degrees); x y z: a dig spot's tile centre, where a
-// 'land' spot's item lands
+// shell_spots.tsv: location, seashell index (vanilla; a 'shell' row: the placed shell's), kind (dig / drop / land /
+// shell), level, room, x, y, z, model path, model name, flow entry, flag symbol, flag index, seashell (1/0), scale,
+// turn (degrees); x y z: a dig spot's tile centre, where a 'land' spot's item lands
 #include "../game_addresses.h"
 #include <math.h>
 #include <pthread.h>
@@ -31,6 +35,9 @@
 #define MAXSPOTS 64
 #define T_SHELL 0x87
 #define T_SINKING_SWORD 0x194
+#define T_HEART_PIECE 0xb0
+#define TAG 200  // seashell_spots.py TAG: a retagged drop's index
+#define T_SHELL_DROP_AREA 0x233  // AreaShellDrop: a bomb hole
 #define DIG_FLAG_BASE 4096  // digs.c: a digsanity tile's dug flag
 
 bool flags_ext_get(int idx);
@@ -43,8 +50,9 @@ int digs_pool_index(Cpu *c, const char *str);
 
 typedef struct {
     char name[48], level[32], room[32], model[64], mname[48], entry[48], flag[32];
-    int index, flag_idx, dig, land, shell;
+    int index, flag_idx, dig, land, hole, owned, shell;  // owned: a 'shell' row
     float x, y, z, scale, turn;
+    uint64_t key;         // a bomb hole's actor (its level key)
     int pool[5];          // the strings' string pool indices (-1: not yet)
     uint64_t item;        // dug-up item actor (control block, weak ref held)
     bool dug;             // dug this visit (the hole lasts until the scene goes)
@@ -87,15 +95,17 @@ static int load_locked(void) {
     if (!f) return __atomic_store_n(&g_n, 0, __ATOMIC_RELEASE), 0;
     while (fgets(line, sizeof line, f) && n < MAXSPOTS) {
         if (line[0] == '#') continue;
-        char *col[16], *save = NULL;
+        char *col[17], *save = NULL;
         int nc = 0;
-        for (char *t = strtok_r(line, "\t\n", &save); t && nc < 16; t = strtok_r(NULL, "\t\n", &save)) col[nc++] = t;
+        for (char *t = strtok_r(line, "\t\n", &save); t && nc < 17; t = strtok_r(NULL, "\t\n", &save)) col[nc++] = t;
         if (nc < 16) continue;
         Spot *s = &g_spots[n++];
         strlcpy(s->name, col[0], sizeof s->name);
         s->index = atoi(col[1]);
         s->dig = !strcmp(col[2], "dig");
-        s->land = !strcmp(col[2], "land");
+        s->hole = !strcmp(col[2], "hole");
+        s->land = s->hole || !strcmp(col[2], "land");
+        s->owned = !strcmp(col[2], "shell");
         strlcpy(s->level, col[3], sizeof s->level);
         strlcpy(s->room, col[4], sizeof s->room);
         s->x = (float)atof(col[5]), s->y = (float)atof(col[6]), s->z = (float)atof(col[7]);
@@ -106,6 +116,7 @@ static int load_locked(void) {
         s->flag_idx = atoi(col[12]);
         s->shell = atoi(col[13]);
         s->scale = (float)atof(col[14]), s->turn = (float)atof(col[15]);
+        s->key = nc > 16 ? strtoull(col[16], NULL, 16) : 0;
         for (int k = 0; k < 5; k++) s->pool[k] = -1;
     }
     fclose(f);
@@ -119,20 +130,22 @@ static const char *level_name(void) {
     return ps ? (const char *)(uintptr_t)ps : "";
 }
 
-// a Secret Seashell actor's index: parameter 0 (spawn info +0x10: u32 value, u8 type at +0x14; 3 = integer)
+// a retagged drop: a Heart Piece (or a bomb hole's shell) with no level key, parameter 0 (spawn info +0x10: u32 value,
+// u8 type at +0x14; 3 = integer) TAG + the spot's vanilla seashell index
 static Spot *spot_of(uint64_t info) {
-    if (load() <= 0 || LD16(info + 8) != T_SHELL) return NULL;
-    int idx = (int)LD32(info + 0x10);
+    uint32_t type = LD16(info + 8);
+    if ((type != T_HEART_PIECE && type != T_SHELL) || LD64(info) || LD8(info + 0x14) != 3 || load() <= 0) return NULL;
+    int idx = (int)LD32(info + 0x10) - TAG;
+    if (idx < 0 || idx >= 64) return NULL;
     for (int i = 0; i < g_n; i++)
-        if (g_spots[i].index == idx) return &g_spots[i];
-    LOG("[shells] Secret Seashell %d (parameter type %d): not a spot of this seed\n", idx, LD8(info + 0x14));
+        if (g_spots[i].index == idx && !g_spots[i].owned && !g_spots[i].dig) return &g_spots[i];
     return NULL;
 }
 
 // before the factory reads the type (enemy_random.c rt_enemy_spawn): a dropped Secret Seashell becomes the item
 void rt_shell_swap(uint64_t info) {
     Spot *s = info ? spot_of(info) : NULL;
-    if (!s || s->dig) return;
+    if (!s) return;
     if (flags_ext_get(s->flag_idx) || !g_pool_ready) {
         LOG("[shells] %s: %s\n", s->name, g_pool_ready ? "already found (nothing)" : "not ready (nothing)");
         return;  // (rt_shell_skip: no actor)
@@ -150,12 +163,11 @@ void rt_shell_swap(uint64_t info) {
         s->mname, tp[0], tp[1], tp[2]);
 }
 
-// the factory's create-function hook (souls.c): no buried Secret Seashell (its item comes up when dug), and nothing for
-// a dropped one already found
+// the factory's create-function hook (souls.c): nothing for a retagged drop already found (or before the strings are in)
 bool rt_shell_skip(uint32_t type, uint64_t info) {
-    if (type != T_SHELL) return false;
+    if (type != T_HEART_PIECE && type != T_SHELL) return false;
     Spot *s = spot_of(info);
-    return s && (s->dig || flags_ext_get(s->flag_idx) || !g_pool_ready);
+    return s && (flags_ext_get(s->flag_idx) || !g_pool_ready);
 }
 
 static int field_tile(const Spot *s) {  // a Field spot's digsanity tile id (digs.c), -1 elsewhere
@@ -179,6 +191,7 @@ void shell_spots_dig(Cpu *c) {
     for (int i = 0; i < g_n; i++) {
         Spot *s = &g_spots[i];
         if (!s->dig || strcmp(lv, s->level) || fabsf(t[12] - s->x) > 0.75f || fabsf(t[14] - s->z) > 0.75f) continue;
+        // (only a spot holding something else: a Secret Seashell there is the game's own buried shell)
         g_zone = LD32(c->x[20] + 0xb0);
         s->dug = true;
         LOG("[shells] dug %s%s\n", s->name, flags_ext_get(s->flag_idx) ? " (already found)" : "");
@@ -196,6 +209,29 @@ static void spawn(Cpu *c, Spot *s) {
         LOG("[shells] %s: item %s up out of the hole (%s)\n", s->name, s->mname, up ? "up" : "failed");
 }
 
+// A bomb hole holding something else keeps its seashell index (with any other - or that shell owned - it is gone at
+// once and drops nothing; ItemDrop Seashell<n> drops the tagged Heart Piece), so it makes its Seashell Sensor beacon
+// (AreaShellDrop +0x2b8: the ShellBeacon component). The beacon is switched off here once the hole is up (+0x14c: 0 =
+// the sensor's check skips it, f_70008dd860), so the sensor doesn't ring for it. The level's placed actors by key:
+// GA_ACTOR_REGISTRY (pets.c).
+static void hole_beacons(const char *lv) {
+    uint64_t map = LD64(GA_ACTOR_REGISTRY);
+    for (int i = 0; i < g_n && map; i++) {
+        Spot *s = &g_spots[i];
+        if (!s->hole || !s->key || strcmp(lv, s->level)) continue;
+        int n = 0;
+        for (uint64_t node = LD64(map + 0x10); node && n < 8192; node = LD64(node), n++) {
+            if (LD64(node + 0x10) != s->key) continue;
+            uint64_t a = LD64(node + 0x18), b = a ? LD64(a + 0x2b8) : 0;
+            if (b && LD8(b + 0x14c)) {
+                ST8(b + 0x14c, 0);
+                LOG("[shells] %s: bomb hole's sensor beacon off\n", s->name);
+            }
+            break;
+        }
+    }
+}
+
 // game main thread, once per frame (runtime/hle/input.c)
 void shell_spots_tick(Cpu *c, uint64_t frame) {
     if (load() <= 0) return;
@@ -208,6 +244,7 @@ void shell_spots_tick(Cpu *c, uint64_t frame) {
         bool ok = true;
         for (int i = 0; i < g_n && ok; i++) {
             Spot *s = &g_spots[i];
+            if (s->owned || s->dig) continue;  // (a dug-up item's spawn adds its own)
             const char *strs[5] = {s->model, s->mname, s->entry, s->flag, s->shell ? "true" : "false"};
             for (int k = 0; k < 5 && ok; k++) ok = (s->pool[k] = digs_pool_index(c, strs[k])) >= 0;
         }
@@ -223,7 +260,16 @@ void shell_spots_tick(Cpu *c, uint64_t frame) {
             if (g_spots[i].item && !digs_actor_alive(g_spots[i].item)) digs_drop_ref(c, &g_spots[i].item);
         }
     }
+    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    uint64_t owned = ps ? LD64(ps + 0x88) : 0;  // (PlayerStatus +0x88: the Secret Seashells found, one bit per index)
+    for (int i = 0; i < g_n && frame % 16 == 0; i++)
+        if (g_spots[i].owned && g_spots[i].index < 64 && (owned >> g_spots[i].index & 1) && !flags_ext_get(g_spots[i].flag_idx)) {
+            extern void flags_ext_set(int idx);
+            flags_ext_set(g_spots[i].flag_idx);
+            LOG("[shells] %s: its Secret Seashell (%d) found\n", g_spots[i].name, g_spots[i].index);
+        }
     const char *lv = level_name();
+    if (frame % 8 == 0) hole_beacons(lv);
     for (int i = 0; i < g_n; i++) {
         Spot *s = &g_spots[i];
         if (!s->dig || strcmp(lv, s->level)) continue;
