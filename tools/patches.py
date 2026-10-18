@@ -344,6 +344,40 @@ def _frame_steps(gen, a):
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
 
 
+# The game's own dynamic resolution, off: resolution is ours to choose (runtime/nvn/output_scale.c - a fixed choice
+# renders at exactly that size, "Dynamic" is our scaler alone). The game sizes its main pass by a level (renderer
+# +0x6e4c, docked): 1080 - 36 x level lines at 16:9 (f_7001023c10), level 0 = 1920x1080, 9 = 1344x756, 10 = 1280x720.
+# Its scaler (the object at +0x648: enabled byte, table indexes, the level tables - docked [0 3 6 9 10]) is set up at
+# boot (f_700107cb90) at the first table level >= the boot default (8: so 9, 1344x756). Then each frame its frame
+# controller (f_700000c910) turns its GPU timing counters (renderer+0x81c0) into a load figure (GPU time x 100 /
+# (16.67 ms x swap interval)); 6 frames all over 90%: one level down the table (f_700107d110), 6 all under 70%: up.
+# GAME_DYNRES_SITE: the enabled byte reads as 0 - no samples, no steps. GAME_DYNRES_INIT_SITE: the set-up reads the
+# boot default as 0 - it starts (and so stays) at level 0, full size. The rest of the frame controller - the 30 fps
+# mode, which reads the same counters - runs as before. LARECOMP_GAME_DYNRES=1 (test): the game's own again.
+GAME_DYNRES_SITE = A.GAME_DYNRES_SITE
+GAME_DYNRES_INIT_SITE = A.GAME_DYNRES_INIT_SITE
+
+
+def _game_dynres(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x395922e8, hex(w)  # ldrb w8, [x23, #0x648]
+    return ('{ extern int rt_game_dynres(void); '
+            'c->x[8] = rt_game_dynres() ? LD8(c->x[23] + 0x648) : 0; }'
+            f'  /* {a:#x}: ldrb w8, [x23, #0x648] (the game\'s dynamic resolution: off) */')
+
+
+def _game_dynres_init(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb86d698c, hex(w)  # ldr w12, [x12, x13] (x13 = 0x6e4c)
+    return ('{ extern int rt_game_dynres(void); '
+            'c->x[12] = rt_game_dynres() ? LD32(c->x[12] + c->x[13]) : 0; }'
+            f'  /* {a:#x}: ldr w12, [x12, x13] (the game\'s starting resolution level: full size) */')
+
+
+PATCHES[GAME_DYNRES_SITE] = _game_dynres
+PATCHES[GAME_DYNRES_INIT_SITE] = _game_dynres_init
+
+
 # Digsanity (runtime/hle/digs.c): the shovel's dig commit (f_7000ddc530) spawns the hole actor (ObjHolesDug 0x1cd)
 # through f_7000d228d0(&out, transform x21, zone, &room, ...); right after it the hole (out at [sp+0x10]) and its
 # snapped tile-centre position (x21) tell the runtime which tile was dug - the first dig of a tile gives its item.

@@ -68,6 +68,8 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Dynamic resolution controller (simulated GPU)
+        run: python3 tools/test_dynres.py
       - name: Vulkan fence sequence regression
         run: python3 tools/test_fence_sequence.py
       - name: Vulkan validation failure regression
@@ -116,6 +118,8 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Dynamic resolution controller (simulated GPU)
+        run: python3 tools/test_dynres.py
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
       - name: Vulkan synchronization failure regression

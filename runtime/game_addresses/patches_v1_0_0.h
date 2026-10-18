@@ -42,6 +42,8 @@
 #define GA_RES_NAME_SITE                    UINT64_C(0x70010def30)
 #define GA_MB_SEEN_SITE                     UINT64_C(0x70000ec354)
 #define GA_FRAME_STEPS_SITE                 UINT64_C(0x700000c954)
+#define GA_GAME_DYNRES_SITE                 UINT64_C(0x700000c938)
+#define GA_GAME_DYNRES_INIT_SITE            UINT64_C(0x700107cc68)
 #define GA_DIG_HOLE_SITE                    UINT64_C(0x7000ddc5cc)
 #define GA_HOLE_CAP_SITES_0                 UINT64_C(0x7000d22d30)
 #define GA_HOLE_CAP_SITES_1                 UINT64_C(0x7000d22dc0)
