@@ -90,6 +90,7 @@ static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0x
 // offers that release (or a later one) as soon as it's out, so its players move to it.
 #define LARECOMP_VERSION "beta_4"
 #define LARECOMP_TEST_OF "beta_5"
+extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
 
 // ------------------------------------------------------------------ update check
 // The start screen asks GitHub for the project's releases once per launch (a background curl, which macOS and
