@@ -18,6 +18,7 @@ JOBS=$SHOTS/jobs.tsv
 "$PY" - "rando/$SEED" "$JOBS" "${DJ_GROUPS:-0}" <<'PY' | tee -a "$OUT"
 import json, os, sys
 sys.path.insert(0, 'tools/rando')
+sys.path.insert(0, 'third_party/LAS-Randomizer')
 import dungeon_gen as dg, rooms
 seed_dir, jobs_path, only_groups = sys.argv[1], sys.argv[2], sys.argv[3] == '1'
 cat = json.load(open('tools/rando/room_catalog.json'))
@@ -66,6 +67,21 @@ for lv, members in groups:
     print('[group] %s %s -> %s: %s' % (lv, ' '.join('%s%s%d' % m for m in members),
                                        ' / '.join('%s %s' % t for t in sorted(ts)), 'OK' if len(ts) == 1 else 'GROUP FAIL'))
 print('[group] %d walls with several doorways, %d lead to more than one place' % (len(groups), bad))
+
+
+def floor(lv, cell, side, slot):  # the doorway's edge tile height in the seed's room (raised doorways: 1.5)
+    import struct
+    from RandomizerCore.Tools import leb
+    p = os.path.join(seed_dir, 'romfs', 'region_common', 'level', lv, '%s_%s.leb' % (lv, cell))
+    if not os.path.exists(p):
+        p = rooms._leb_path('extracted/romfs', '%s_%s' % (lv, cell))
+    g = rooms._grid(leb.Room(open(p, 'rb').read()))[b'data'].data
+    a = int(slot) // 2
+    r, c = {'N': (0, a), 'S': (7, a), 'W': (min(a, 7), 0), 'E': (min(a, 7), 9)}[side]
+    h = struct.unpack_from('<f', g, 0x10 * (min(r, 7) * 10 + min(c, 9)) + 12)[0]
+    return h if h > 0.3 else 0.0
+
+
 with open(jobs_path, 'w') as f:
     if only_groups:
         seen = set()
@@ -79,19 +95,20 @@ with open(jobs_path, 'w') as f:
                     continue
                 if (lv, c, s, x) not in seen:
                     seen.add((lv, c, s, x))
-                    f.write('%s\t%s\t%s\t%d\t%s\n' % (lv, c, s, x, target(lv, c, s, x)[0]))
+                    f.write('%s\t%s\t%s\t%d\t%s\t%g\n' % (lv, c, s, x, target(lv, c, s, x)[0], floor(lv, c, s, x)))
     else:
         for w in rows:
-            f.write('%s\t%s\t%s\t%s\t%s\n' % (w[0], w[1], w[2], w[3], w[5] if len(w) > 6 else neighbour(w[1], w[2])))
+            f.write('%s\t%s\t%s\t%s\t%s\t%g\n' % (w[0], w[1], w[2], w[3], w[5] if len(w) > 6 else neighbour(w[1], w[2]),
+                                                floor(w[0], w[1], w[2], w[3])))
 PY
 n=0
-while IFS=$'\t' read -r level cell side slot expect; do
+while IFS=$'\t' read -r level cell side slot expect fl; do
     n=$((n + 1))
     [ $n -lt "$FIRST" ] && continue
     [ $n -ge $((FIRST + COUNT)) ] && break
     case $level in Lv02*|Lv10*) ent=08C;; Lv03*) ent=08B;; Lv05*) ent=08H;; *) ent=08D;; esac  # dungeon_gen ENTRANCES
     tools/fresh_save.sh "djtest_$JOB" >/dev/null 2>&1  # (per seed: suites of different seeds run in parallel)
-    LARECOMP_DOORJUMP_TEST="3100:$cell:$side:$slot" LARECOMP_CHEATS=hearts LARECOMP_RANDO_SEED=$SEED \
+    LARECOMP_DOORJUMP_TEST="3100:$cell:$side:$slot:$fl" LARECOMP_CHEATS=hearts LARECOMP_RANDO_SEED=$SEED \
     LARECOMP_SAVE_DIR="build/djtest_$JOB" LARECOMP_WINDOW=640x360 SHOT_ID="dj_$JOB" \
     LARECOMP_INPUT="400:A:6,520:A:6,900:ZL:8,900:ZR:8,1300:A:6,1600:A:6,1900:A:6,2200:A:6" \
     LARECOMP_WARP_AT="2700:$level:${level}_${ENTRANCE:-$ent}" tools/shot.sh 4000 600 </dev/null 2>/dev/null

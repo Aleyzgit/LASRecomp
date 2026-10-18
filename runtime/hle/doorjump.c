@@ -150,10 +150,11 @@ static uint64_t find_player(uint64_t frame) {
 
 uint64_t doorjump_player(uint64_t frame) { return find_player(frame); }  // (test hooks elsewhere: hookshot.c; digsanity: digs.c)
 
-// LARECOMP_DOORJUMP_TEST=<frame>:<cell>:<side>[:<centre>] (test): from <frame> on, once the level with jumps has been
-// loaded for 60 frames (warp into the cell first, LARECOMP_WARP_AT), put Link 1.2 inside that doorway (with a centre:
-// that one of the side's doorways - one without a row walks through into the neighbour); the test holds the
-// stick outward (tools/doorjump_test.sh, LARECOMP_INPUT); 300 frames later log the cell he is in
+// LARECOMP_DOORJUMP_TEST=<frame>:<cell>:<side>[:<centre>[:<floor>]] (test): from <frame> on, once the level with jumps
+// has been loaded for 60 frames (warp into the cell first, LARECOMP_WARP_AT), put Link 1.2 inside that doorway (with a
+// centre: that one of the side's doorways - one without a row walks through into the neighbour; with a floor: at that
+// height - a raised doorway that no row leads into, e.g. a same-side follower, tools/doorjump_test.sh reads it from the
+// room's grid); the test holds the stick outward (LARECOMP_INPUT); 300 frames later log the cell he is in
 uint64_t g_stick_freeze_until;
 static int g_jumps_fired;  // (test result: a jump that fired and then he ended elsewhere = pushed back by an enemy)  // runtime/hle/input.c releases the stick until this frame
 int32_t g_test_lx, g_test_ly;  // stick held by the test (runtime/hle/input.c)
@@ -163,6 +164,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
     static long at = -2, placed = -1;
     static char cell[8], side;
     static int want = -1;  // the doorway's centre (-1: the side's first row)
+    static float floor_y = -100.0f;  // the doorway's floor height (<-90: unknown)
     static int er = -1, ec = -1;  // expected cell (the tested jump's target)
     static float px0, pz0;        // where Link was placed
     static int tries;
@@ -172,7 +174,7 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
         at = -1;
         const char *e = ENV("LARECOMP_DOORJUMP_TEST");
         char sd[4];
-        if (e && sscanf(e, "%ld:%7[^:]:%1s:%d", &at, cell, sd, &want) >= 3) side = sd[0]; else at = -1;
+        if (e && sscanf(e, "%ld:%7[^:]:%1s:%d:%f", &at, cell, sd, &want, &floor_y) >= 3) side = sd[0]; else at = -1;
     }
     if (at < 0 || !pc) return;
     // wait until the warp into the dungeon has finished: in a level with jumps, settled for 60 frames
@@ -216,8 +218,11 @@ static void test_tick(uint64_t frame, uint64_t pc, const char *lv) {
             }
             pos[0] = pos2[0] = x;
             pos[2] = pos2[2] = z;
-            // on this doorway's floor: the pair's way back lands here and knows its height (raised doorways, Chaos)
-            for (int k = 0; k < g_njumps; k++) {
+            // on this doorway's floor: given, or the pair's way back lands here and knows its height (raised doorways,
+            // Chaos). Placed at 0 under a raised floor he falls through the room and the game respawns him (a
+            // follower doorway at 1.5, Key Cavern 05G W from Turtle Rock 03G: 'snapped back' after the jump)
+            if (floor_y > 0.3f) pos[1] = pos2[1] = floor_y + 0.05f;
+            for (int k = 0; k < g_njumps && floor_y < -90.0f; k++) {
                 const Jump *b = &g_jumps[k];
                 if (b->trow == row && b->tcol == col && b->tside == side && !strcmp(b->level, lv) && b->height > 0.3f)
                     { pos[1] = pos2[1] = b->height + 0.05f; break; }
