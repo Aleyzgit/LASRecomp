@@ -2,7 +2,8 @@
 """Triforce hunt (LAS Recomp randomizer option "Triforce hunt", request keys triforce-hunt / triforce-extra).
 
 The seed's goal is N Triforce pieces; the last one ends the game. Pieces placed = needed + extra (rounded up).
-  pool      the pieces replace filler left after the vanilla locations took theirs (rupees; with pots / bushes / digs
+  pool      the pieces replace filler left after the vanilla locations took theirs (rupees, then traps, low-value refills
+            and Chamber Stones; with pots / bushes / digs
             their filler too, most plentiful first; in the shuffler). Too little: generation stops with a clear message.
   logic     only the NEEDED count must be reachable: the shuffler (third_party/LAS-Randomizer shuffler.py, 'triforce'
             items) places that many with reachability checks, after making sure that many free reachable locations
@@ -44,15 +45,6 @@ def counts(settings):
     return needed, needed + math.ceil(needed * pct / 100)
 
 
-def is_filler(key, d):
-    """Filler a piece may replace: rupees (LAS's, pots' / digs' own) and the pots' / bushes' / digs' hearts and refills.
-    (Mirrored in the shuffler: third_party/LAS-Randomizer/RandomizerCore/shuffler.py _triforce_filler.)"""
-    if d.get('type') != 'junk':
-        return False
-    base = key[4:] if key.startswith(('pot-', 'dig-')) else key
-    return base.startswith('rupee-') or key in ('pot-heart', 'pot-arrows', 'pot-bombs', 'pot-powder')
-
-
 def add_to_pool(item_defs, settings):
     """Register the piece item; the shuffler swaps `placed` filler items of the pool for pieces once the vanilla
     locations have taken theirs (and stops with a clear message if there isn't enough filler)."""
@@ -83,7 +75,7 @@ def pieces_text(n, wait):
     head = b'You collected a ' + _COLOR_ON + b'Triforce piece' + _COLOR_OFF + b'!!' + wait
     if n <= 0:
         return head + b'\0'
-    tail = b'1 piece remains' if n == 1 else f'{n} pieces remain'.encode()
+    tail = b'1 piece remains.' if n == 1 else f'{n} pieces remain.'.encode()
     return head + _PAGE + tail + wait + b'\0'
 
 

@@ -704,21 +704,32 @@ class ItemShuffler(QtCore.QThread):
                     placement_tracker.append(location_pool.pop(0))
         
         # LAS Recomp Triforce hunt (tools/rando/triforce.py): the pieces take the place of filler the vanilla
-        # locations left (rupees, pot / bush / dig filler; the most plentiful first), placed after the seashells
+        # locations left, in this order (within a tier the most plentiful first): rupees (20 and up), traps, low-value
+        # refills (bombs / arrows / powder, hearts, 5- and 1-rupees), then Chamber Stones (no logic needs them)
         tri_placed = int(self.settings.get('triforce-placed', 0) or 0)
         if tri_placed:
-            def _triforce_filler(k):
+            def _tier(k):
+                if self.item_defs[k]['type'] != 'junk':
+                    return None
                 base = k[4:] if k.startswith(('pot-', 'dig-')) else k
-                return self.item_defs[k]['type'] == 'junk' and (base.startswith('rupee-') or
-                                                                k in ('pot-heart', 'pot-arrows', 'pot-bombs', 'pot-powder'))
-            fill = [k for k in items if _triforce_filler(k)]
+                if base.startswith('rupee-') and base not in ('rupee-5', 'rupee-1'):
+                    return 0
+                if k.endswith('-trap') and k != 'zol-trap':  # (zol traps: chest-only, placed apart)
+                    return 1
+                if base in ('rupee-5', 'rupee-1') or k in ('pot-heart', 'pot-arrows', 'pot-bombs', 'pot-powder', 'bomb',
+                                                          'powder', 'arrow'):
+                    return 2
+                if k == 'chamber-stone':
+                    return 3
+                return None
+            fill = [k for k in items if _tier(k) is not None]
             print(f'triforce: {len(fill)} filler items in the pool for {tri_placed} pieces', flush=True)
             if len(fill) < tri_placed:
-                raise RuntimeError(f'Triforce hunt: {tri_placed} pieces need {tri_placed} filler items (rupees) to '
-                                   f'replace, but this seed has only {len(fill)}. Turn on Potsanity, Bushsanity or '
-                                   'Digsanity, or choose fewer pieces.')
+                raise RuntimeError(f'Triforce hunt: {tri_placed} pieces need {tri_placed} filler items to replace, but '
+                                   f'this seed has only {len(fill)}. Turn on Potsanity, Bushsanity or Digsanity, or '
+                                   'choose fewer pieces.')
             for _ in range(tri_placed):
-                k = max(sorted(set(fill)), key=fill.count)
+                k = min(sorted(set(fill)), key=lambda k: (_tier(k), -fill.count(k)))
                 fill.remove(k)
                 del items[len(items) - 1 - items[::-1].index(k)]
                 access = self.removeAccess(access, k)

@@ -29,7 +29,7 @@ int pets_menu_slot(void);      // highlighted choice while the cursor is on the 
 const char *souls_at(int i, int *kind, bool *owned);
 bool triforce_counts(int *have, int *needed);  // runtime/hle/triforce.c: false = no Triforce hunt
 }
-bool triforce_icon_draw(ImDrawList *dl, ImVec2 c, float size, bool full, ImU32 tint);  // triforce_icons.mm
+bool triforce_icon_draw(ImDrawList *dl, ImVec2 c, float size, ImU32 tint);  // triforce_icons.mm
 #include "../input_bind.h"
 
 #define DUNGEON_RECORDS (GA_LIVE_SAVE + 0xE0)  // live save: 0x10-byte records (+0 keys, +1 item bits)
@@ -352,7 +352,7 @@ static void triforce_box(ImDrawList *dl, ImFont *font, float ox, float oy, float
     dl->AddRect(a, b, IM_COL32(214, 176, 92, 230), 12 * u, 0, 2 * u);
     bool done = have >= need;
     ImU32 tint = have ? IM_COL32(255, 255, 255, 255) : IM_COL32(150, 150, 150, 170);
-    if (!triforce_icon_draw(dl, ImVec2(cx, a.y + 34 * u), 54 * u, true, tint)) {  // (no game file: drawn triangles)
+    if (!triforce_icon_draw(dl, ImVec2(cx, a.y + 34 * u), 54 * u, tint)) {  // (no game file: drawn triangles)
         ImU32 g = IM_COL32(240, 200, 70, 255);
         float s = 27 * u, x = cx, y = a.y + 9 * u;
         dl->AddTriangleFilled(ImVec2(x, y), ImVec2(x + s * 0.5f, y + s * 0.87f), ImVec2(x - s * 0.5f, y + s * 0.87f), g);

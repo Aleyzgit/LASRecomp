@@ -16,7 +16,7 @@
 #include <vector>
 
 #include "imgui.h"
-bool triforce_icon_draw(ImDrawList *dl, ImVec2 c, float size, bool full, ImU32 tint);  // triforce_icons.mm
+bool triforce_icon_draw(ImDrawList *dl, ImVec2 c, float size, ImU32 tint);  // triforce_icons.mm
 
 extern "C" {
 #include "../hle.h"
@@ -465,8 +465,8 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     dl->AddText(font, 20 * u, ImVec2(ox + 190 * u, oy + 640 * u), IM_COL32(255, 245, 225, 255), sum);
     int tri_have, tri_need;  // Triforce hunt: pieces found / needed, after the checks line
     if (triforce_counts(&tri_have, &tri_need)) {
-        float x = ox + 190 * u + font->CalcTextSizeA(20 * u, FLT_MAX, 0, sum).x + 34 * u, cy = oy + 652 * u;
-        triforce_icon_draw(dl, ImVec2(x, cy), 24 * u, true, IM_COL32(255, 255, 255, 255));
+        float x = ox + 190 * u + font->CalcTextSizeA(20 * u, FLT_MAX, 0, sum).x + 30 * u, cy = oy + 650 * u;
+        triforce_icon_draw(dl, ImVec2(x, cy), 24 * u, IM_COL32(255, 255, 255, 255));
         char tt[24];
         snprintf(tt, sizeof tt, "%d / %d", tri_have, tri_need);
         dl->AddText(font, 20 * u, ImVec2(x + 20 * u, oy + 640 * u),
