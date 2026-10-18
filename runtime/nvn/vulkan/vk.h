@@ -79,7 +79,8 @@ typedef struct TexBackend {
     bool scalable, presented;
     uint64_t touched_frame, frame_cleared;
     uint32_t level_gen;
-    float sx, sy;
+    float sx, sy;        // the scale the contents were drawn at (scalable textures)
+    float ax, ay;        // the allocation scale (the image's size; Dynamic: the contents use a part of it)
     void *pending_rgba;  // host-produced pixels (video) waiting to be uploaded on the render thread
     uint32_t pending_w, pending_h, pending_stride;
     bool pending_nv12;        // pending_rgba holds NV12 (Y, then UV at pending_uv_off): converted on the GPU

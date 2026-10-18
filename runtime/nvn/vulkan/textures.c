@@ -169,9 +169,17 @@ static bool format_supports(VkFormat f, VkFormatFeatureFlags want) {
 
 // ================================================================== output resolution / per-frame clears
 // Same rules as metal.m (see the comments there).
-static float g_rs_x = 1, g_rs_y = 1;
+static float g_rs_x = 1, g_rs_y = 1;   // the render scale: what the frame is drawn at
+static float g_al_x = 1, g_al_y = 1;   // the allocation scale: the size of scalable textures (Dynamic: the frame uses a part)
 void renderer_get_scale(float *sx, float *sy) { *sx = g_rs_x; *sy = g_rs_y; }
 void renderer_set_scale(float sx, float sy) { g_rs_x = sx; g_rs_y = sy; }
+void renderer_set_alloc_scale(float ax, float ay) { g_al_x = ax; g_al_y = ay; }
+// The part of a scalable texture its contents occupy (Dynamic: the render scale over the allocation scale; 1 otherwise).
+void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy) {
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    *fx = *fy = 1;
+    if (b && b->scalable && b->ax > 0 && b->ay > 0) { *fx = b->sx / b->ax; *fy = b->sy / b->ay; }
+}
 uint64_t renderer_present_count(void);
 
 static bool tex_scalable(const NvnTexture *t) {
@@ -270,11 +278,13 @@ void vk_collect_dead(void) {
 
 static void create_image(NvnTexture *t, TexBackend *b) {
     VkFmt mf = fmt_of(t->format);
+    b->ax = b->scalable ? g_al_x : 1;
+    b->ay = b->scalable ? g_al_y : 1;
     b->sx = b->scalable ? g_rs_x : 1;
     b->sy = b->scalable ? g_rs_y : 1;
     uint32_t tw = t->width ? t->width : 1, th = t->height ? t->height : 1;
     if (b->scalable) {
-        tw = (uint32_t)lroundf(tw * b->sx); th = (uint32_t)lroundf(th * b->sy);
+        tw = (uint32_t)lroundf(tw * b->ax); th = (uint32_t)lroundf(th * b->ay);
         if (tw < 1) tw = 1;
         if (th < 1) th = 1;
     }
@@ -407,7 +417,7 @@ static void live_remove(TexBackend *b) {
 static TexBackend *tex_backend(NvnTexture *t) {
     TexBackend *b = t->backend;
     if (b) {
-        if (b->scalable && (b->sx != g_rs_x || b->sy != g_rs_y)) {  // output resolution changed: reallocate
+        if (b->scalable && (b->ax != g_al_x || b->ay != g_al_y)) {  // output resolution changed: reallocate
             destroy_image(b);
             create_image(t, b);
         }
@@ -625,7 +635,12 @@ TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     return b;
 }
 
-void renderer_mark_gpu_owned(NvnTexture *t) { tex_backend(t)->gpu_owned = true; }
+// A GPU write (render target, copy destination): the contents are at the current render scale from here on.
+void renderer_mark_gpu_owned(NvnTexture *t) {
+    TexBackend *b = tex_backend(t);
+    b->gpu_owned = true;
+    if (b->scalable) { b->sx = g_rs_x; b->sy = g_rs_y; }
+}
 bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 

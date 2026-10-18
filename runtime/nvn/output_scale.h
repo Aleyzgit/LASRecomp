@@ -3,7 +3,8 @@
 #include <stdbool.h>
 
 typedef struct {
-    double sx, sy;             // render-target scale (relative to the game's 1920x1080 sizes)
+    double sx, sy;             // render scale (relative to the game's 1920x1080 sizes): what a frame is drawn at
+    double ax, ay;             // allocation scale: the render targets' size (Dynamic renders into a part of them)
     double shape;              // window aspect / 16:9 when the camera is widened, else 1
     double vx, vy, vw, vh;     // where the image is drawn in the window (pixels)
 } OutScale;
