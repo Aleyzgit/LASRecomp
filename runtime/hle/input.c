@@ -498,6 +498,8 @@ static void fill_state(Cpu *c) {
       chamber_game_tick(c, renderer_present_count());
       extern void digs_game_tick(Cpu *c, uint64_t frame);
       digs_game_tick(c, renderer_present_count());
+      extern void pot_bush_game_tick(Cpu *c, uint64_t frame);
+      pot_bush_game_tick(c, renderer_present_count());
       extern void qol_tick(void);
       qol_tick();
       extern void pets_game_tick(Cpu *c);
