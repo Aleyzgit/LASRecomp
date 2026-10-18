@@ -2155,6 +2155,41 @@ static uint64_t gc_set_seq;
 static uint32_t gc_gen, gc_set_gen;  // (gen: bumped when a chunk is imported; the set is rebuilt per submission and gen)
 static int gc_scanned;                // chunks imported for a pointer found in a uniform buffer
 static uint8_t gc_remembered[GC_MAX]; // chunks shaders reached without a bind (a miss, a pointer): imported again after a reboot
+                                      // and, through cache/gmem_chunks.txt, at the next start (a machine misses a chunk once)
+static bool gc_file_loaded;
+
+// cache/gmem_chunks.txt: one heap byte offset (hex) per line of a chunk shaders reached without a bind. Offsets, not
+// chunk numbers: the chunk size depends on the GPU. Loaded once, into gc_remembered; written whenever one is added.
+static void gc_remembered_load(void) {
+    if (gc_file_loaded) return;
+    gc_file_loaded = true;
+    FILE *f = fopen("cache/gmem_chunks.txt", "r");
+    if (!f) return;
+    char line[64];
+    int n = 0;
+    while (fgets(line, sizeof line, f)) {
+        unsigned long long off = strtoull(line, NULL, 16);
+        int k = (int)(off >> gc_shift);
+        if (k >= 0 && k < gc_n && !gc_remembered[k]) { gc_remembered[k] = 1; n++; }
+    }
+    fclose(f);
+    if (n) LOG("[vk] guest heap: %d chunks shaders reached without a bind last time (cache/gmem_chunks.txt): imported at the start\n", n);
+}
+static void gc_remembered_save(void) {
+    mkdir("cache", 0755);
+    FILE *f = fopen("cache/gmem_chunks.txt.tmp", "w");
+    if (!f) return;
+    for (int k = 0; k < gc_n; k++)
+        if (gc_remembered[k]) fprintf(f, "%llx\n", (unsigned long long)((uint64_t)k << gc_shift));
+    fclose(f);
+    remove("cache/gmem_chunks.txt");
+    rename("cache/gmem_chunks.txt.tmp", "cache/gmem_chunks.txt");
+}
+static void gc_remember(int k) {
+    if (gc_remembered[k]) return;
+    gc_remembered[k] = 1;
+    gc_remembered_save();
+}
 static int gc_imported;
 static uint64_t gc_imported_bytes, stat_gc_misses;
 
@@ -2204,6 +2239,8 @@ static uint32_t gmem_chunk_shift(void) {
     gc_shift = (uint32_t)shift;
     gc_n = shift ? n : 0;
     maxwell_gmem_lazy = gc_lazy;
+    maxwell_gmem_memo = gc_lazy && getenv("LARECOMP_VK_GMEM_MEMO") && atoi(getenv("LARECOMP_VK_GMEM_MEMO")) != 0;
+    if (maxwell_gmem_memo) LOG("[vk] lazy chunks: shaders keep the last chunk looked up (LARECOMP_VK_GMEM_MEMO)\n");
     if (shift) LOG("[vk] guest heap bound to shaders in %llu MB %s (storage buffers up to %llu MB here)\n",
                    (unsigned long long)(1ull << shift) >> 20, gc_lazy ? "chunks, imported as the game binds them" : "windows", (unsigned long long)lim >> 20);
     return (uint32_t)shift;
@@ -2264,7 +2301,7 @@ static void gc_scan_pointers(const uint32_t *w, uint64_t bytes) {
         }
         if (gc_import(k)) {
             gc_scanned++;
-            gc_remembered[k] = 1;
+            gc_remember(k);
             LOG("[vk] guest heap chunk %d (+%llu MB): a pointer in a uniform buffer (%llx): imported\n", k,
                 (unsigned long long)((uint64_t)k << gc_shift) >> 20, (unsigned long long)v);
         }
@@ -2316,8 +2353,10 @@ static VkDescriptorSet gmem_chunk_set(void) {
         memset(gc_miss + GC_MAX, 0xFF, sizeof(uint32_t) * GC_MAX);
     }
     uint64_t seq = vk_pending_seq();
-    if (gc_lazy && !gc_imported)  // (a boot, or a reboot: the chunks shaders reached without a bind last time, before they miss again)
+    if (gc_lazy && !gc_imported) {  // (a boot, or a reboot: the chunks shaders reached without a bind last time, before they miss again)
+        gc_remembered_load();
         for (int k = 0; k < gc_n; k++) if (gc_remembered[k] && !gc[k].buf) gc_import(k);
+    }
     if (gc_set && gc_set_seq == seq && gc_set_gen == gc_gen) return gc_set;
     static VkDescriptorBufferInfo bi[GC_MAX + 1];
     static VkWriteDescriptorSet w[GC_MAX];
@@ -2389,7 +2428,7 @@ static void gc_frame(void) {
         if (nlog++ < 40) LOG("[vk] guest heap chunk %d (+%llu MB): %u shader accesses before its import, lowest %llx: imported for the next frame\n", k,
                              (unsigned long long)((uint64_t)k << gc_shift) >> 20, m, (unsigned long long)HEAP_BASE + ((uint64_t)w << 2));
         gc_touch((uint64_t)k << gc_shift, 1);
-        gc_remembered[k] = 1;
+        gc_remember(k);
     }
 }
 

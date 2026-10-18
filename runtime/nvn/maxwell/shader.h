@@ -99,6 +99,9 @@ extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // 0: one buffer.
 extern uint32_t maxwell_gmem_chunk_shift;
 extern bool maxwell_gmem_lazy;
+// Lazy mode, LARECOMP_VK_GMEM_MEMO=1: the shader keeps the last chunk's address and size in registers and looks the
+// table up only when an access leaves it (a loop over a list in one chunk: one table read, not one per element).
+extern bool maxwell_gmem_memo;
 #define GMEM_CHUNKS_MAX 256  // chunks at most (HEAP_MAX in 16 MB chunks is 208)
 #define GMEM_CHUNK_SET(stage) ((stage) == STAGE_COMPUTE ? 1 : 2)
 #define GMEM_CHUNK_BINDING 0  // windows: GMem<k> at binding k; lazy: the GChunks table
