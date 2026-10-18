@@ -198,12 +198,15 @@ static int count_files(const std::string &dir, int depth = 0) {
 static int g_romfs_count = -1;
 static std::atomic<bool> g_build_cache_changed{true};
 static void game_files_changed(void) { g_romfs_count = -1; g_build_cache_changed = true; }
-static bool resumable_build(void) {
-    // The setup page redraws every frame; read its disk marker only after the files/build state changes.
-    static bool resumable;
-    if (g_build_cache_changed.exchange(false)) resumable = build_cache_resumable(g_root.c_str());
-    return resumable;
+// The setup page redraws every frame; read the build cache's disk state only after the files/build state changes.
+static bool g_resumable, g_has_build_cache;
+static void read_build_cache(void) {
+    if (!g_build_cache_changed.exchange(false)) return;
+    g_resumable = build_cache_resumable(g_root.c_str());
+    g_has_build_cache = build_cache_present(g_root.c_str());
 }
+static bool resumable_build(void) { read_build_cache(); return g_resumable; }
+static bool has_build_cache(void) { read_build_cache(); return g_has_build_cache; }
 
 static std::string incomplete(int have) {
     char b[96];
@@ -1634,10 +1637,10 @@ extern "C" void launcher_run(const char *root) {
                         if (opt_action("Cancel", "", "Keeps the game files.", true)) g_confirm_delete = false;
                     }
                 }
-                if (!busy) {
+                if (!busy && has_build_cache()) {
                     opt_section("Build cache");
-                    if (opt_action("Clear build cache", "", "Removes generated source, finished objects and compiler caches. "
-                                   "The installed game library, game files and saves are kept. The next build starts over.", true)) {
+                    if (opt_action("Clear build cache", "", "Removes the saved game-code build files. The next setup compiles "
+                                   "everything again.", true)) {
                         char why[512] = "";
                         g_build_cache_changed = true;
                         if (build_cache_clear(g_root.c_str(), why, sizeof why)) set_job("Build cache cleared.");
