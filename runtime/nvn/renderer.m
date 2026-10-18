@@ -1456,8 +1456,34 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
 // Compute driver constants (c0): 0x200 work group counts, 0x210 + 16*i uniform buffers (compute has
 // few hardware cbuf slots, so the compiler reads the rest through global memory), 0x310 + 16*i
 // storage buffers; each table entry is {addr_lo, addr_hi, size, 0}.
-typedef struct { id<MTLComputePipelineState> pipe; ShaderInfo *si; uint32_t local[3]; bool failed; } CsProg;
+typedef struct {
+    id<MTLComputePipelineState> pipe;
+    ShaderInfo *si;
+    uint32_t local[3];
+    uint64_t code_addr;
+    bool failed;
+    _Atomic bool ready;  // pipeline built (async compile: dispatches are skipped until then, as draws are)
+} CsProg;
 static NSMutableDictionary *g_cs_progs;  // code address -> CsProg
+
+static void compile_compute(CsProg *cp) {
+    NSError *err = nil;
+    double t0 = now_ms();
+    id<MTLLibrary> lib = [dev newLibraryWithSource:@(cp->si->msl) options:nil error:&err];
+    id<MTLFunction> f = lib ? [lib newFunctionWithName:@"main0"] : nil;
+    id<MTLComputePipelineState> pipe = f ? [dev newComputePipelineStateWithFunction:f error:&err] : nil;
+    @synchronized(cache) { stat_compile_ms += now_ms() - t0; }
+    __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
+    if (!pipe) {
+        LOG("[compute] compile failed: %s\n%s\n", err.localizedDescription.UTF8String, cp->si->msl);
+        cp->failed = true;
+        return;
+    }
+    cp->pipe = pipe;
+    LOG("[compute] program %llx: local size %ux%ux%u, cbufs mask %#x\n", cp->code_addr, cp->local[0], cp->local[1],
+        cp->local[2], cp->si->cbuf_mask);
+    cp->ready = true;
+}
 
 static CsProg *compute_program(NvnProgram *p) {
     NvnShaderStage *ss = &p->stages[5];
@@ -1469,6 +1495,7 @@ static CsProg *compute_program(NvnProgram *p) {
     if (v) { CsProg *cp = v.pointerValue; return cp->failed ? NULL : cp; }
     CsProg *cp = calloc(1, sizeof *cp);
     progs[key] = [NSValue valueWithPointer:cp];
+    cp->code_addr = ss->code_addr;
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
@@ -1478,17 +1505,14 @@ static CsProg *compute_program(NvnProgram *p) {
         cp->local[i] = ss->control ? *(const uint32_t *)(ss->control + 0x748 + 4 * i) : 1;
         if (!cp->local[i]) cp->local[i] = 1;
     }
-    NSError *err = nil;
-    id<MTLLibrary> lib = TIMED_COMPILE([dev newLibraryWithSource:@(cp->si->msl) options:nil error:&err]);
-    id<MTLFunction> f = lib ? [lib newFunctionWithName:@"main0"] : nil;
-    cp->pipe = f ? TIMED_COMPILE([dev newComputePipelineStateWithFunction:f error:&err]) : nil;
-    if (!cp->pipe) {
-        LOG("[compute] compile failed: %s\n%s\n", err.localizedDescription.UTF8String, cp->si->msl);
-        cp->failed = true;
-        return NULL;
+    if (sync_shaders()) {
+        compile_compute(cp);
+        return cp->failed ? NULL : cp;
     }
-    LOG("[compute] program %llx: local size %ux%ux%u, %d cbufs mask %#x\n", ss->code_addr, cp->local[0], cp->local[1],
-        cp->local[2], 0, cp->si->cbuf_mask);
+    // compiled off the render thread, as graphics programs are (get_program): the first dispatches are skipped
+    static dispatch_queue_t q;
+    if (!q) q = dispatch_queue_create("larecomp.compute", DISPATCH_QUEUE_CONCURRENT);
+    dispatch_async(q, ^{ compile_compute(cp); });
     return cp;
 }
 
@@ -1497,6 +1521,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     if (!st.program || !gx || !gy || !gz) return;
     CsProg *cp = compute_program(st.program);
     if (!cp) return;
+    if (!cp->ready) { stat_skipped++; return; }
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_TRACE_CS") != NULL;
 #define CST(x) do { if (trace) { fprintf(stderr, "[cs] %s\n", x); fflush(stderr); } } while (0)
