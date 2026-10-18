@@ -46,13 +46,14 @@ typedef struct {
 typedef struct {
     char path[128];
     const char *ovp;      // fs.c's host path of the seed file
-    int restr[16], nrestr, first, n;
+    int restr[32], nrestr, first, n;
     uint8_t rolled;
     char *host;           // the seed's file
 } RFile;
 
 static int g_pick[NCLS][MAXPICK], g_npick[NCLS];
-static int g_no2d[16], g_nno2d, g_fly[8], g_nfly, g_block[16], g_nblock, g_one[8], g_none;  // (one: Shadow Link)
+static int g_no2d[16], g_nno2d, g_fly[8], g_nfly, g_block[16], g_nblock, g_one[8], g_none;  // (one: the mini-bosses)
+static int g_mark[8], g_nmark, g_mark_flag;  // (mark: mini-boss copies get switch 2 = the marker flag)
 static Enemy g_enemy[MAXENEMY];
 static int g_nenemy, g_sizes;
 static RFile *g_files;
@@ -73,7 +74,7 @@ RT_ON_RESET(enemy_random_reset) {
     g_keyidx = NULL, g_keys = NULL, g_keycap = 0;
     g_files = NULL, g_slots = NULL;
     g_nfiles = g_nslots = g_nenemy = g_sizes = g_loaded = 0;
-    g_none = 0;  // (a seed without Include mini-bosses has no "one" group)
+    g_none = g_nmark = 0;  // (a seed without Include mini-bosses has no "one" group, no marked types)
     g_dir[0] = 0;
 }
 
@@ -156,6 +157,11 @@ static void load(void) {
             if (!strcmp(rest, "fly")) g_nfly = ids(t2 + 1, g_fly, 8);
             else if (!strcmp(rest, "block")) g_nblock = ids(t2 + 1, g_block, 16);
             else if (!strcmp(rest, "one")) g_none = ids(t2 + 1, g_one, 8);  // (seeds with Include mini-bosses)
+        } else if (!strcmp(line, "mark")) {  // (seeds with Include mini-bosses: miniboss_guard.py's marker)
+            char *t2 = strchr(rest, '\t');
+            if (!t2) continue;
+            g_mark_flag = atoi(rest);
+            g_nmark = ids(t2 + 1, g_mark, 8);
         } else if (!strcmp(line, "sizes")) {
             g_sizes = atoi(rest);
         } else if (!strcmp(line, "enemy") && g_nenemy < MAXENEMY) {
@@ -171,7 +177,7 @@ static void load(void) {
             RFile *rf = &g_files[g_nfiles++];
             *t2 = 0;
             strlcpy(rf->path, rest, sizeof rf->path);
-            rf->nrestr = ids(t2 + 1, rf->restr, 16);
+            rf->nrestr = ids(t2 + 1, rf->restr, 32);
             rf->first = g_nslots;
         } else if (!strcmp(line, "slot") && g_nfiles && g_nslots < MAXSLOT) {
             // offset seed-type vanilla-type class empty ve rotY "sx sy sz" params
@@ -294,6 +300,18 @@ static void apply_pick(Slot *s, const uint8_t *seed, int pick) {
         float zero = 0, one[3] = {1, 1, 1};
         memcpy(r + 0x24, &zero, 4);
         memcpy(r + 0x2C, one, 12);
+    }
+    // A mini-boss copy (Shadow Link, Blaino) carries the marker on switch 2, as the seed's own copies (miniboss_guard.py):
+    // its flow then takes the short death. Any other pick drops a marker its seed record had (switch 2: none).
+    int t = 0;
+    memcpy(&t, r + 0xC, 2);
+    if (in(g_mark, g_nmark, t)) {
+        uint16_t fl = (uint16_t)g_mark_flag;
+        r[0x7A] = 1;
+        memcpy(r + 0x80, &fl, 2);
+    } else if (g_nmark && r[0x7A] == 1 && r[0x80] == (uint8_t)g_mark_flag && r[0x81] == (uint8_t)(g_mark_flag >> 8)) {
+        r[0x7A] = 4;
+        memset(r + 0x80, 0, 2);
     }
     if (g_sizes) {  // (randomize-enemy-sizes)
         float sc = 0.5f + (float)(rnd() >> 11) * (1.0f / 9007199254740992.0f), v[3] = {sc, sc, sc};

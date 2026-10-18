@@ -44,7 +44,11 @@ DEATH = {
     0x58: ('HiploopHover.bfevfl', 'HiploopHover', 'HiploopHoverEnd'),
     0x21E: ('ShadowLink.bfevfl', 'ShadowLink', 'ShadowLinkEnd'),
 }
-ANYWHERE = {0x21E}  # (also a plain enemy in dungeons, caves and houses: copies there too)
+# Also plain enemies in dungeons, caves and houses (enemies.yml, Include mini-bosses): copies there too. (The
+# Ball-and-chain Soldier 0x55 has no flow - nothing to guard.) The originals in their own rooms (ORIGINAL_ROOMS, by
+# key: the dungeon room shuffle keeps keys) keep their whole events: Blaino's end opens his ring's shutters.
+ANYWHERE = {0x21E, 0x5F}
+ORIGINAL_ROOMS = {0x5F: ('Lv08TurtleRock', 'Lv08TurtleRock_03H')}
 MARKED = set(GUARDS) | set(QUIET) | set(DEATH)
 MARKER = 'OverworldMinibossMarker'
 
@@ -101,6 +105,12 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
             continue
         van = leb.Room(open(os.path.join(common_in, 'level', 'Field', f'{room_name}.leb'), 'rb').read())
         originals |= {a.key for a in van.actors if a.type == t}
+    for t, (lv, room_name) in ORIGINAL_ROOMS.items():
+        van = leb.Room(open(os.path.join(common_in, 'level', lv, f'{room_name}.leb'), 'rb').read())
+        originals |= {a.key for a in van.actors if a.type == t}
+    # enemy mode Random: the runtime may roll these anywhere at any load (runtime/hle/enemy_random.c gives each the
+    # marker on switch 2, enemies_random.tsv 'mark'): their flows are guarded even if no seeded copy needs it
+    rolled = ANYWHERE if settings.get('enemy-mode') == 'random' and settings.get('randomize-enemies') else set()
     levels = os.path.join(common_out, 'level')
     rooms = []
     for lv in sorted(os.listdir(levels)) if os.path.isdir(levels) else []:
@@ -113,7 +123,7 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
             room = leb.Room(open(os.path.join(levels, lv, f), 'rb').read())
             if any(a.type in types and a.key not in originals for a in room.actors):
                 rooms.append((os.path.join(levels, lv, f), room, types))
-    if not rooms:
+    if not rooms and not rolled:
         return 'no copies'
     # the marker flag (after every other flag: existing indices stay)
     rel = 'datasheets/GlobalFlags.gsheet'
@@ -128,7 +138,7 @@ def apply(out_dir, romfs, leb, event_tools, oead_tools, settings):
         os.makedirs(os.path.join(common_out, 'datasheets'), exist_ok=True)
         oead_tools.writeSheet(os.path.join(common_out, rel), sheet)
     settings['miniboss-marker-flag'] = idx
-    kinds, copies = set(), 0
+    kinds, copies = set(rolled), 0
     for f, room, types in rooms:
         for a in room.actors:
             if a.type in types and a.key not in originals:

@@ -87,6 +87,8 @@ import os as _os
 _ALL = bool(_os.environ.get('LARECOMP_ALL_MINIBOSSES'))  # (test: as frequency All)
 _ONLY_PARAM = _os.environ.get('LARECOMP_ONLY_MINIBOSS_PARAM')  # (test: its first parameter, an int)
 _ONLY = _os.environ.get('LARECOMP_ONLY_MINIBOSS')  # (test: hex type - every randomized Field enemy becomes it, any terrain)
+# (test, dev seeds: <room>=<hex type>,... - the first randomized land enemy there that may be it becomes it)
+_FORCE = {k: int(v, 16) for k, v in (x.split('=') for x in _os.environ.get('LARECOMP_FORCE_ENEMY', '').split(',') if x)}
 # Mini-bosses that need what stands with them in their dungeon room (2026-10-12): the arena room and the actor types
 # copied from it next to the mini-boss (same offsets, linked both ways as there): Smasher's iron ball (without it the
 # game crashes spawning him), Rolling Bones' spike bar, Cue Ball's rail. The runtime wakes them
@@ -235,10 +237,14 @@ def kill_linked(room_data, pool):
 
 
 # (LARecomp: the 'one group per room' and 2D restrictions, shared with tools/rando/enemy_random.py - Random mode)
-NO_2D = (0x1E, 0x30, 0x37, 0x38, 0x3F, 0x41, 0x4A, 0x4D, 0x21E)  # (0x21E Shadow Link: a 3D fighter)
+NO_2D = (0x1E, 0x30, 0x37, 0x38, 0x3F, 0x41, 0x4A, 0x4D, 0x21E, 0x55, 0x5F)  # (the mini-bosses: 3D fighters)
 FLY_BOMBS = (0x26, 0x3E, 0x48)  # vires, zirros, bone-putters
 BLOCKING = (0x8, 0x9, 0x13, 0x14, 0x2E, 0x2F, 0x30, 0x35, 0x36, 0x41, 0x4D)  # shield/spear, mimics, color dungeon orbs
-ONE_PER_ROOM = (0x21E,)  # Shadow Link as a plain enemy (pool: Include mini-bosses on): one per room at most
+# The mini-bosses that are also plain enemies (pool: Include mini-bosses on) - Shadow Link, the Ball-and-chain Soldier,
+# Blaino: one of them per room at most, and none in a room with a mini-boss or boss of its own (ARENA_TYPES: their
+# arenas - none has a randomized land enemy today, kept so if the room data or a generated dungeon ever has one)
+ONE_PER_ROOM = (0x21E, 0x55, 0x5F)
+ARENA_TYPES = set(range(0x51, 0x71)) | {0xB9}  # (the game's mini-boss and boss actors; 0x55: Kanalet's own Soldier)
 
 
 def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy_settings: dict, rand_state: tuple):
@@ -260,6 +266,8 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
     # some can block your path, others might just be annoying
     if file[:-4] in ENEMY_DATA['2D_Rooms']:
         restr.extend(NO_2D)
+    if folder != 'Field' and any(a.type in ARENA_TYPES for a in room_data.actors):  # (LARecomp)
+        restr.extend(ONE_PER_ROOM)
 
     total_ids = (
         *enemy_ids['land'],
@@ -314,6 +322,8 @@ def shuffleEnemyActors(room_data, folder: str, file: str, enemy_ids: dict, enemy
                 room_has_miniboss = True
                 new_enemy = mini
 
+            if mini is None and enemy_type == 'land' and _FORCE.get(file[:-4], -1) not in restr:
+                new_enemy = _FORCE[file[:-4]]
             # keep shuffling each actor until it is a valid enemy
             while new_enemy in restr and mini is None:
                 if enemy_type == 'land':

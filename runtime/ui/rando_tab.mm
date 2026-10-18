@@ -862,7 +862,7 @@ extern "C" void rando_tab_draw(float scale) {
     opt_toggle("Include mini-bosses", &g_opts.enemy_minibosses, false,
                "Some overworld enemies become mini-bosses: Hinox, Armos Knight, Dodongo Snake, Giant Buzz Blob, Smasher, "
                "Avalaunch, Rolling Bones, Cue Ball, Blaino, Master Stalfos, Moblin Chief, Lanmola, the Ball-and-Chain "
-               "Soldier or Shadow Link.");
+               "Soldier or Shadow Link. Shadow Link, Blaino and the Soldier also appear in dungeons and caves.");
     {
         opt_indent(1);
         if (!g_opts.randomize_enemies || !g_opts.enemy_minibosses) opt_disable_next();

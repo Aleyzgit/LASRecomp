@@ -25,9 +25,13 @@ uint64_t doorjump_player(uint64_t frame);  // PlayerCollision component: positio
 // that ends its fight in its own room (Blaino's knock-out): woken again like idle, then (0: none) - a state it goes
 // on to a few frames after waking (Master Stalfos: 13 shows him, 1 is his fight), at_once: woken as soon as he's
 // loaded, wherever Link is (an idle Master Stalfos is invisible), start (main offset, 0: none) - its own start action,
-// called with the actor instead of the state change (Lanmola: what his screen's event runs - up out of the sand)
+// called with the actor instead of the state change (Lanmola: what his screen's event runs - up out of the sand), own
+// (NULL: the Field only) - also a plain enemy in dungeons, caves and houses (enemies.yml, Include mini-bosses): copies
+// there are woken too; the original (its level name starts with `own`; a copy keeps the replaced enemy's) is left to
+// its arena
 typedef struct {
     uint64_t vt, chg; uint32_t sm, pos; uint8_t idle, fight; const char *name; uint8_t rest, then, at_once; uint32_t start;
+    const char *own;
 } Kind;
 static const Kind g_kinds[] = {
     {GA_HINOX_VTABLE, GA_HINOX_CHANGE_STATE, 0xff0, 0x260, 0, 1, "Hinox", 0xff},                          // 0x53: 10 = request HinoxStart
@@ -36,7 +40,7 @@ static const Kind g_kinds[] = {
     {GA_AVALAUNCH_VTABLE, GA_AVALAUNCH_CHANGE_STATE, 0xff0, 0x260, 0, 1, "Avalaunch", 0xff},              // 0x60
     {GA_ROLLING_BONES_VTABLE, GA_ROLLING_BONES_CHANGE_STATE, 0xff0, 0x260, 0, 1, "Rolling Bones", 0xff},  // 0x51 (+ spike bar)
     {GA_GOHMA_VTABLE, GA_GOHMA_CHANGE_STATE, 0x1200, 0x260, 13, 0, "Gohma", 0xff},                        // 0x5a (heads for Link: GOHMA_*)
-    {GA_BLAINO_VTABLE, GA_BLAINO_CHANGE_STATE, 0x11a0, 0x260, 10, 1, "Blaino", 5},                        // 0x5f (5: after a knock-out)
+    {GA_BLAINO_VTABLE, GA_BLAINO_CHANGE_STATE, 0x11a0, 0x260, 10, 1, "Blaino", 5, 0, 0, 0, "EnemyMightPu"},  // 0x5f (5: after a knock-out)
     {GA_CUE_BALL_VTABLE, GA_CUE_BALL_CHANGE_STATE, 0xff0, 0x260, 0, 3, "Cue Ball", 0xff},                 // 0x58 (+ a rail fitted)
     // 0x57: 0 = under the sand until his screen's event (AreaEventBox - not copied) runs his start; back in 0, again
     {GA_LANMOLA_VTABLE, GA_LANMOLA_CHANGE_STATE, 0xff0, 0x260, 0, 1, "Lanmola", 0, 0, 0, (GA_LANMOLA_START - MAIN_BASE)},
@@ -124,7 +128,15 @@ static void scan_diff(int i, uint64_t o) {
     static uint32_t snap[8][0x800];
     static uint64_t snap_obj[8];
     const uint32_t *now = (const uint32_t *)(uintptr_t)o;
-    if (snap_obj[i] == o)
+    if (snap_obj[i] == o && !strcmp(ENV("LARECOMP_MB_DIFF"), "8")) {  // (=8: bytes and floats too)
+        const uint8_t *nb = (const uint8_t *)now, *sb = (const uint8_t *)snap[i];
+        for (int b = 0; b < 0x2000; b++)
+            if (nb[b] < sb[b] && sb[b] - nb[b] <= 16 && sb[b] < 64) LOG("[mb-diff]   +%#x (u8): %u -> %u\n", b, sb[b], nb[b]);
+        const float *nf = (const float *)now, *sf = (const float *)snap[i];
+        for (int w = 0; w < 0x800; w++)
+            if (nf[w] < sf[w] && sf[w] - nf[w] <= 16 && sf[w] >= 1 && sf[w] <= 100 && nf[w] == floorf(nf[w]) && sf[w] == floorf(sf[w]))
+                LOG("[mb-diff]   +%#x (f32): %g -> %g\n", w * 4, sf[w], nf[w]);
+    } else if (snap_obj[i] == o)
         for (int w = 0; w < 0x800; w++)
             if (now[w] < snap[i][w] && snap[i][w] - now[w] <= 64 && snap[i][w] < 0x10000)
                 LOG("[mb-diff]   +%#x: %u -> %u\n", w * 4, snap[i][w], now[w]);
@@ -209,6 +221,80 @@ static void force_tick(Cpu *c, uint64_t frame) {
     c->sp = sp;
     LOG("[mb-force] f%llu actor %llx sm +%#llx -> state %d\n", (unsigned long long)frame, (unsigned long long)scan_latest(),
         (unsigned long long)sm, state);
+}
+
+// LARECOMP_MB_BOT=<frame>[:<safe states, '.'-separated>] (test, with LARECOMP_MB_SCAN_NAME): from that frame Link
+// walks at the scanned actor and slashes when close - a scripted fight (LARECOMP_CHEATS=hearts keeps him alive); with
+// safe states (its first state machine's), he backs off while it is in any other
+static void bot_tick(uint64_t frame) {
+    static long at = -2;
+    static int safe[8], nsafe;
+    if (at == -2) {
+        const char *e = ENV("LARECOMP_MB_BOT");
+        at = e ? strtol(e, (char **)&e, 10) : -1;
+        while (e && *e && nsafe < 8) safe[nsafe++] = (int)strtol(e + 1, (char **)&e, 10);
+    }
+    if (at < 0 || (long)frame < at) return;
+    uint64_t o = scan_latest(), comp = o ? LD64(o + 0x80) : 0, pc = doorjump_player(frame);
+    static uint64_t had;
+    if (had && !o) LOG("[mb-bot] f%llu target %llx gone\n", (unsigned long long)frame, (unsigned long long)had);
+    had = o;
+    if (!comp || !pc) return;
+    const float *p = (const float *)(uintptr_t)(comp + 0x80), *l = (const float *)(uintptr_t)(pc + 0x80);
+    float dx = p[0] - l[0], dz = p[2] - l[2], d = sqrtf(dx * dx + dz * dz);
+    if (d < 0.01f || d > 40) return;
+    extern int32_t g_test_lx, g_test_ly;
+    extern uint64_t g_test_stick_until, g_test_buttons, g_test_buttons_until;
+    if (frame % 120 == 0) LOG("[mb-bot] f%llu target %.1f away\n", (unsigned long long)frame, d);
+    bool ok = !nsafe;
+    for (int i = 7; i >= 0 && !ok; i--)
+        if (g_scan_obj[i] == o)
+            for (int k = 0; k < nsafe; k++) ok |= g_scan_last[i][0] == safe[k];
+    if (!ok) {  // (attacking: away from it)
+        if (d < 4.5f) g_test_lx = (int32_t)(-dx / d * 32767), g_test_ly = (int32_t)(dz / d * 32767), g_test_stick_until = frame + 2;
+        return;
+    }
+    static uint64_t charge_from;  // (LARECOMP_MB_BOT_SPIN: B held while closing in, released next to it - spin attack)
+    if (ENV("LARECOMP_MB_BOT_SPIN")) {
+        if (!charge_from || frame > g_test_buttons_until + 20) charge_from = frame;
+        bool charged = frame - charge_from > 70;
+        if (!(charged && d < 1.8f)) g_test_buttons = 2, g_test_buttons_until = frame + 1;
+        else charge_from = 0;
+        if (d > 1.0f) g_test_lx = (int32_t)(dx / d * 32767), g_test_ly = (int32_t)(-dz / d * 32767), g_test_stick_until = frame + 1;
+        return;
+    }
+    if (d > 1.6f || frame % 16 == 0) {
+        g_test_lx = (int32_t)(dx / d * 32767), g_test_ly = (int32_t)(-dz / d * 32767);
+        g_test_stick_until = frame + 2;
+    } else if (frame % 16 == 2) {
+        g_test_buttons = 2, g_test_buttons_until = frame + 6;
+    }
+}
+
+// LARECOMP_MB_LIFE=<frame>:<component offset hex>[:<field hex>:<int16>] (test, with LARECOMP_MB_SCAN_NAME): at that
+// frame log the scanned actor's component [actor + offset] (its first 0x100 bytes as int16) and optionally set a field
+static void life_tick(uint64_t frame) {
+    static long at = -2;
+    static unsigned long long off, field;
+    static int val, set;
+    if (at == -2) {
+        const char *e = ENV("LARECOMP_MB_LIFE");
+        at = -1;
+        if (e) set = sscanf(e, "%ld:%llx:%llx:%d", &at, &off, &field, &val) == 4;
+    }
+    if (at < 0 || (long)frame != at || !scan_latest()) return;
+    for (uint64_t o = 0x80; !off && o < 0x3000; o += 8) {  // (offset 0: the first member that is a life component)
+        uint64_t q = LD64(scan_latest() + o);
+        if (q >= HEAP_BASE && q + 0x200 <= HEAP_BASE + HEAP_MAX && !(q & 7) && LD64(q) == MAIN_BASE + 0x1b5be00) off = o;
+    }
+    LOG("[mb-life] component at +%#llx\n", off);
+    uint64_t comp = LD64(scan_latest() + off);
+    if (comp < HEAP_BASE || comp + 0x100 > HEAP_BASE + HEAP_MAX) return;
+    char line[2048];
+    int n = 0;
+    for (int i = 0; i < 0x100; i += 2) n += snprintf(line + n, sizeof line - n, "%x:%d ", i, *(int16_t *)(uintptr_t)(comp + i));
+    LOG("[mb-life] f%llu %llx: %s\n", (unsigned long long)frame, (unsigned long long)comp, line);
+    if (set) *(int16_t *)(uintptr_t)(comp + field) = (int16_t)val;
 }
 
 // A copy of a mini-boss whose flow gives a check (Lanmola, Armos Knight) skips the item when its switch 2 - the seed's
@@ -378,9 +464,28 @@ static void cueball_tick(Cpu *c, Seen *s, const Kind *k, uint64_t frame) {
     if (ENV("LARECOMP_LOG_ROAM")) LOG("[roam] Cue Ball at %.1f %.1f turns back\n", p[0], p[2]);
 }
 
-// Blaino's knock-out (tools/patches.py CRASHOUT_SITE): on the Field Link just falls back down - no fade, no restart
-// warp (its start only exists in his ring).
-int rt_crashout_skip(void) { return rt_gohma_free(); }
+static bool is_copy(uint64_t o, const Kind *k) {  // (a copy keeps the level name of the enemy it replaced)
+    return !k->own || strncmp((const char *)(uintptr_t)(o + 0x18), k->own, strlen(k->own));
+}
+
+// Blaino's knock-out (tools/patches.py CRASHOUT_SITE): a copy's Link just falls back down - no fade, no restart warp
+// (its start only exists in his ring): on the Field, and in dungeons, caves and houses unless the original Blaino (in
+// his own ring: Turtle Rock 03H) is about. (The countdown's own reference to the puncher, +0xc8, is already cleared
+// here.) Copies are never placed in a room with a mini-boss of its own (enemies.py ARENA_TYPES).
+int rt_crashout_skip(uint64_t o) {
+    (void)o;
+    extern const char *rando_seed_dir(void);
+    if (rt_gohma_free()) return 1;
+    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    if (!rando_seed_dir() || !ps || !strncmp((const char *)(uintptr_t)ps, "Panel", 5)) return 0;
+    uint64_t f = renderer_present_count();
+    for (int i = 0; i < MAX_SEEN; i++)
+        if (g_seen[i].obj && f - g_seen[i].last <= 2 && LD64(g_seen[i].obj) == GA_BLAINO_VTABLE &&
+            !is_copy(g_seen[i].obj, &g_kinds[g_seen[i].kind]))
+            return 0;
+    LOG("[miniboss] Blaino knock-out: a copy's, no crash-out\n");
+    return 1;
+}
 
 // Shadow Link on the Field (a chamber mini-boss: "Include mini-bosses"). As a shadow he follows Link; within 3 units
 // his own code requests his Appear event (main+0xd157f0: ShadowLink.bfevfl - the camera looks at him, his Sign glow,
@@ -450,12 +555,15 @@ static void shadow_link_tick(Cpu *c, uint64_t frame) {
 void miniboss_tick(Cpu *c, uint64_t frame) {
     if (ENV("LARECOMP_MB_SCAN") || ENV("LARECOMP_MB_SCAN_NAME")) scan_tick(frame);
     force_tick(c, frame);
+    bot_tick(frame);
+    life_tick(frame);
     extern const char *rando_seed_dir(void);
     if (!rando_seed_dir()) return;  // (only seeds put mini-bosses on the Field)
     shadow_link_tick(c, frame);  // (any level: Shadow Link is a plain enemy in dungeons too)
     miniboss_marker_set();       // (any level: his copies there have the marker on switch 2 too)
     uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
-    if (!ps || strcmp((const char *)(uintptr_t)ps, "Field")) return;  // (dungeon arenas start their own)
+    if (!ps || !strncmp((const char *)(uintptr_t)ps, "Panel", 5)) return;  // (Dampe's chamber: as is)
+    bool field = !strcmp((const char *)(uintptr_t)ps, "Field");  // (elsewhere: only copies of kinds with `own`)
     uint64_t pc = doorjump_player(frame);
     if (!pc) return;
     const float *lp = (const float *)(uintptr_t)(pc + 0x80);
@@ -464,6 +572,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
         Seen *s = &g_seen[i];
         if (!s->obj || frame - s->last > 2 || frame - s->first < 30 || LD64(s->obj) != g_kinds[s->kind].vt) continue;
         const Kind *k = &g_kinds[s->kind];
+        if (!field && (!k->own || !is_copy(s->obj, k))) continue;  // (dungeon arenas start their own)
         if (!strcmp(k->name, "Gohma")) gohma_walls(s->obj);
         if (!strcmp(k->name, "Cue Ball")) cueball_tick(c, s, k, frame);
         if (!strcmp(k->name, "Avalaunch")) avalaunch_tick(c, s, k, frame);

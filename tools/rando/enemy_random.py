@@ -14,7 +14,10 @@ each recorded actor is found in the seed's .leb files by its key (rooms moved by
 actors' keys). Output: <seed>/enemies_random.tsv (only in Random seeds - its presence turns the runtime on):
   pick   <class> <ids...>                    what each terrain class may become (enemies.py's lists)
   no2d <ids...> / group <name> <ids...>      kept out of 2D rooms (already in their files' lists) / one per room
-                                             (groups fly, block, one: Shadow Link, with Include mini-bosses)
+                                             (groups fly, block, one: Shadow Link, the Ball-and-chain Soldier,
+                                             Blaino - with Include mini-bosses)
+  mark   <flag> <ids...>                     these get switch 2 = <flag> when rolled (the mini-boss marker:
+                                             miniboss_guard.py - copies die without their arena's event)
   enemy  <id> <enemy flag> <8 params>        params: - (empty string), i:<int>, f:<float>, c:<int|->,<int|->... (one picked)
   sizes  1                                   (randomize-enemy-sizes: a random 0.5 - 1.5 scale per load)
   file   <romfs path> <restr ids...>         a room file, then its actors in order:
@@ -45,8 +48,9 @@ def _params(ps):
     return None if None in out else out
 
 
-def write(out_dir, rooms, enemy_data, enemies_mod, sizes, leb, minibosses=False):
-    """rooms: mod_generator.enemy_random. minibosses: Include mini-bosses (Shadow Link in the land pool). Returns a
+def write(out_dir, rooms, enemy_data, enemies_mod, sizes, leb, minibosses=False, marker=None):
+    """rooms: mod_generator.enemy_random. minibosses: Include mini-bosses (Shadow Link, the Ball-and-chain Soldier and
+    Blaino in the land pool). marker: (flag, ids) - miniboss_guard.py's marker and the types that carry it. Returns a
     short summary."""
     actors = enemy_data['Actors']
     ids = {k: [] for k in ('land', 'air', 'water', 'water2D', 'water-shallow', 'tree', 'hole')}
@@ -69,6 +73,8 @@ def write(out_dir, rooms, enemy_data, enemies_mod, sizes, leb, minibosses=False)
     lines.append('group\tblock\t' + ' '.join('%#x' % x for x in enemies_mod.BLOCKING))
     if minibosses:
         lines.append('group\tone\t' + ' '.join('%#x' % x for x in enemies_mod.ONE_PER_ROOM))
+    if minibosses and marker:
+        lines.append('mark\t%d\t' % marker[0] + ' '.join('%#x' % x for x in sorted(marker[1])))
     lines += ['enemy\t%#x\t%d\t%s' % (i, e, ' '.join(ps)) for i, e, ps in table]
     if sizes:
         lines.append('sizes\t1')
