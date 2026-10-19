@@ -15,6 +15,7 @@
 #include "nvn.h"
 #include "renderer.h"
 #include "pace.h"
+#include "interp.h"
 #include "shader_prep.h"
 #include "recolour.h"
 #include "slowframe.h"
@@ -479,8 +480,11 @@ void renderer_submit(void) {
     if (cmdbuf) {
         id<MTLCommandBuffer> c = cmdbuf;
         cmdbuf = nil;
+        bool replay = g_interp_replaying;
         [c addCompletedHandler:^(id<MTLCommandBuffer> done) {
+            // (frame interpolation's replays count as the game's work: Dynamic budgets the frame and its in-betweens)
             stat_gpu_s += renderer_gpu_busy(done, false) / 1e9;
+            if (replay) interp_replay_gpu((done.GPUEndTime - done.GPUStartTime) * 1e3);
             if (done.error) LOG("[metal] command buffer error: %s\n", done.error.localizedDescription.UTF8String);
         }];
         [c commit];
@@ -2511,7 +2515,9 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
         if ((si->cbuf_dynamic & (1u << k)) && r.size) size = r.size > 0x10000 ? 0x10000 : r.size;  // indexed: whole buffer
         if (size > r.size && r.size) size = r.size;
         if (size < 16) size = 16;
-        uint64_t off = ring_alloc((void *)(uintptr_t)r.addr, size);  // snapshot, as later CPU writes must not leak in
+        const void *src = (const void *)(uintptr_t)r.addr;
+        if (g_interp_log) src = interp_cbuf(stage, k, idx, src, size);  // (frame interpolation: logged / blended copy)
+        uint64_t off = ring_alloc(src, size);  // snapshot, as later CPU writes must not leak in
         if (stage == 0) [enc setVertexBuffer:ring offset:off atIndex:k];
         else [enc setFragmentBuffer:ring offset:off atIndex:k];
     }
@@ -3339,6 +3345,22 @@ static void draw(CmdRec *r, bool indexed) {
     float zn = st.depth_range[0][0], zf = st.depth_range[0][1];
 
     // resources
+    if (g_interp_log) {  // (frame interpolation, runtime/nvn/interp.c: the draw's identity across frames)
+        // LARECOMP_INTERP_KEY=<mask> (research): 1 draw arguments, 2 index buffer address, 4 programs, 8 vertex buffer 0
+        // address, 16 target object, 32 target size. Default 37: the game's render-target objects and its dynamic
+        // geometry's buffers change from frame to frame (measured: 44% matched with them, 100% without, Mabe Village).
+        static int kmask = -1;
+        if (kmask < 0) kmask = getenv("LARECOMP_INTERP_KEY") ? atoi(getenv("LARECOMP_INTERP_KEY")) : 37;
+        uint64_t args[7];
+        memcpy(args, r->x, sizeof args);
+        if (indexed && !(kmask & 2)) args[3] = 0;
+        NvnTexture *kt = st.rt.ncolor ? st.rt.color[0] : st.rt.depth;
+        uint64_t key = (kmask & 1) ? hmix(1469598103934665603ull, args, sizeof args) : 1469598103934665603ull;
+        uint64_t ids[5] = {(kmask & 4) ? st.program->stages[0].code_addr : 0, (kmask & 4) ? st.program->stages[1].code_addr : 0,
+                           (kmask & 8) ? st.vbuf[0].addr : 0, (kmask & 16) ? (uint64_t)(uintptr_t)kt : 0,
+                           (kmask & 32) && kt ? (uint64_t)kt->width << 32 | kt->height : 0};
+        interp_draw(hmix(key, ids, sizeof ids));
+    }
     bind_cbufs(0, pr->vi);
     bind_cbufs(1, pr->fi);
     // (debug, LARECOMP_LOG_BINDS) shaders loading global memory read through pointers in their uniform buffers: note
@@ -4114,6 +4136,7 @@ static void exec_list(uint64_t handle, int depth) {
             }
             break;
         case CMD_DISPATCH:
+            if (g_interp_replaying) break;  // (a replayed frame: the frame's compute results are already there)
             dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]);
             if (st.program) {
                 static uint64_t seen[16];
@@ -4157,9 +4180,11 @@ static void exec_list(uint64_t handle, int depth) {
         case CMD_DRAW_ELEMENTS: draw(r, true); break;
         case CMD_UPDATE_UNIFORM_BUFFER:
             // (buffer, size, offset, dataSize, data): apply the update in command order
+            if (g_interp_replaying) break;  // (replay: the draws read their logged uniform copies)
             memcpy((void *)(uintptr_t)(r->x[0] + r->x[2]), x, r->x[3]);
             break;
         case CMD_FENCE_SYNC: {
+            if (g_interp_replaying) break;  // (replays leave the game's fences, counters and memory alone)
             // The CPU may read GPU-written memory (compute results) once the fence is signaled.
             static int fence_flush = -1;
             if (fence_flush < 0) fence_flush = getenv("LARECOMP_FENCE_FLUSH") ? 1 : 0;
@@ -4169,6 +4194,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_REPORT_COUNTER: {
+            if (g_interp_replaying) break;
             uint64_t *out = (uint64_t *)(uintptr_t)r->x[1];
             static uint32_t seen;
             uint32_t type = (uint32_t)r->x[0];
@@ -4211,8 +4237,9 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         }
         case CMD_COPY_BUFFER_TO_TEXTURE: copy_buffer_to_texture(r->x[0], x); break;
-        case CMD_COPY_TEXTURE_TO_BUFFER: copy_texture_to_buffer(x, r->x[3]); break;
+        case CMD_COPY_TEXTURE_TO_BUFFER: if (!g_interp_replaying) copy_texture_to_buffer(x, r->x[3]); break;
         case CMD_COPY_BUFFER_TO_BUFFER:
+            if (g_interp_replaying) break;
             { static int nlog; if (nlog++ < 40 && ENV("LARECOMP_LOG_BINDS")) LOG("[copybuf] frame %llu %llx -> %llx %llu bytes\n", (unsigned long long)renderer_exec_frame(), r->x[0], r->x[1], r->x[2]); }
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
@@ -4360,7 +4387,29 @@ void renderer_reset(void) {
     st_defaults();
 }
 
+// Frame interpolation (runtime/nvn/interp.c): the bound state at the frame's first list, and a replay of the frame's
+// lists with the logged (blended) uniforms - the game's own state is restored after it. The caller holds
+// interp_replay_lock and has set the render scale the frame was drawn at.
+static __typeof__(st) st_frame_begin;
+void renderer_interp_replay(void) {
+    const uint64_t *h;
+    uint32_t n = interp_handles(&h);
+    __typeof__(st) st_end = st;
+    bool log = g_interp_log;
+    st = st_frame_begin;
+    g_interp_log = true;
+    interp_replay_begin();
+    @autoreleasepool {
+        for (uint32_t i = 0; i < n; i++) exec_list(h[i], 0);
+        renderer_submit();
+    }
+    interp_replay_end();
+    g_interp_log = log;
+    st = st_end;
+}
+
 void backend_execute(uint64_t handle) {
+    if (interp_list_submitted(handle)) st_frame_begin = st;
     @autoreleasepool {
         exec_list(handle, 0);
         static int sync_submit = -1;
