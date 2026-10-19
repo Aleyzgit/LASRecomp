@@ -2516,7 +2516,10 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
         if (size > r.size && r.size) size = r.size;
         if (size < 16) size = 16;
         const void *src = (const void *)(uintptr_t)r.addr;
-        if (g_interp_log) src = interp_cbuf(stage, k, idx, src, size);  // (frame interpolation: logged / blended copy)
+        if (g_interp_log) {  // (frame interpolation: logged / blended copy; compared over the bytes the shader reads)
+            uint64_t used = si->cbuf_used[k] && si->cbuf_used[k] < size ? si->cbuf_used[k] : size;
+            src = interp_cbuf(stage, k, idx, src, size, used);
+        }
         uint64_t off = ring_alloc(src, size);  // snapshot, as later CPU writes must not leak in
         if (stage == 0) [enc setVertexBuffer:ring offset:off atIndex:k];
         else [enc setFragmentBuffer:ring offset:off atIndex:k];

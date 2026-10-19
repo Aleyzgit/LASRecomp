@@ -64,6 +64,7 @@ int interp_wanted(void) {
 typedef struct {
     uint8_t stage, slot, snap;  // snap: elements past the jump distance show the new value (a jump, not motion)
     uint32_t off, size;
+    uint32_t used;  // the bytes the shader reads: compared and blended; the rest (unwritten leftovers) are this frame's
     uint64_t addr;  // the guest address of the buffer (research: is it an object's identity across frames?)
     int64_t prev_off, blend;
     int64_t prev2_off;  // the same buffer two frames back (-1: none): an element back at that value toggles, not moves
@@ -197,8 +198,8 @@ static float draw_distance(const DrawRec *d, const DrawRec *p) {
         if (cc->stage != pc->stage || cc->slot != pc->slot || cc->size != pc->size) return 1e30f;
         if (cc->stage != 0 || cc->slot < 2) continue;
         const float *a = (const float *)(prev->bytes + pc->off), *b = (const float *)(cur->bytes + cc->off);
-        if (!memcmp(a, b, cc->size)) continue;
-        for (uint32_t q = 0; q < cc->size / 4; q++)
+        if (!memcmp(a, b, cc->used)) continue;
+        for (uint32_t q = 0; q < cc->used / 4; q++)
             if (blendable(a[q], b[q])) dist += fabsf(b[q] - a[q]);
             else if (a[q] != b[q]) dist += 1;  // (an integer / flag changed: another object)
     }
@@ -212,8 +213,8 @@ static float draw_maxdiff(const DrawRec *d, const DrawRec *p) {
         const CbRec *cc = &cur->cbs[d->first_cb + i], *pc = &prev->cbs[p->first_cb + i];
         if (cc->stage != 0 || cc->slot < 2 || pc->stage != cc->stage || pc->slot != cc->slot || pc->size != cc->size) continue;
         const float *a = (const float *)(prev->bytes + pc->off), *b = (const float *)(cur->bytes + cc->off);
-        if (!memcmp(a, b, cc->size)) continue;
-        for (uint32_t q = 0; q < cc->size / 4; q++)
+        if (!memcmp(a, b, cc->used)) continue;
+        for (uint32_t q = 0; q < cc->used / 4; q++)
             if (blendable(a[q], b[q])) { float dd = fabsf(b[q] - a[q]) - 0.05f * fmaxf(fabsf(a[q]), fabsf(b[q])); if (dd > m) m = dd; }
     }
     return m;
@@ -406,7 +407,7 @@ void interp_draw(uint64_t key, bool depth_only) {
     d->ncb = 0;
 }
 
-const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t size) {
+const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t size, uint64_t used) {
     (void)k;
     if (g_interp_replaying) {
         if (rp_cur < 0) return src;
@@ -427,6 +428,7 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
     GROW(cur->cbs, cur->ncbs, cur->cap_cbs, 4096);
     CbRec *c = &cur->cbs[cur->ncbs++];
     c->stage = (uint8_t)stage, c->slot = (uint8_t)slot, c->off = (uint32_t)cur->nbytes, c->size = (uint32_t)size;
+    c->used = (uint32_t)(used && used < size ? used : size);
     c->addr = (uint64_t)(uintptr_t)src;
     c->prev_off = c->blend = c->prev2_off = -1;
     c->snap = 0, c->maxd = -1;
@@ -544,9 +546,9 @@ bool interp_frame_end(bool log_next) {
             if (cc->stage != pc->stage || cc->slot != pc->slot || cc->size != pc->size) continue;
             if (!(stages & (cc->stage == 0 ? 1 : 2))) continue;
             const float *a = (const float *)(prev->bytes + pc->off), *b = (const float *)(cur->bytes + cc->off);
-            if (!memcmp(a, b, cc->size)) { cc->maxd = 0; continue; }
+            if (!memcmp(a, b, cc->used)) { cc->maxd = 0; continue; }
             changed++;
-            uint32_t nf = cc->size / 4;
+            uint32_t nf = cc->used / 4;
             // A jump: an element moved further than the jump distance in one frame - and much further than the buffer
             // moved the frame before. Steady fast motion (a dungeon's room-to-room scroll: its camera moves far each
             // frame, every frame) blends; deciding it per frame by distance alone made such a scroll alternate
@@ -674,7 +676,7 @@ bool interp_prepare(float t) {
         }
         const float *a = (const float *)(prev->bytes + cc->prev_off), *b = (const float *)(cur->bytes + cc->off);
         float *out = (float *)(blend_bytes + blend_n);
-        uint32_t nf = cc->size / 4;
+        uint32_t nf = cc->used / 4;
         // A buffer that jumped shows this frame's values whole (letsgo-recomp's rule: a matrix with some elements
         // snapped and others blended shears and shrinks the model; the earlier per-element snap did that).
         // LARECOMP_INTERP_SNAP=elem: the old per-element snap (research).
