@@ -16,7 +16,6 @@ int rt_shadow_link_appear(uint64_t o);
 int rt_gohma_free(void);
 uint32_t rt_gohma_heading(uint64_t gohma, uint32_t track);
 int rt_crashout_skip(uint64_t o);
-int rt_death_event(Cpu *c);
 void rt_dig_hole(Cpu *c);  // digs.c
 uint64_t rt_hole_cap(void);
 void rt_frame_job_kickoff(uint64_t owner);  // delegate_null.c
@@ -28,8 +27,6 @@ int rt_hook(Cpu *c, uint64_t site) {
     case GA_MB_SEEN_SITE:  // MB_SEEN_SITE - ldr x8, [x21]: an actor seen
         rt_mb_seen(c->x[21]);
         return 0;
-    case GA_DEATH_EVENT_SITE:  // DEATH_EVENT_SITE - ldr x2, [x8]: an event state's request, a copy's End taken
-        return rt_death_event(c);
     case GA_SHADOW_LINK_APPEAR_SITE:  // SHADOW_LINK_APPEAR_SITE - ldr x9, [x0, #0x230]: his Appear event, none on the Field
         return rt_shadow_link_appear(c->x[0]) ? 2 : 0;
     case GA_CRASHOUT_SITE:  // CRASHOUT_SITE - str wzr, [x0, #0xb8]: Blaino's knock-out, no crash-out for copies

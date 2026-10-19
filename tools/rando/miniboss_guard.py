@@ -25,9 +25,9 @@ QUIET = {
 }
 # Copies' deaths (user 2026-10-18): a mini-boss's <Name>End event turns the camera to it (LookAtGimmick), hides the
 # HUD, stops the music, opens its arena's doors and autosaves - and, as any event, holds Link. A copy (switch 2 = the
-# marker) takes a short path instead: its item drop and hiding its models, with no camera, HUD, music, door, autosave or
-# wait - the event ends at once. Its death effect (Dead_Boss, 4 s) is played by the runtime before the copy's End
-# request is let through, with Link in control (runtime/hle/miniboss.c rt_death_event); the camera stays on him. The original in its own room plays the whole event as before. Shadow Link's end only looks
+# marker) takes a short path instead: its death effect (PlayTailorOtherChannelEx, as the original's: Dead_Boss, 4 s -
+# the event holds Link for it, user 2026-10-18: accepted for now), its item drop and hiding its models, with no camera,
+# HUD, music, door or autosave; the camera stays on Link. The original in its own room plays the whole event as before. Shadow Link's end only looks
 # at him: a copy's ends at once. Master Stalfos copies fight his last fight (enemies.py: parameter 3 - the earlier ones
 # end with his escape and a line of text) and carry the marker on switch 3 (his switch 2 is his own: MARK_SWITCH).
 # type -> (event flow, actor name in it, entry point)
@@ -75,11 +75,10 @@ def _reachable(fc, entry_event):
 
 
 def death_path(event_tools, fc, actor, entry):
-    """The copy's short end: (the original's) item drop and models hidden - nothing that waits. Its Dead_Boss effect
-    is the runtime's, before the event (runtime/hle/miniboss.c rt_death_event: the copy's End request is held while
-    it plays, so Link keeps control). Returns its first event or None."""
+    """The copy's short end: (the original's) death effect, item drop and models hidden. Returns its first event or
+    None."""
     ep = event_tools.findEntryPoint(fc, entry)
-    drop, hide = None, {}
+    effect, drop, hide = None, None, {}
     for ev in _reachable(fc, ep.main_event.v):
         d = ev.data
         if type(d).__name__ != 'ActionEvent' or d.actor.v.identifier.name != actor:
@@ -89,11 +88,15 @@ def death_path(event_tools, fc, actor, entry):
             hide.setdefault(params.get('modelIndex', 0), params)
         elif act == 'BossItemDrop' and drop is None:
             drop = params
+        elif act == 'PlayTailorOtherChannelEx' and effect is None:
+            effect = params
     nxt = None
-    for idx in sorted(hide, reverse=True):  # (built back to front: drop, then each model hidden)
+    for idx in sorted(hide, reverse=True):  # (built back to front: effect, drop, then each model hidden)
         nxt = event_tools.createActionEvent(fc, actor, 'ModelVisibility', hide[idx], nxt)
     if drop is not None:
         nxt = event_tools.createActionEvent(fc, actor, 'BossItemDrop', drop, nxt)
+    if effect is not None:
+        nxt = event_tools.createActionEvent(fc, actor, 'PlayTailorOtherChannelEx', effect, nxt)
     return nxt
 
 

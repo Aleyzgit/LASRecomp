@@ -798,12 +798,6 @@ OWNER_CALL_NOTIFY_SITE = A.OWNER_CALL_NOTIFY_SITE
 # skip goes to its return.
 SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
 
-# A mini-boss's End event (its death: main+0x7c7460 starts an actor's event state - the request is the tail call
-# through its vtable) stops Link while it runs (Dead_Boss for 4 s). For an off-arena copy (seeds) the runtime takes
-# the request: it plays the death effect itself, Link keeps control, and only then requests the event - the copy's
-# short path (item drop, model hidden) ends at once (runtime/hle/miniboss.c, tools/rando/miniboss_guard.py).
-DEATH_EVENT_SITE = A.DEATH_EVENT_SITE
-
 
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
@@ -818,7 +812,6 @@ HOOKS = {
     GOHMA_ARRIVED_SITE: (0x3dc58260, (A.GOHMA_ARRIVED_SKIP,), 'ldr q0, [x19, #0x1600]: Gohma, no track end on the Field'),
     MSTALFOS_BODY_SITE: (0x320003e8, (), 'mov w8, #1: Master Stalfos body collision flag, off on the Field'),
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
-    DEATH_EVENT_SITE: (0xf9400102, (), 'ldr x2, [x8]: an actor event state\'s request, a mini-boss copy\'s End taken'),
     SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),

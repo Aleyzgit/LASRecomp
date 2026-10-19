@@ -26,7 +26,6 @@
 #define GA_MSTALFOS_JUMP_SITE               UINT64_C(0x70004bde08)
 #define GA_MCHIEF_STORY_SITE                UINT64_C(0x70001f8b30)
 #define GA_SHADOW_LINK_APPEAR_SITE         UINT64_C(0x7000d15828)
-#define GA_DEATH_EVENT_SITE                UINT64_C(0x70007c7564)
 #define GA_LEVEL_REQUEST_SITE               UINT64_C(0x700081ba80)
 #define GA_ADV_EXIT_DIALOG_SITE             UINT64_C(0x70007f15e0)
 #define GA_DAMAGE_LSL_SITES_0               UINT64_C(0x7000d7c8c0)
