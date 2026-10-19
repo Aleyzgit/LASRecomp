@@ -1169,8 +1169,9 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
     return out, jumps
 
 
-def write_all(romfs, out, layouts, jumps=None):
-    """Writes every generated dungeon; global flags numbered across all of them, one door_jumps.tsv."""
+def write_all(romfs, out, layouts, jumps=None, fog='off'):
+    """Writes every generated dungeon; global flags numbered across all of them, one door_jumps.tsv. fog: the hidden
+    'passage-fog' setting (prototype, level_builder.add_passage_fog): 'off' / 'woods' / 'tailor:<entry>' / 'cloud'."""
     jumps_path = os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv')
     open(jumps_path, 'w').close()
     if jumps is not None:  # Chaos: discovered doorway pairs are event flags 3800+ (runtime/hle/flags_ext.c)
@@ -1187,7 +1188,7 @@ def write_all(romfs, out, layouts, jumps=None):
     shared = FlagMap(next_global=start)
     for lv, L in layouts.items():
         write(romfs, out, lv, L, ENTRANCES[lv], shared_flags=shared,
-              jumps=None if jumps is None else [j for j in jumps if j[0] == lv])
+              jumps=None if jumps is None else [j for j in jumps if j[0] == lv], fog=fog)
     # each cell's map page shift (level, cell, x, y): the Chaos letters draw only the open floor's doorways
     # (runtime/ui/chaos_overlay.mm)
     with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'dungeon_map.tsv'), 'w') as f:
@@ -1214,7 +1215,8 @@ def write_all(romfs, out, layouts, jumps=None):
             f.write('dungeon generator: event flags up to %d\n' % shared.next_g)
 
 
-def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False, shared_flags=None, jumps=None):
+def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False, shared_flags=None, jumps=None,
+          fog='off'):
     rooms_list = []
     # camera zones use the target dungeon's own zone record (environment / lighting set / music): a zone naming
     # another dungeon's environment (e.g. 'Lv10Base') isn't loaded in this level and the load throws
@@ -1305,6 +1307,9 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
     with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv'), 'a' if shared_flags else 'w') as f:
         for j in jumps:
             f.write('\t'.join(map(str, j)) + '\n')
+    if fog and fog != 'off':  # (prototype) smoke in the open passages between rooms that weren't neighbours
+        print('passage fog (%s): %s %d' % (fog, level, level_builder.add_passage_fog(romfs, out, cat, level, layout,
+                                                                                    jumps, fog)), flush=True)
     _dungeon_map_images(romfs, out, layout)
     _level_textures(romfs, out, level, layout)
 

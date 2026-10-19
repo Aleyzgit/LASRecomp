@@ -219,6 +219,198 @@ def build(base, rooms, starts=None, static=True, keep_tree=False):
         fh.get(b'staticObject').data.entries = []
     return fh.write()
 
+# ---- passage fog (prototype, hidden setting 'passage-fog', default off)
+# Dungeon Room Shuffle joins rooms that were never neighbours. Where Link can see or walk through such a join (a
+# doorway without a door, 2 tiles or wider), the far side can look wrong: a neighbour cut off at its edge, another
+# dungeon's floor, or black void past a door-jump doorway. The fog hangs a veil of smoke in those passages, so Link
+# visibly runs into it and the shuffle reads as deliberate. Kinds:
+#   'woods'          TagMysteriousWoodsFog (0x26F): the Mysterious Woods fog tag (no level places it; the game's
+#                    code makes one) - plays MysteriousWoods_Fog_00 from tailor/TagMysteriousWoodsFog.drsb
+#   'tailor:<entry>' TagTailorPlayer (0x1C1) playing an entry of tailor/TagTailorPlayer.drsb, e.g.
+#                    'Field_12B_Effect_00' (Mabe Village chimney smoke, BdUlrira_Smoke_00)
+#   'cloud'          MapFixture (0x1F8) drawing the island-vanishing cloud bank (DisappearIsland, copied at
+#                    generation time from the player's actor/ObjDisappearIsland.bfres into the seed's map/)
+TAILOR, WOODS_FOG, MAPFIXTURE = 0x1C1, 0x26F, 0x1F8
+FOG_KEY_TAG = 0x7F  # actor keys: tag << 56 | row << 24 | col << 16 | side << 8 | n (unique per level)
+_FOG_STEP = {'N': (0, -1), 'S': (0, 1), 'W': (-1, 0), 'E': (1, 0)}
+_FOG_OPP = {'N': 'S', 'S': 'N', 'W': 'E', 'E': 'W'}
+_FOG_IN = {'N': (0, 1), 'S': (0, -1), 'W': (1, 0), 'E': (-1, 0)}  # into the room
+CLOUD_MODEL, CLOUD_SRC = 'DisappearIsland', 'actor/ObjDisappearIsland.bfres'
+# the cloud bank: 3 vertical cards facing +z, x -6.7..6.7, y 0.5..6.7, standing 15.5 north of the model origin
+_CLOUD_W, _CLOUD_Z = 13.4, -15.5
+
+
+def _slot_span(slot):
+    """Doorway centre and width along its edge (units) of an openings slot: half tiles, or 'w<a>-<b>' (tiles)."""
+    if isinstance(slot, str):
+        a, b = map(int, slot[1:].split('-'))
+        return (a + b + 1) * 0.75, (b - a + 1) * 1.5
+    return slot * 0.75, (1.5 if slot % 2 else 3.0)
+
+
+def fog_spots(cat, level, layout, rows):
+    """[(cell, side, slot, how)]: the passages that get fog. `how`: 'join' = lined-up open doorways into a room that
+    wasn't this one's neighbour (both rooms get a veil at the shared edge), 'jump' = an open doorway whose door
+    jump leads somewhere other than the room next door. Only doorways without a door (shutters, locks, bombable
+    walls stay as they are) and at least 2 tiles wide (1-tile gaps are left alone)."""
+    import dungeon_gen as g
+    import rooms as rm
+
+    def is_open(room, side, slot):
+        if isinstance(slot, str):
+            return True
+        if slot % 2:
+            return False  # a 1-tile gap
+        return not any(d[0] == side and abs(d[3] - slot) <= 1 and not d[2].endswith('(mirror)')
+                       for d in cat[room]['doors'] if len(d) > 3)
+    out = []
+    rows = [r for r in rows or () if r[0] == level]
+    jumped = {('%s_%s' % (level, r[1]), r[2], int(r[3])) for r in rows}  # (a doorway with a jump row is a jump)
+    pos = {g.cell_pos(c): c for c in layout}
+    for cell, room in sorted(layout.items()):
+        if room not in cat:
+            continue
+        c, r = g.cell_pos(cell)
+        mine = g.openings(cat, room)
+        for s in 'NSWE':
+            nb = pos.get((c + _FOG_STEP[s][0], r + _FOG_STEP[s][1]))
+            if not nb or not mine[s] or layout[nb] not in cat:
+                continue
+            other = layout[nb]
+            if rm.neighbour(room, s) == other:
+                continue  # the vanilla pair (moved together or never moved)
+            theirs = g.openings(cat, other)[_FOG_OPP[s]]
+            if [x[0] for x in mine[s]] != [x[0] for x in theirs] or not g._openings_match(mine[s], theirs):
+                continue  # not lined up: door jumps (below) / sealed
+            for x, y in zip(mine[s], theirs):
+                if (cell, s, x[0]) in jumped or x[2] or y[2] or not is_open(room, s, x[0]) or \
+                        not is_open(other, _FOG_OPP[s], y[0]):
+                    continue
+                out.append((cell, s, x[0], 'join'))
+    for row in rows:
+        cell = '%s_%s' % (level, row[1])
+        side, own = row[2], int(row[3])
+        room = layout.get(cell)
+        if room not in cat or own not in [x[0] for x in g.openings(cat, room)[side]] or not is_open(room, side, own):
+            continue
+        if len(row) > 6:  # lined up with the doorway next door: the jump lands where Link would walk anyway
+            c, r = g.cell_pos(cell)
+            nb = pos.get((c + _FOG_STEP[side][0], r + _FOG_STEP[side][1]))
+            if nb == '%s_%s' % (level, row[5]) and row[6] == _FOG_OPP[side] and int(row[4]) == own:
+                continue
+        if not any(o[:3] == (cell, side, own) for o in out):
+            out.append((cell, side, own, 'jump'))
+    return out
+
+
+def fog_template(romfs, kind):
+    """A vanilla actor to copy the fog actors from: Tail Cave 05A's Black_Plane tailor tag / the Wind Fish's Egg's
+    BlackWall MapFixture."""
+    from RandomizerCore.Tools import leb
+    room, t = ('Lv09WindFishsEgg_07C', MAPFIXTURE) if kind == 'cloud' else ('Lv01TailCave_05A', TAILOR)
+    p = os.path.join(romfs, 'region_common', 'level', room.split('_')[0], room + '.leb')
+    for a in leb.Room(open(p, 'rb').read()).actors:
+        if a.type == t:
+            return a
+    raise RuntimeError('no actor to copy the passage fog from')
+
+
+def fog_actors(template, kind, cell, side, slot, how, room_id):
+    """The fog actors for one passage of grid cell `cell` (full name, e.g. 'Lv01TailCave_04B'): emitters every ~3
+    units along the opening, 0.75 inside this room's edge (a join gets a veil from each side: a band Link walks
+    through), or one cloud card per opening."""
+    rc = cell.rsplit('_', 1)[1]
+    row, col = int(rc[:2]), ord(rc[2]) - ord('A')
+    x0, z0 = col * 15.0, (row - 1) * 12.0
+    along, width = _slot_span(slot)
+    ix, iz = _FOG_IN[side]
+    ex, ez = {'N': (x0 + along, z0), 'S': (x0 + along, z0 + 12.0), 'W': (x0, z0 + along),
+              'E': (x0 + 15.0, z0 + along)}[side]
+    if kind == 'cloud':
+        offs = [0.0]
+    else:
+        n = max(1, int(round(width / 3.0)))
+        offs = [(i - (n - 1) / 2.0) * width / n for i in range(n)]
+    out = []
+    for i, o in enumerate(offs):
+        a = copy.deepcopy(template)
+        px, pz = (ex + o, ez) if side in 'NS' else (ex, ez + o)
+        a.rotX = a.rotY = a.rotZ = 0.0
+        if kind == 'cloud':  # a card facing the camera (+z), as wide as the opening, standing in the doorway (a
+            # west / east doorway: at its front end, across the wall - it hides the doorway behind it)
+            if side in 'WE':
+                pz += width / 2.0
+            s = (width + 1.5) / _CLOUD_W
+            a.scaleX, a.scaleY, a.scaleZ = s, 0.55, s
+            a.posX, a.posY, a.posZ = px + 0.75 * ix, -0.3, pz + 0.75 * iz - _CLOUD_Z * s
+            a.type = MAPFIXTURE
+            a.parameters = [CLOUD_MODEL.encode(), 0, b'', b'', b'', b'', b'', b'']
+        else:
+            a.posX, a.posY, a.posZ = px + 0.75 * ix, 0.0, pz + 0.75 * iz
+            a.scaleX = a.scaleY = a.scaleZ = 1.0
+            if kind == 'woods':
+                a.type = WOODS_FOG
+                a.parameters = [b'', b'', b'', b'', b'', b'', b'', b'']
+            else:
+                a.type = TAILOR
+                a.parameters = [kind.split(':', 1)[1].encode(), 0, b'', b'', b'', b'', b'', b'']
+        a.roomID = room_id
+        a.key = (FOG_KEY_TAG << 56) | (row << 24) | (col << 16) | (ord(side) << 8) | ((_slot_id(slot) << 3 | i) & 0xFF)
+        prefix = {MAPFIXTURE: b'MapFixture', TAILOR: b'TagTailorPla', WOODS_FOG: b'TagMysteriou'}[a.type]
+        a.name = prefix + b'-%016X' % a.key
+        a.switches = [(4, 0), (4, 0), (4, 0), (4, 0)]
+        rel = a.relationships
+        rel.section_1, rel.section_2, rel.section_3 = [], [], []
+        rel.x = rel.y = rel.z = 0
+        out.append(a)
+    return out
+
+
+def _slot_id(slot):
+    return (int(slot[1:].split('-')[0]) + 20) if isinstance(slot, str) else slot
+
+
+def add_passage_fog(romfs, out, cat, level, layout, rows, kind):
+    """Setting 'passage-fog' ('woods' / 'tailor:<entry>' / 'cloud'): fog in `level`'s passages (fog_spots). Room
+    files are the seed's (out); the cloud model's file is copied from the player's game files. Returns the number
+    of passages."""
+    from RandomizerCore.Tools import leb
+    if not (kind in ('woods', 'cloud') or kind.startswith('tailor:')):
+        return 0
+    if kind == 'cloud':
+        dst = os.path.join(out, 'region_common', 'map', CLOUD_MODEL + '.bfres')
+        if not os.path.exists(dst):
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(os.path.join(romfs, 'region_common', CLOUD_SRC), 'rb') as f, open(dst, 'wb') as g:
+                g.write(f.read())
+    tpl = fog_template(romfs, kind)
+    by_cell = {}
+    for sp in fog_spots(cat, level, layout, rows):
+        by_cell.setdefault(sp[0], []).append(sp)
+    n = 0
+    for cell, spots in sorted(by_cell.items()):
+        p = os.path.join(out, 'region_common', 'level', level, cell + '.leb')
+        if not os.path.exists(p):
+            p0 = os.path.join(romfs, 'region_common', 'level', level, cell + '.leb')
+            if not os.path.exists(p0):
+                continue
+            data = open(p0, 'rb').read()
+        else:
+            data = open(p, 'rb').read()
+        r = leb.Room(data)
+        room_id = next((a.roomID for a in r.actors if a.type == 0x1B6), r.actors[0].roomID if r.actors else 0)
+        keys = {a.key for a in r.actors}
+        for _, side, slot, how in spots:
+            for a in fog_actors(tpl, kind, cell, side, slot, how, room_id):
+                if a.key not in keys:
+                    r.actors.append(a)  # (appended last: no actor index shifts)
+                    keys.add(a.key)
+            n += 1
+            print('passage fog: %s %s %s (%s)' % (cell, side, slot, how), flush=True)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, 'wb').write(r.repack())
+    return n
+
 
 if __name__ == '__main__':
     # self-test: rebuild a level from its own areas, keep starts / static objects

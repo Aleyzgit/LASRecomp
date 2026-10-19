@@ -104,6 +104,7 @@ def default_settings(seed):
         'shellsanity': False,  # every Secret Seashell spot is a check (tools/rando/seashell_spots.py); off: vanilla
         'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
         'dungeon-room-shuffle': 'off',  # off / coupled / decoupled (tools/rando/dungeon_gen.py; ROOM_MODES)
+        'passage-fog': 'off',  # (prototype, no UI) off / woods / tailor:<entry> / cloud (level_builder.py)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
         'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
         'triforce-hunt': 0, 'triforce-extra': 0,  # pieces needed (0 = off), extra % (tools/rando/triforce.py)
@@ -127,7 +128,7 @@ def stage(label, frac):
     print(f'stage {frac:.3f} {label}', flush=True)
 
 
-def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps):
+def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps, fog='off'):
     """Dungeon room shuffle (Coupled / Decoupled, tools/rando/dungeon_gen.py) on top of the seed: the generator reads
     rooms from an overlay romfs where the seed's own room files (LAS chests, pots, bushes, entrances) replace the
     game's - as copies, since it writes the seed's rooms while still reading others."""
@@ -174,7 +175,7 @@ def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps):
                 os.remove(os.path.join(dst, f))
             shutil.copyfile(os.path.join(seed_lv, f), os.path.join(dst, f))
     try:
-        dungeon_gen.write_all(overlay, out_romfs, layouts, jumps)
+        dungeon_gen.write_all(overlay, out_romfs, layouts, jumps, fog=fog)
     finally:
         shutil.rmtree(overlay, ignore_errors=True)
     return f"{mode}, {len(layouts)} dungeons, {sum(sum(1 for k, v in L.items() if k != v) for L in layouts.values())} rooms moved"
@@ -635,7 +636,8 @@ def main():
 
     if room_plan:
         stage('Building the shuffled dungeons', 0.975)
-        print('dungeon rooms:', shuffle_dungeon_rooms(romfs, out_dir, room_mode, *room_plan), flush=True)
+        print('dungeon rooms:', shuffle_dungeon_rooms(romfs, out_dir, room_mode, *room_plan,
+                                                           fog=settings.get('passage-fog', 'off')), flush=True)
         # gold pots / bushes are found by position: moved rooms moved their item actors too
         if pot_locs:
             print('pots.tsv:', pots_mod.write_tsv(out_dir, leb), flush=True)
