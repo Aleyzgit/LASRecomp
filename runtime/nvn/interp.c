@@ -10,7 +10,8 @@
 // transition, a pit); several draws of one key (the same mesh for different objects: Cuccos, chain links) are paired
 // by the nearest per-object uniforms, not their order, which the game's depth sort changes between frames
 // (match_all). Every uniform buffer of a matched draw is paired by position and blended element-wise; integers
-// (stored in float slots they read as denormals) never are. An element moving further than the cut distance (+5% of
+// (stored in float slots they read as denormals) never are, nor whole numbers that changed by one or more (a texture's
+// frame, a mode: this frame's), and a texture translation that wrapped (0.98 -> 0.01) blends the short way round. An element moving further than the cut distance (+5% of
 // its size: projection terms are large) is a jump - it shows its new value at once (a camera's settings switching as
 // Link enters another part of the overworld: one value of its buffer). Jumps in most of the buffers that changed (a
 // camera cut, a warp), a level change, too few matches or a texture going away during the frame make the whole frame
@@ -236,7 +237,7 @@ static int pair_cmp(const void *a, const void *b) {
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
 static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI; -3: just appeared - not blended)
-static uint64_t st_id_pairs, st_content_pairs, st_new_objects, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled;  // (stats)
+static uint64_t st_id_pairs, st_content_pairs, st_new_objects, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled, s_integral, s_wraps;  // (stats)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -657,13 +658,27 @@ bool interp_prepare(float t) {
         float cut = cut_threshold();
         // An element back at its value of two frames ago alternates (dither offsets, frame parity, a jitter) - it is
         // not moving: it keeps this frame's value instead of a midpoint neither frame shows.
-        const float *a2 = toggles && cc->prev2_off >= 0 ? (const float *)(prev2->bytes + cc->prev2_off) : NULL;
+        const float *a2 = cc->prev2_off >= 0 ? (const float *)(prev2->bytes + cc->prev2_off) : NULL;
         for (uint32_t q = 0; q < nf; q++) {
-            bool toggle = a2 && a2[q] == b[q] && a[q] != b[q];
+            float av = a[q], bv = b[q], d = bv - av;
+            bool toggle = toggles && a2 && a2[q] == bv && av != bv;
             s_toggled += toggle;
-            out[q] = blendable(a[q], b[q]) && !toggle &&
-                     (!cc->snap || fabsf(b[q] - a[q]) <= cut + 0.05f * fmaxf(fabsf(a[q]), fabsf(b[q])))
-                   ? a[q] + (b[q] - a[q]) * t : b[q];
+            if (!blendable(av, bv) || toggle || (cc->snap && fabsf(d) > cut + 0.05f * fmaxf(fabsf(av), fabsf(bv)))) { out[q] = bv; continue; }
+            // Values that are whole numbers in both frames and changed by one or more are a selection, not motion
+            // (a texture's frame, a mode): this frame's. Dusklight never blends a texture-swap animation
+            // (src/dusk/interp/material.cpp: a texNo track that changed is left at the sim frame's value).
+            if (av == rintf(av) && bv == rintf(bv) && fabsf(d) >= 1.0f && (!a2 || a2[q] == rintf(a2[q]))) { out[q] = bv; s_integral++; continue; }
+            // A texture translation that scrolls a little every frame and wraps (0.98 -> 0.01) changed by nearly a
+            // whole tile: blended, the wrap's midpoint is on screen for an image (the water's ripples jumping back).
+            // When the change less a whole number of tiles is the step the value took the frame before, it is a
+            // wrap: blend along the short way, which texture addressing wraps back (Dusklight's
+            // sample_texture_translation, src/dusk/interp/material.cpp: a whole-tile jump between adjacent keys
+            // continues the translation linearly).
+            if (a2 && fabsf(d) >= 0.9f) {
+                float k = rintf(d), dw = d - k, s = av - a2[q];
+                if (k != 0 && dw != 0 && fabsf(dw) < 0.5f && fabsf(s - dw) <= 0.1f * fabsf(dw) + 1e-5f) { out[q] = av + dw * t; s_wraps++; continue; }
+            }
+            out[q] = av + d * t;
         }
         memcpy((uint8_t *)out + nf * 4, (const uint8_t *)b + nf * 4, cc->size - nf * 4);
         cc->blend = (int64_t)blend_n;
@@ -851,17 +866,17 @@ void interp_log_stats(void) {
     int o = 0;
     for (int i = 0; i < 6; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
-    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image | images "
+    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image, whole-number %.0f, wraps %.1f | images "
         "%.1f/s planned (in-between %.1f/s), late %llu, skipped %llu | replay cpu %.2f ms avg %.2f max, gpu %.2f ms; "
         "present pass gpu %.2f ms; prep %.2f ms/f | latency %.1f ms | cuts:%s\n",
-        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0,
+        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0, s_replays ? (double)s_integral / s_replays : 0, s_replays ? (double)s_wraps / s_replays : 0,
         s_shots / dt, s_mids / dt, (unsigned long long)s_late, (unsigned long long)s_skipped,
         s_replays ? s_replay_cpu / s_replays : 0, s_replay_cpu_max, gn ? s_replay_gpu / gn : 0, cn ? s_compose_gpu / cn : 0,
         s_prep / n, s_frames ? s_L / n : 0, o ? cuts : " none");
     if (st_replay_misses || st_replay_cb_miss)
         LOG("[interp] replay draw misses %llu/%llu, uniform misses %llu\n", (unsigned long long)st_replay_misses,
             (unsigned long long)st_replay_draws, (unsigned long long)st_replay_cb_miss);
-    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_new_objects = s_class_snaps = s_toggled = 0;
+    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_new_objects = s_class_snaps = s_toggled = s_integral = s_wraps = 0;
     memset(s_cuts, 0, sizeof s_cuts);
     s_shots = s_mids = s_late = s_skipped = s_replays = 0;
     s_replay_cpu = s_replay_cpu_max = s_prep = s_L = s_replay_gpu = s_compose_gpu = 0;
