@@ -16,7 +16,10 @@
 //
 //   LARECOMP_INTERP=on|measure|off   override the setting (measure: log and match only, no extra images)
 //   LARECOMP_INTERP_CUT=<d>          the jump distance (default 4 world units)
-//   LARECOMP_INTERP_STAGES=<m>       which stages' uniforms are blended: 1 vertex, 2 fragment, 3 both (default 1)
+//   LARECOMP_INTERP_STAGES=<m>       which stages' uniforms are blended: 1 vertex, 2 fragment, 3 both (default 3: with
+//                                    the vertex stage's only, the shadow maps - drawn again with blended light matrices -
+//                                    were read with the game frame's matrices in the fragment stage: Mabe Village's
+//                                    cast shadows faded / dithered in the in-betweens)
 //   LARECOMP_INTERP_LOG=<s>          stats line period in seconds (default 2; 0: none)
 //   LARECOMP_INTERP_LOG_CUTS=1       log each frame cut and why
 #include <math.h>
@@ -211,7 +214,7 @@ static float cut_threshold(void) {
 }
 static int blend_stages(void) {
     static int m = -1;
-    if (m < 0) { const char *e = getenv("LARECOMP_INTERP_STAGES"); m = e ? atoi(e) : 1; }
+    if (m < 0) { const char *e = getenv("LARECOMP_INTERP_STAGES"); m = e ? atoi(e) : 3; }
     return m;
 }
 
