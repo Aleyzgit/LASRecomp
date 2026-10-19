@@ -93,6 +93,35 @@ uint64_t plat_now_ns(void) {
     return (uint64_t)((unsigned __int128)t.QuadPart * 1000000000u / (uint64_t)qpf.QuadPart);
 }
 
+// The calling thread's CPU time. GetThreadTimes only advances in whole scheduler ticks (15.6 ms): per frame that reads
+// 0 or 15.6. QueryThreadCycleTime counts the thread's cycles exactly, in TSC ticks on x64 (invariant TSC), so
+// those are converted with the TSC rate measured once against the performance counter (20 ms, at the first call).
+// Elsewhere (or if the cycle count fails): GetThreadTimes, kernel + user.
+#if defined(__x86_64__) || defined(_M_X64)
+#include <intrin.h>
+static double tsc_per_ns;
+static INIT_ONCE tsc_once = INIT_ONCE_STATIC_INIT;
+static BOOL CALLBACK tsc_calibrate(PINIT_ONCE o, PVOID p, PVOID *c) {
+    (void)o, (void)p, (void)c;
+    uint64_t q0 = plat_now_ns(), t0 = __rdtsc();
+    Sleep(20);
+    uint64_t q1 = plat_now_ns(), t1 = __rdtsc();
+    if (q1 > q0 && t1 > t0) tsc_per_ns = (double)(t1 - t0) / (double)(q1 - q0);
+    return TRUE;
+}
+#endif
+uint64_t plat_thread_cpu_ns(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    InitOnceExecuteOnce(&tsc_once, tsc_calibrate, NULL, NULL);
+    ULONG64 cyc;
+    if (tsc_per_ns > 0 && QueryThreadCycleTime(GetCurrentThread(), &cyc)) return (uint64_t)((double)cyc / tsc_per_ns);
+#endif
+    FILETIME c, e, k, u;
+    if (!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+    uint64_t kt = ((uint64_t)k.dwHighDateTime << 32) | k.dwLowDateTime, ut = ((uint64_t)u.dwHighDateTime << 32) | u.dwLowDateTime;
+    return (kt + ut) * 100;  // (100 ns units)
+}
+
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x2
 #endif

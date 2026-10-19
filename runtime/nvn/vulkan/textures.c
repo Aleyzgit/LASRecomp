@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../rqueue.h"
 #include "vk.h"
 #include "../astc.h"
 #include "../renderer.h"
@@ -202,7 +203,8 @@ static bool tex_scalable(const NvnTexture *t) {
 
 bool renderer_texture_first_write(NvnTexture *t) {
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
-    uint64_t total_frames = renderer_present_count();
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t total_frames = renderer_exec_frame();  // (the frame being translated)
     if (!b || !b->presented || (b->sx == b->sy) || b->touched_frame == total_frames + 1) return false;
     b->touched_frame = total_frames + 1;
     return true;
@@ -223,7 +225,8 @@ bool renderer_texture_frame_fresh(NvnTexture *t) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_NO_FRAME_CLEAR") == NULL;
     TexBackend *b = t ? (TexBackend *)t->backend : NULL;
-    uint64_t total_frames = renderer_present_count();
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t total_frames = renderer_exec_frame();  // (the frame being translated)
     if (!on || !b || !b->scalable || b->frame_cleared == total_frames + 1) return false;
     b->frame_cleared = total_frames + 1;
     return true;
@@ -656,7 +659,7 @@ bool renderer_is_gpu_owned(NvnTexture *t) { return tex_backend(t)->gpu_owned; }
 void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size; }
 
 // Host-produced texel data (decoded video, any thread): applied on the render thread at the texture's next use.
-void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
+static void upload_rgba_now(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
     TexBackend *b = t->backend;
     if (!b) return;  // the game binds the texture before decoding into it; first frames may arrive earlier
     void *copy = malloc((size_t)stride * h);
@@ -673,12 +676,39 @@ void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t 
 // Decoded video as NV12 (runtime/hle/movie.c): the planes (half the bytes of RGBA) go to the GPU, which converts them
 // into the texture (exec.c vk_convert_nv12) - swscale plus the RGBA upload cost mid-range CPUs most of a frame at the
 // movies' 60 fps. false: a texture format this doesn't handle (the caller converts on the CPU).
+static bool nv12_format_ok(VkFormat f) {
+    return f == VK_FORMAT_R8G8B8A8_UNORM || f == VK_FORMAT_R8G8B8A8_SRGB || f == VK_FORMAT_B8G8R8A8_UNORM || f == VK_FORMAT_B8G8R8A8_SRGB;
+}
+static bool upload_nv12_now(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off);
+// Movie frames (runtime/hle/movie.c, the game thread): with the render thread on they are queued behind the lists
+// already submitted (rqueue.c), as a copy.
+void renderer_upload_rgba(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
+    if (!rq_on()) { upload_rgba_now(t, rgba, w, h, stride); return; }
+    if (!t->backend) return;
+    size_t n = (size_t)stride * h;
+    void *copy = malloc(n);
+    memcpy(copy, rgba, n);
+    rq_upload(t, RQ_UPLOAD_RGBA, copy, w, h, stride, 0);
+}
 bool renderer_upload_nv12(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
+    if (!rq_on()) return upload_nv12_now(t, nv12, w, h, stride, uv_off);
+    if (!t->backend) return true;
+    if (!nv12_format_ok(vk_format(t->format))) return false;
+    size_t n = (size_t)uv_off + (size_t)stride * (h / 2);
+    void *copy = malloc(n);
+    memcpy(copy, nv12, n);
+    rq_upload(t, RQ_UPLOAD_NV12, copy, w, h, stride, uv_off);
+    return true;
+}
+void backend_upload_now(NvnTexture *t, int kind, void *data, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
+    if (kind == RQ_UPLOAD_RGBA) upload_rgba_now(t, data, w, h, stride);
+    else upload_nv12_now(t, data, w, h, stride, uv_off);
+    free(data);
+}
+static bool upload_nv12_now(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
     TexBackend *b = t->backend;
     if (!b) return true;  // (as renderer_upload_rgba: a frame before the texture is first bound is dropped)
-    if (b->format != VK_FORMAT_R8G8B8A8_UNORM && b->format != VK_FORMAT_R8G8B8A8_SRGB && b->format != VK_FORMAT_B8G8R8A8_UNORM &&
-        b->format != VK_FORMAT_B8G8R8A8_SRGB)
-        return false;
+    if (!nv12_format_ok(b->format)) return false;
     size_t n = (size_t)uv_off + (size_t)stride * (h / 2);
     void *copy = malloc(n);
     memcpy(copy, nv12, n);
