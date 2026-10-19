@@ -13,9 +13,10 @@
 // (stored in float slots they read as denormals) never are, nor whole numbers that changed by one or more (a texture's
 // frame, a mode: this frame's), and a texture translation that wrapped (0.98 -> 0.01) blends the short way round. An element moving further than the cut distance (+5% of
 // its size: projection terms are large) is a jump - it shows its new value at once (a camera's settings switching as
-// Link enters another part of the overworld: one value of its buffer). Jumps in most of the buffers that changed (a
-// camera cut, a warp), a level change, too few matches or a texture going away during the frame make the whole frame
-// a cut: no in-between images, the frame shows as it is.
+// Link enters another part of the overworld: one value of its buffer). A jump in a shared block (the camera, a pass:
+// a camera cut), jumps in most of the buffers that changed (a warp), a level change, too few matches or a texture
+// going away during the frame make the whole frame a cut: no in-between images, the frame shows as it is. The
+// shadow pass's light block and its fragment-stage copies snap together, as one light.
 //
 //   LARECOMP_INTERP=on|measure|off   override the setting (measure: log and match only, no extra images)
 //   LARECOMP_INTERP_CUT=<d>          the jump distance (default 4 world units)
@@ -70,6 +71,7 @@ typedef struct {
 } CbRec;
 typedef struct {
     uint64_t key; uint32_t occ, first_cb, ncb;
+    uint8_t depth_only;  // drawn into a depth-only target (a shadow pass: its shared blocks are the light's)
     uint64_t obj;   // the object: the guest addresses of its per-object uniform buffers (0: none - UI); frame_end
     uint32_t oocc;  // occurrence of (obj, key) in the frame
     int32_t pair;   // the draw's partner in the frame before (-1 none; -2 UI, not blended); frame_end
@@ -385,7 +387,7 @@ static uint32_t rp_draw, rp_cb;
 static int32_t rp_cur = -1;  // the replayed draw's record (-1: not found: guest memory as it is)
 static uint64_t st_replay_misses, st_replay_draws, st_replay_cb_miss;
 
-void interp_draw(uint64_t key) {
+void interp_draw(uint64_t key, bool depth_only) {
     if (g_interp_replaying) {
         st_replay_draws++;
         rp_cur = -1;
@@ -399,6 +401,7 @@ void interp_draw(uint64_t key) {
     DrawRec *d = &cur->draws[cur->ndraws++];
     d->key = key;
     d->occ = next_occ(key);
+    d->depth_only = depth_only;
     d->first_cb = cur->ncbs;
     d->ncb = 0;
 }
@@ -451,12 +454,12 @@ static int blend_stages(void) {
 }
 
 // ---- stats (per log period)
-static uint64_t s_frames, s_draws, s_matched, s_changed, s_cut_cbs, s_blended_cbs, s_cuts[6], s_frame_no;
+static uint64_t s_frames, s_draws, s_matched, s_changed, s_cut_cbs, s_blended_cbs, s_cuts[8], s_frame_no;
 static uint64_t s_shots, s_mids, s_late, s_skipped;
 static double s_replay_cpu, s_replay_cpu_max, s_prep, s_L, s_replay_gpu, s_compose_gpu;
 static _Atomic uint64_t s_gpu_n, s_compose_n;
 static uint64_t s_replays;
-static const char *const cut_name[6] = {"level/forced", "no previous frame", "few matches", "jumps", "object freed", "loading/hitch"};
+static const char *const cut_name[8] = {"level/forced", "no previous frame", "few matches", "jumps", "object freed", "loading/hitch", "camera jump", "game ahead"};
 
 void interp_replay_gpu(double ms) {  // (completion handlers)
     atomic_fetch_add(&s_gpu_n, 1);
@@ -591,27 +594,53 @@ bool interp_frame_end(bool log_next) {
             }
         }
     }
-    {   // One decision per shared block (Dusklight: one light camera, one decision for the caster pass and every
-        // receiver). The pass / camera / light blocks (slots 0 and 1) are bound to many draws and in both stages: the
-        // shadow pass draws with the light's block in the vertex stage, the ground reads a copy of it in the fragment
-        // stage. Decided per buffer, one copy could snap while the other blended: the shadow map drawn with one light
-        // matrix and read with another (acne, a wedge of shadow). A jump in any copy of a class (slot, size) snaps all.
-        struct { uint8_t slot; uint32_t size; bool snap; } cls[32];
-        int ncls = 0;
-        for (uint32_t i = 0; i < cur->ncbs; i++) {
-            CbRec *cc = &cur->cbs[i];
-            if (cc->slot > 1 || cc->prev_off < 0) continue;
-            int k = 0;
-            for (; k < ncls; k++) if (cls[k].slot == cc->slot && cls[k].size == cc->size) break;
-            if (k == ncls) { if (ncls == 32) continue; cls[ncls].slot = cc->slot, cls[ncls].size = cc->size, cls[ncls].snap = false; ncls++; }
-            cls[k].snap |= cc->snap;
+    {   // One decision per light (Dusklight: the light's view and projection are recorded once and every reader -
+        // the caster pass and the receivers' texture matrix - takes the same replacement, src/d/d_drawlist.cpp).
+        // The light's block is the shared block (slots 0 and 1) the shadow pass binds; the ground reads a copy of it
+        // in the fragment stage. Decided per buffer, one copy could snap while the other blended: the shadow map
+        // drawn with one light matrix and read with another (acne, a wedge of shadow). A jump in any copy snaps
+        // them all - and only them: the earlier rule took every block of the same slot and size with it, the
+        // scene's camera included, so a light's jump put the camera at this frame while the objects blended: the
+        // whole image shifted for one in-between (the full-screen flicker). A jump in any other shared block - the
+        // camera, a pass - is a camera cut: the frame shows as it is, with no in-betweens (Dusklight's presentation
+        // sync: the game marks its camera cuts and the frame is presented at step 1).
+        struct { uint8_t slot; uint32_t size; bool snap; } lcls[32];
+        int nl = 0;
+        bool camera_jump = false;
+        for (uint32_t j = 0; j < cur->ndraws; j++) {
+            DrawRec *d = &cur->draws[j];
+            if (!d->depth_only) continue;
+            for (uint32_t i = 0; i < d->ncb; i++) {
+                CbRec *cc = &cur->cbs[d->first_cb + i];
+                if (cc->slot > 1 || cc->prev_off < 0) continue;
+                int k = 0;
+                for (; k < nl; k++) if (lcls[k].slot == cc->slot && lcls[k].size == cc->size) break;
+                if (k == nl) { if (nl == 32) continue; lcls[nl].slot = cc->slot, lcls[nl].size = cc->size, lcls[nl].snap = false; nl++; }
+                lcls[k].snap |= cc->snap;
+            }
         }
-        for (uint32_t i = 0; i < cur->ncbs; i++) {
-            CbRec *cc = &cur->cbs[i];
-            if (cc->slot > 1 || cc->prev_off < 0 || cc->snap) continue;
-            for (int k = 0; k < ncls; k++)
-                if (cls[k].slot == cc->slot && cls[k].size == cc->size && cls[k].snap) { cc->snap = 1; s_class_snaps++; break; }
+        for (uint32_t j = 0; j < cur->ndraws; j++) {  // the receivers: the same block in the fragment stage
+            DrawRec *d = &cur->draws[j];
+            if (d->depth_only) continue;
+            for (uint32_t i = 0; i < d->ncb; i++) {
+                CbRec *cc = &cur->cbs[d->first_cb + i];
+                if (cc->slot > 1 || cc->prev_off < 0 || cc->stage != 1) continue;
+                for (int k = 0; k < nl; k++) if (lcls[k].slot == cc->slot && lcls[k].size == cc->size) { lcls[k].snap |= cc->snap; break; }
+            }
         }
+        for (uint32_t j = 0; j < cur->ndraws; j++) {
+            DrawRec *d = &cur->draws[j];
+            for (uint32_t i = 0; i < d->ncb; i++) {
+                CbRec *cc = &cur->cbs[d->first_cb + i];
+                if (cc->slot > 1 || cc->prev_off < 0) continue;
+                int k = 0;
+                bool light = d->depth_only || cc->stage == 1;
+                if (light) { for (; k < nl; k++) if (lcls[k].slot == cc->slot && lcls[k].size == cc->size) break; light = k < nl; }
+                if (light) { if (lcls[k].snap && !cc->snap) cc->snap = 1, s_class_snaps++; }
+                else if (cc->snap) camera_jump = true;
+            }
+        }
+        if (camera_jump) { log_cut(6, NULL); return false; }
     }
     s_draws += cur->ndraws, s_matched += matched, s_changed += changed, s_cut_cbs += cuts, s_blended_cbs += changed - cuts;
     s_prep += plat_now_ns() / 1e6 - t0;
@@ -864,7 +893,7 @@ void interp_log_stats(void) {
     uint64_t gn = atomic_exchange(&s_gpu_n, 0), cn = atomic_exchange(&s_compose_n, 0);
     char cuts[200] = "";
     int o = 0;
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 8; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
     LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image, whole-number %.0f, wraps %.1f | images "
         "%.1f/s planned (in-between %.1f/s), late %llu, skipped %llu | replay cpu %.2f ms avg %.2f max, gpu %.2f ms; "

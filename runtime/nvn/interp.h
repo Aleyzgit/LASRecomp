@@ -13,7 +13,7 @@ int interp_wanted(void);
 // g_interp_replaying: a replay runs (skip side effects, read the logged / blended uniforms).
 extern bool g_interp_log, g_interp_replaying;
 bool interp_list_submitted(uint64_t handle);  // true for the frame's first list (the backend saves its state then)
-void interp_draw(uint64_t key);
+void interp_draw(uint64_t key, bool depth_only);  // depth_only: no colour target (a shadow pass)
 const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t size);
 void interp_texture_destroyed(void);  // (render thread, in queue order) a texture went away during the frame
 
