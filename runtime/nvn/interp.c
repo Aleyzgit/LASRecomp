@@ -39,6 +39,7 @@
 #include "interp.h"
 
 bool g_interp_log, g_interp_replaying;
+uint64_t g_interp_present_frame;
 
 int interp_wanted(void) {
     static int env = -2;
@@ -157,7 +158,7 @@ static int pair_cmp(const void *a, const void *b) {
     if (x->d != y->d) return x->d < y->d ? -1 : 1;
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
-static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none)
+static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI, not blended)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -188,9 +189,16 @@ static void match_all(void) {
             if (pj < 0) break;
             cand[nprev] = pj;
         }
-        if (nprev == 1 && ncur == 1) p_match[p_order[g]] = cand[0];
-        else if (nprev >= GROUP_MAX || ncur > GROUP_MAX || object_bytes(&cur->draws[p_order[g]]) < 48) {
-            // (too many, or nothing per object to tell them apart: by occurrence - the HUD's order is stable)
+        // Draws without per-object uniforms (vertex stage, slots 2 and up) are the HUD's and the menus' quads (and a
+        // few static full-screen passes): they are not blended at all - an in-between shows them as this frame draws
+        // them. Their shared buffers end in unwritten leftovers that differ every frame, so no distance tells them
+        // apart, and their order shifts whenever one is added (the Items menu's cursor moving a slot: every later quad
+        // paired with its neighbour, the whole grid scrambled for an image). The HUD moving at the game's own 60 Hz is
+        // not what the in-betweens are for.
+        if (object_bytes(&cur->draws[p_order[g]]) < 48) {
+            for (uint32_t k = g; k < ge; k++) p_match[p_order[k]] = -2;
+        } else if (nprev == 1 && ncur == 1) p_match[p_order[g]] = cand[0];
+        else if (nprev >= GROUP_MAX || ncur > GROUP_MAX) {  // (too many: by occurrence, as before)
             for (uint32_t k = g; k < ge; k++) p_match[p_order[k]] = lookup_prev(key, cur->draws[p_order[k]].occ);
         } else if (nprev) {
             uint32_t np = 0;
@@ -350,11 +358,11 @@ static void log_cut(int why, const char *more) {
 
 void interp_force_cut(void) { force_cut = true; }
 
-// LARECOMP_INTERP_DUMP=<frame>:<path> (research): both frames' draws and uniform copies as text
+// LARECOMP_INTERP_DUMP=<frame>:<path> (research): both frames' draws and uniform copies as text at that present frame
 static void dump_frames(void) {
     static long df = -1; static char dpath[256];
     if (df < 0) { const char *e = getenv("LARECOMP_INTERP_DUMP"); df = 0; if (e) sscanf(e, "%ld:%255s", &df, dpath); }
-    if (df && (long)s_frame_no == df) {
+    if (df && (long)g_interp_present_frame == df) {
         FILE *f = fopen(dpath, "w");
         for (int which = 0; f && which < 2; which++) {
             Frame *F = which ? cur : prev;
@@ -396,6 +404,7 @@ bool interp_frame_end(bool log_next) {
     for (uint32_t j = 0; j < cur->ndraws; j++) {
         DrawRec *d = &cur->draws[j];
         int32_t pj = p_match[j];
+        if (pj == -2) { matched++; continue; }  // (UI: shown as it is, a match for the cut rule)
         if (pj < 0) continue;
         matched++;
         DrawRec *p = &prev->draws[pj];

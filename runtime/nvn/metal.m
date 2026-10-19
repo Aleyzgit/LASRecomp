@@ -1908,6 +1908,7 @@ static bool ip_present(NvnTexture *t, uint64_t frame, bool repeat) {
     }
     CGSize ds = layer.drawableSize;
     NSUInteger dw = ds.width >= 16 ? (NSUInteger)ds.width : 16, dh = ds.height >= 16 ? (NSUInteger)ds.height : 16;
+    g_interp_present_frame = frame;
     bool blend = interp_frame_end(true);
     uint64_t s1 = interp_stamp_of(frame), s0 = ip_prev_stamp;
     ip_prev_stamp = s1;

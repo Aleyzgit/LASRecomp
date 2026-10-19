@@ -26,6 +26,7 @@ void interp_free_end(void);
 // Returns whether in-between images can be made (false: a cut - level change, warp, camera cut, too few matches).
 // log_next: whether the next frame is logged (the setting can change at any frame).
 bool interp_frame_end(bool log_next);
+extern uint64_t g_interp_present_frame;  // (the backend: the frame number of the present being made, for the research hooks)
 void interp_force_cut(void);              // the next frame is a cut (the backend saw a level change, a resize...)
 bool interp_prepare(float t);             // blends for an image at t (0 = previous frame, 1 = this one)
 bool interp_replay_lock(void);            // before replays: false when an object the frame used was freed
