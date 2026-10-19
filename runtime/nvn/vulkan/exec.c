@@ -62,6 +62,7 @@ static void ss_forget(void);
 static uint64_t submit_seq;  // last submitted
 static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
+static int passes_in_sub;  // render passes in the submission being recorded (LARECOMP_CHUNK_PASSES, begin_pass)
 
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
@@ -89,10 +90,14 @@ void vk_wait_seq(uint64_t seq) {
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
+    extern void rq_watch(const char *what, uint64_t arg);
+    rq_watch("vkWaitSemaphores (GPU submission)", seq);
     VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
-    stat_wait_ns += SDL_GetTicksNS() - t0;
-    cum_wait += SDL_GetTicksNS() - t0;
-    wait_account(SDL_GetTicksNS() - t0);
+    rq_watch(NULL, 0);
+    uint64_t waited = SDL_GetTicksNS() - t0;  // (the game thread's fence waits and the render thread's: atomic sums)
+    __atomic_fetch_add(&stat_wait_ns, waited, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&cum_wait, waited, __ATOMIC_RELAXED);
+    wait_account(waited);
     // Callers recycle command buffers and allocations after this returns; a timeout is not completion.
     if (r == VK_TIMEOUT) FATAL("[vk] GPU did not finish submission %llu within 10 s; stopping before reusing in-flight resources\n",
                               (unsigned long long)seq);
@@ -227,7 +232,7 @@ bool vk_gpu_split_ns(uint64_t out[4]) {
     out[3] = __atomic_load_n(&gpu_frames, __ATOMIC_RELAXED);
     return true;
 }
-uint64_t vk_cum_wait_ns(void) { return cum_wait; }  // (all vk_wait_seq waits so far)
+uint64_t vk_cum_wait_ns(void) { return __atomic_load_n(&cum_wait, __ATOMIC_RELAXED); }  // (all vk_wait_seq waits so far)
 
 static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
@@ -425,6 +430,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     submit_seq++;
     cur_sub = (cur_sub + 1) % SUBS;
     pthread_mutex_unlock(&seq_lock);
+    passes_in_sub = 0;
     stat_flushes++;
     cum_submits++;
     ring_retire();
@@ -437,6 +443,13 @@ void renderer_flush(void) {
     renderer_submit();
     if (!wait_why) wait_why = "flush";
     vk_wait_seq(submit_seq);
+}
+
+uint64_t renderer_submit_seq(void) {
+    pthread_mutex_lock(&seq_lock);
+    uint64_t s = submit_seq;
+    pthread_mutex_unlock(&seq_lock);
+    return s;
 }
 
 void renderer_sync(void) {
@@ -998,6 +1011,22 @@ static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
+    else {
+        // Submit the frame in chunks (as Metal, renderer.m begin_pass): the game puts a whole frame in one command
+        // list and waits for its fence early in the next frame, so with one submission per list the GPU sat idle
+        // while the list was translated, and the game's wait covered translation + GPU time - with the render thread
+        // the translation left the game thread but came back as that wait. LARECOMP_CHUNK_PASSES=<n>: a submission
+        // every n render passes (0 = one per list). Default 8 with the render thread (RTX 3080 Ti + i9, Field_11C:
+        // gpu wait 0.6 -> 0.25 ms, game thread busy 3.4-3.5 ms vs 4.9 without the render thread); without it,
+        // off (chunks cost that thread 0.1-0.3 ms there).
+        static int chunk = -1;
+        if (chunk < 0) {
+            extern bool rq_on(void);
+            const char *e = getenv("LARECOMP_CHUNK_PASSES");
+            chunk = e ? atoi(e) : rq_on() ? 8 : 0;
+        }
+        if (chunk > 0 && ++passes_in_sub >= chunk) renderer_submit();
+    }
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
@@ -3436,14 +3465,15 @@ static void draw_(CmdRec *r, bool indexed) {
         bool fullscreen_fill = pr->fi->ntex == 0 && fullscreen_quad;
         if (fullscreen_quad && !reads_scene && pr->fi->ntex == 1 && (tex_sc[1][0][0] != 1 || tex_sc[1][0][1] != 1)) reads_scene = true;
         static uint64_t wide_frame = ~0ull;
-        if (reads_scene) wide_frame = renderer_present_count();
+        extern uint64_t renderer_exec_frame(void);  // (the frame being translated)
+        if (reads_scene) wide_frame = renderer_exec_frame();
         bool fade_fill = false;
         if (fullscreen_fill && st.ubuf[1][0].addr && st.ubuf[1][0].size >= 12) {
             const float *c = (const float *)(uintptr_t)st.ubuf[1][0].addr;
             bool black = c[0] < 0.01f && c[1] < 0.01f && c[2] < 0.01f, white = c[0] > 0.99f && c[1] > 0.99f && c[2] > 0.99f;
             fade_fill = black || white;
         }
-        bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_present_count());
+        bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_exec_frame());
         if (!composite) wide_frame = ~0ull;
         if (!composite) {
             int pw, ph;
