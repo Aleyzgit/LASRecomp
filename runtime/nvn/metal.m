@@ -1002,12 +1002,19 @@ static id<MTLTexture> metalfx_encode(id<MTLCommandBuffer> cb, id<MTLTexture> in,
 
 
 
+// The part of the next saved texture its contents occupy (renderer_save_game_texture: Dynamic resolution draws into
+// the top-left part of screen-sized textures; the rest holds older frames)
+static float g_save_part[2] = {1, 1};
+
 // Debug: dump an 8-bit-per-channel 2D texture's raw bytes (alpha kept, written as a separate grey PNG).
 void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path) {
     if (tex.pixelFormat != MTLPixelFormatRGBA8Unorm && tex.pixelFormat != MTLPixelFormatRGBA8Unorm_sRGB &&
         tex.pixelFormat != MTLPixelFormatBGRA8Unorm)
         return;
     NSUInteger w = tex.width, h = tex.height;
+    if (g_save_part[0] < 1 || g_save_part[1] < 1) {  // (a game texture's contents: the top-left part, Dynamic resolution)
+        w = MAX((NSUInteger)lroundf(w * g_save_part[0]), 1); h = MAX((NSUInteger)lroundf(h * g_save_part[1]), 1);
+    }
     id<MTLBuffer> buf = [dev newBufferWithLength:w * h * 4 options:MTLResourceStorageModeShared];
     id<MTLCommandBuffer> cb = [queue commandBuffer];
     id<MTLBlitCommandEncoder> b = [cb blitCommandEncoder];
@@ -1044,6 +1051,9 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
         memcpy(shot_crop, g_shot_crop, sizeof shot_crop);
         shot_crop[0] *= g_shot_frac[0]; shot_crop[1] *= g_shot_frac[1]; shot_crop[2] *= g_shot_frac[0]; shot_crop[3] *= g_shot_frac[1];
         w = (NSUInteger)(w * shot_crop[2]); h = (NSUInteger)(h * shot_crop[3]);
+    } else if (g_save_part[0] < 1 || g_save_part[1] < 1) {
+        shot_crop[2] = g_save_part[0]; shot_crop[3] = g_save_part[1];
+        w = MAX((NSUInteger)lroundf(w * shot_crop[2]), 1); h = MAX((NSUInteger)lroundf(h * shot_crop[3]), 1);
     }
     MTLTextureDescriptor *d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                  width:w height:h mipmapped:NO];
@@ -1091,6 +1101,13 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
     free(px);
     LOG("[metal] saved %s (%lux%lu)\n", path, (unsigned long)w, (unsigned long)h);
+}
+// (debug dumps of the game's textures) only the part of t's texture its contents occupy; alpha: also the alpha PNG
+void renderer_save_game_texture(NvnTexture *t, id<MTLTexture> tex, const char *path, const char *alpha_path) {
+    renderer_texture_fraction(t, &g_save_part[0], &g_save_part[1]);
+    renderer_save_texture(tex, path);
+    if (alpha_path) renderer_save_texture_alpha(tex, alpha_path);
+    g_save_part[0] = g_save_part[1] = 1;
 }
 
 // ================================================================== present
@@ -1247,6 +1264,21 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     frames++;
     static long shot_every = -1;
     if (shot_every < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_EVERY"); shot_every = e ? atol(e) : 0; }
+    if (b && b->tex) {  // LARECOMP_SHOT_AT=<frame>,<frame>,... (ascending): the game image at those frames -> build/frames/frame_N.png
+        static const char *next;
+        static int init;
+        if (!init) { init = 1; next = getenv("LARECOMP_SHOT_AT"); if (next) mkdir("build/frames", 0755); }
+        while (next && *next) {
+            long at = strtol(next, (char **)&next, 10);
+            if ((long)frame < at) { while (next > getenv("LARECOMP_SHOT_AT") && next[-1] != ',') next--; break; }
+            if ((long)frame == at) {
+                char path[256];
+                snprintf(path, sizeof path, "build/frames/frame_%05llu.png", (unsigned long long)frame);
+                save_png(b->tex, path);
+            }
+            if (*next == ',') next++;
+        }
+    }
     static long shot_from = -1;  // LARECOMP_SCREENSHOT_FROM=<frame>: periodic shots start there (into build/frames/)
     if (shot_from < 0) { const char *e = getenv("LARECOMP_SCREENSHOT_FROM"); shot_from = e ? atol(e) : 0; }
     if (shot_every && b && b->tex && frame % shot_every == 0 && (long)frame >= shot_from) {

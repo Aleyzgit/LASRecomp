@@ -38,6 +38,7 @@ static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 void renderer_save_texture(id<MTLTexture> tex, const char *path);
 void renderer_save_texture_alpha(id<MTLTexture> tex, const char *path);
+void renderer_save_game_texture(NvnTexture *t, id<MTLTexture> tex, const char *path, const char *alpha_path);  // (metal.m)
 static char stats_text[320];
 
 // ------------------------------------------------------------------ state
@@ -279,11 +280,10 @@ static void end_pass(void) {
             cmdbuf = nil;
             [c commit];
             [c waitUntilCompleted];
-            char path[256];
+            char path[256], apath[256];
             snprintf(path, sizeof path, "build/pass_%03d.png", debug_pass_no);
-            renderer_save_texture(t, path);
-            snprintf(path, sizeof path, "build/pass_%03d_a.png", debug_pass_no++);
-            renderer_save_texture_alpha(t, path);
+            snprintf(apath, sizeof apath, "build/pass_%03d_a.png", debug_pass_no++);
+            renderer_save_game_texture(st.rt.color[0], t, path, apath);  // (the part the pass drew: Dynamic resolution)
         }
     }
 }
@@ -1775,11 +1775,12 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (!smp) smp = default_sampler();
         if (g_debug_frame && tex.textureType == MTLTextureType2D && stage == 1) {
             static int dn;
-            char path[128];
+            char path[128], apath[128];
             snprintf(path, sizeof path, "build/dtex_%03d_%d.png", dn++, i);
-            renderer_save_texture(tex, path);
-            snprintf(path, sizeof path, "build/dtex_%03d_%d_a.png", dn - 1, i);
-            renderer_save_texture_alpha(tex, path);
+            snprintf(apath, sizeof apath, "build/dtex_%03d_%d_a.png", dn - 1, i);
+            NvnTexture *gt = h && st.tpool && tic < (uint32_t)st.tpool->count ? ((NvnTexEntry *)st.tpool->entries)[tic].tex : NULL;
+            if (gt) renderer_save_game_texture(gt, tex, path, apath);
+            else { renderer_save_texture(tex, path); renderer_save_texture_alpha(tex, apath); }
         }
         if (stage == 0) { [enc setVertexTexture:tex atIndex:i]; [enc setVertexSamplerState:smp atIndex:i]; }
         else { [enc setFragmentTexture:tex atIndex:i]; [enc setFragmentSamplerState:smp atIndex:i]; }
