@@ -9,6 +9,7 @@
 #include <unistd.h>
 
 #include "../../paths.h"
+#include "../../rt.h"  // (HEAP_MAX: lazy_heap_predicted)
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "../rqueue.h"
@@ -21,6 +22,33 @@
 
 VkG g_vk;
 static SDL_Window *window;
+
+// Whether the guest heap will be imported chunk by chunk (exec.c gmem_lazy): on a GPU whose storage buffers can't
+// span the heap (maxStorageBufferRange < HEAP_MAX: Intel, 1 GB), and on RADV when the dma-buf heap
+// (exec.c guest_heap_dmabuf) has no cached host-visible memory type that holds it - the same test, which needs only
+// the physical device - or LARECOMP_VK_GMEM_LAZY=1 (=0: never; a GPU with a short range then gets windows of one
+// import, exec.c gmem_chunk_shift). Decided before the device exists because the lazy import needs buffer device
+// addresses, and on RADV enabling them puts every allocation on the driver's global BO list (amdgpu checks all of
+// them each submission): a device that imports the heap another way shouldn't pay for that.
+static bool lazy_heap_predicted(void) {
+    const char *e = getenv("LARECOMP_VK_GMEM_LAZY");
+    if (e) return atoi(e) != 0;
+    if (getenv("LARECOMP_VK_NO_GMEM")) return false;
+    uint64_t lim = g_vk.props.limits.maxStorageBufferRange;
+    if (lim && lim < HEAP_MAX) return true;  // (UHD 770 main pass: lazy 8.4 ms, 512 MB windows 8.5)
+    if (!strstr(g_vk.props.deviceName, "RADV")) return false;
+#ifdef __linux__
+    const char *d = getenv("LARECOMP_VK_HEAP_DMABUF");
+    if ((d ? atoi(d) != 0 : true) && g_vk.dmabuf) {
+        VkPhysicalDeviceMemoryProperties mp;
+        vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
+        const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
+            if ((mp.memoryTypes[i].propertyFlags & want) == want && mp.memoryHeaps[mp.memoryTypes[i].heapIndex].size >= HEAP_MAX) return false;
+    }
+#endif
+    return true;
+}
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
 
@@ -233,8 +261,11 @@ static void create_device(void) {
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
-    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
+    VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    g_vk.lazy_heap = lazy_heap_predicted();
+    g_vk.bda = g_vk.lazy_heap && have12.bufferDeviceAddress;
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT div = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT,
         .vertexAttributeInstanceRateDivisor = VK_TRUE, .vertexAttributeInstanceRateZeroDivisor = VK_FALSE};
@@ -249,7 +280,7 @@ static void create_device(void) {
     VkPhysicalDeviceVulkan12Features f12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
                                             .timelineSemaphore = VK_TRUE, .shaderInt8 = VK_TRUE, .samplerMirrorClampToEdge = VK_TRUE,
                                             .uniformAndStorageBuffer8BitAccess = VK_TRUE, .storageBuffer8BitAccess = VK_TRUE,
-                                            .scalarBlockLayout = VK_TRUE, .pNext = &f13};
+                                            .scalarBlockLayout = VK_TRUE, .bufferDeviceAddress = g_vk.bda, .pNext = &f13};
     VkPhysicalDeviceVulkan11Features f11 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES,
                                             .storageBuffer16BitAccess = VK_TRUE, .pNext = &f12};
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
@@ -271,6 +302,7 @@ static void create_device(void) {
     b->fragmentStoresAndAtomics = h->fragmentStoresAndAtomics;
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
+    g_vk.ssbo_chunks = h->fragmentStoresAndAtomics && h->vertexPipelineStoresAndAtomics && h->robustBufferAccess;
     b->shaderClipDistance = h->shaderClipDistance;
     if (!h->shaderInt64) LOG("[vk] warning: no shaderInt64 (64-bit address math in shaders)\n");
     float prio = 1.0f;

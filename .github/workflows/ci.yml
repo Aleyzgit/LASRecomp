@@ -182,5 +182,12 @@ jobs:
       # just satisfies it. The GLSL half - every fuzzed translation compiles and validates - is the check)
       - name: Shader translator fuzz (GLSL)
         run: REF=HEAD tools/test_translate.sh 4000 "$(nproc)" glsl
+      # (the heap in chunks: lazily imported on AMD APUs and Intel, windows where that isn't possible - shader.h maxwell_gmem_chunk_shift)
+      - name: Shader translator fuzz (GLSL, guest heap in chunks)
+        run: TT_GMEM_CHUNK_SHIFT=24 REF=HEAD tools/test_translate.sh 2000 "$(nproc)" glsl
+      - name: Shader translator fuzz (GLSL, guest heap in lazy chunks)
+        run: TT_GMEM_CHUNK_SHIFT=24 TT_GMEM_LAZY=1 REF=HEAD tools/test_translate.sh 2000 "$(nproc)" glsl
+      - name: Shader translator fuzz (GLSL, guest heap in lazy chunks, misses counted in every fragment shader)
+        run: TT_GMEM_CHUNK_SHIFT=24 TT_GMEM_LAZY=1 TT_GMEM_FS_MISS=1 REF=HEAD tools/test_translate.sh 500 "$(nproc)" glsl
       - name: Vulkan synchronization failure regression
         run: python tools/test_vulkan_sync_errors.py
