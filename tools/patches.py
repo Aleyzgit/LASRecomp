@@ -287,6 +287,21 @@ def _map_page(gen, a):
 PATCHES[MAP_PAGE_SITE] = _map_page
 
 
+# ... and its epilogue (the page's layout was updated this frame): the check tracker hides the game's own cursor and
+# button bar there (tracker_overlay.mm map_page_takeover), after the update that may have shown them again.
+MAP_PAGE_END_SITE = A.MAP_PAGE_END_SITE
+
+
+def _map_page_end(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x910203ff, hex(w)  # add sp, sp, #0x80
+    return ('{ extern void rt_map_page_end(Cpu *); rt_map_page_end(c); c->sp += 0x80; }'
+            f'  /* {a:#x}: add sp, sp, #0x80 (map page updated) */')
+
+
+PATCHES[MAP_PAGE_END_SITE] = _map_page_end
+
+
 # Chaos map letters (runtime/ui/chaos_overlay.mm): main+0xe78740 runs once per frame while the DUNGEON map page is
 # shown (fnprof: map open vs closed in Face Shrine); x0 = the dungeon map page.
 DGN_MAP_SITE = A.DGN_MAP_SITE
