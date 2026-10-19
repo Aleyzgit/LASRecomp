@@ -24,6 +24,8 @@
 //                                    cast shadows faded / dithered in the in-betweens)
 //   LARECOMP_INTERP_LOG=<s>          stats line period in seconds (default 2; 0: none)
 //   LARECOMP_INTERP_LOG_CUTS=1       log each frame cut and why
+//   LARECOMP_INTERP_SNAP=elem        a jumping buffer snaps per element (default: the whole buffer shows this frame)
+//   LARECOMP_INTERP_TOGGLE=0         blend values that alternate every frame too (default: they keep this frame's value)
 //   research: LARECOMP_INTERP_LOG_MOVES=<d> [_FROM=<frame>] logs uniform buffers whose elements moved more than d in one
 //   frame; LARECOMP_INTERP_DUMP=<frame>:<path> writes both frames' draws and uniform copies as text at that frame;
 //   LARECOMP_INTERP_LOG_KEYS=1 (renderer.m) logs each draw key's components once
@@ -62,6 +64,7 @@ typedef struct {
     uint32_t off, size;
     uint64_t addr;  // the guest address of the buffer (research: is it an object's identity across frames?)
     int64_t prev_off, blend;
+    int64_t prev2_off;  // the same buffer two frames back (-1: none): an element back at that value toggles, not moves
     float maxd;  // the largest element change from the previous frame (-1: not matched): how fast it was moving
 } CbRec;
 typedef struct {
@@ -217,7 +220,7 @@ static int pair_cmp(const void *a, const void *b) {
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
 static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI, not blended)
-static uint64_t st_id_pairs, st_content_pairs, s_id_pairs, s_content_pairs, s_class_snaps;  // (stats)
+static uint64_t st_id_pairs, st_content_pairs, s_id_pairs, s_content_pairs, s_class_snaps, s_toggled;  // (stats)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -399,7 +402,7 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
     CbRec *c = &cur->cbs[cur->ncbs++];
     c->stage = (uint8_t)stage, c->slot = (uint8_t)slot, c->off = (uint32_t)cur->nbytes, c->size = (uint32_t)size;
     c->addr = (uint64_t)(uintptr_t)src;
-    c->prev_off = c->blend = -1;
+    c->prev_off = c->blend = c->prev2_off = -1;
     c->snap = 0, c->maxd = -1;
     memcpy(cur->bytes + cur->nbytes, src, size);
     cur->nbytes += (size + 15) & ~15ull;
@@ -554,7 +557,14 @@ bool interp_frame_end(bool log_next) {
                         j, cc->stage, cc->slot, cc->size, q - 1, a[q - 1], b[q - 1]);
                 cuts++;
             }
-            cc->prev_off = pc->off;  // (a jump: those elements show the new value, the rest blends)
+            cc->prev_off = pc->off;
+            {   // the same buffer two frames back, through the partner's own partner (the toggle rule, interp_prepare)
+                int32_t y = p->pair;
+                if (y >= 0 && (uint32_t)y < prev2->ndraws && i < prev2->draws[y].ncb) {
+                    CbRec *p2 = &prev2->cbs[prev2->draws[y].first_cb + i];
+                    if (p2->stage == cc->stage && p2->slot == cc->slot && p2->size == cc->size) cc->prev2_off = p2->off;
+                }
+            }
         }
     }
     {   // One decision per shared block (Dusklight: one light camera, one decision for the caster pass and every
@@ -612,11 +622,26 @@ bool interp_prepare(float t) {
         const float *a = (const float *)(prev->bytes + cc->prev_off), *b = (const float *)(cur->bytes + cc->off);
         float *out = (float *)(blend_bytes + blend_n);
         uint32_t nf = cc->size / 4;
+        // A buffer that jumped shows this frame's values whole (letsgo-recomp's rule: a matrix with some elements
+        // snapped and others blended shears and shrinks the model; the earlier per-element snap did that).
+        // LARECOMP_INTERP_SNAP=elem: the old per-element snap (research).
+        static int snap_elem = -1, toggles = -1;
+        if (snap_elem < 0) {
+            const char *e = getenv("LARECOMP_INTERP_SNAP"); snap_elem = e && !strcmp(e, "elem");
+            e = getenv("LARECOMP_INTERP_TOGGLE"); toggles = !e || atoi(e);  // =0: blend toggling values too (research)
+        }
+        if (cc->snap && !snap_elem) { memcpy(out, b, cc->size); cc->blend = (int64_t)blend_n; blend_n += (cc->size + 15) & ~15u; continue; }
         float cut = cut_threshold();
-        for (uint32_t q = 0; q < nf; q++)
-            out[q] = blendable(a[q], b[q]) &&
+        // An element back at its value of two frames ago alternates (dither offsets, frame parity, a jitter) - it is
+        // not moving: it keeps this frame's value instead of a midpoint neither frame shows.
+        const float *a2 = toggles && cc->prev2_off >= 0 ? (const float *)(prev2->bytes + cc->prev2_off) : NULL;
+        for (uint32_t q = 0; q < nf; q++) {
+            bool toggle = a2 && a2[q] == b[q] && a[q] != b[q];
+            s_toggled += toggle;
+            out[q] = blendable(a[q], b[q]) && !toggle &&
                      (!cc->snap || fabsf(b[q] - a[q]) <= cut + 0.05f * fmaxf(fabsf(a[q]), fabsf(b[q])))
                    ? a[q] + (b[q] - a[q]) * t : b[q];
+        }
         memcpy((uint8_t *)out + nf * 4, (const uint8_t *)b + nf * 4, cc->size - nf * 4);
         cc->blend = (int64_t)blend_n;
         blend_n += (cc->size + 15) & ~15u;
@@ -803,17 +828,17 @@ void interp_log_stats(void) {
     int o = 0;
     for (int i = 0; i < 6; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
-    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class) | images "
+    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image | images "
         "%.1f/s planned (in-between %.1f/s), late %llu, skipped %llu | replay cpu %.2f ms avg %.2f max, gpu %.2f ms; "
         "present pass gpu %.2f ms; prep %.2f ms/f | latency %.1f ms | cuts:%s\n",
-        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n,
+        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0,
         s_shots / dt, s_mids / dt, (unsigned long long)s_late, (unsigned long long)s_skipped,
         s_replays ? s_replay_cpu / s_replays : 0, s_replay_cpu_max, gn ? s_replay_gpu / gn : 0, cn ? s_compose_gpu / cn : 0,
         s_prep / n, s_frames ? s_L / n : 0, o ? cuts : " none");
     if (st_replay_misses || st_replay_cb_miss)
         LOG("[interp] replay draw misses %llu/%llu, uniform misses %llu\n", (unsigned long long)st_replay_misses,
             (unsigned long long)st_replay_draws, (unsigned long long)st_replay_cb_miss);
-    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_class_snaps = 0;
+    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_class_snaps = s_toggled = 0;
     memset(s_cuts, 0, sizeof s_cuts);
     s_shots = s_mids = s_late = s_skipped = s_replays = 0;
     s_replay_cpu = s_replay_cpu_max = s_prep = s_L = s_replay_gpu = s_compose_gpu = 0;
