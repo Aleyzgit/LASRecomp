@@ -60,10 +60,16 @@ int interp_wanted(void) {
 typedef struct {
     uint8_t stage, slot, snap;  // snap: elements past the jump distance show the new value (a jump, not motion)
     uint32_t off, size;
+    uint64_t addr;  // the guest address of the buffer (research: is it an object's identity across frames?)
     int64_t prev_off, blend;
     float maxd;  // the largest element change from the previous frame (-1: not matched): how fast it was moving
 } CbRec;
-typedef struct { uint64_t key; uint32_t occ, first_cb, ncb; } DrawRec;
+typedef struct {
+    uint64_t key; uint32_t occ, first_cb, ncb;
+    uint64_t obj;   // the object: the guest addresses of its per-object uniform buffers (0: none - UI); frame_end
+    uint32_t oocc;  // occurrence of (obj, key) in the frame
+    int32_t pair;   // the draw's partner in the frame before (-1 none; -2 UI, not blended); frame_end
+} DrawRec;
 typedef struct {
     DrawRec *draws; uint32_t ndraws, cap_draws;
     CbRec *cbs; uint32_t ncbs, cap_cbs;
@@ -73,8 +79,8 @@ typedef struct {
     uint64_t free_gen;  // interp_free_begin's count when the frame's first list ran
 } Frame;
 
-static Frame fr[2];
-static Frame *cur = &fr[0], *prev = &fr[1];
+static Frame fr[3];
+static Frame *cur = &fr[0], *prev = &fr[1], *prev2 = &fr[2];  // (prev2: the frame before prev - object identity, below)
 static bool prev_valid, frame_open, force_cut, can_blend;
 static uint8_t *blend_bytes; static uint64_t blend_n, blend_cap;
 
@@ -93,6 +99,58 @@ static uint32_t next_occ(uint64_t key) {
     }
     return 0;
 }
+// Object identity (Dusklight keys interpolation by the address of an object's own matrix storage). The game double-
+// buffers each object's uniform blocks by frame parity: a draw's per-object buffers (vertex stage, slots 2 and up) sit
+// at the same guest addresses as that object's draw two frames earlier, never the frame before (measured in Mabe
+// Village: 49 of 49 static objects' addresses equal to N-2's, 0 to N-1's). So the draw of frame N finds its object in
+// frame N-2 by address, and that draw's partner in N-1 - paired the frame before - is its own partner now. Objects
+// without one in N-2 (just appeared, or a cut frame between) fall back to the nearest per-object uniforms (match_all).
+static uint64_t i_keys[1 << HBITS]; static uint32_t i_occ[1 << HBITS]; static int32_t i_idx[1 << HBITS];
+static uint64_t ihash(uint64_t obj, uint64_t key, uint32_t occ) {
+    return (obj * 0xff51afd7ed558ccdull ^ key ^ (uint64_t)occ * 0xc4ceb9fe1a85ec53ull) * 0x9E3779B97F4A7C15ull;
+}
+static void index_prev2(void) {
+    memset(i_idx, 0xff, sizeof i_idx);
+    for (uint32_t j = 0; j < prev2->ndraws && j < (1u << HBITS) / 2; j++) {
+        DrawRec *d = &prev2->draws[j];
+        if (!d->obj) continue;
+        uint32_t h = (uint32_t)(ihash(d->obj, d->key, d->oocc) >> (64 - HBITS));
+        while (i_idx[h] >= 0) h = (h + 1) & ((1 << HBITS) - 1);
+        i_keys[h] = ihash(d->obj, d->key, d->oocc), i_occ[h] = d->oocc, i_idx[h] = (int32_t)j;
+    }
+}
+static int32_t lookup_prev2(uint64_t obj, uint64_t key, uint32_t oocc) {
+    uint64_t ik = ihash(obj, key, oocc);
+    uint32_t h = (uint32_t)(ik >> (64 - HBITS));
+    for (int i = 0; i < (1 << HBITS); i++, h = (h + 1) & ((1 << HBITS) - 1)) {
+        if (i_idx[h] < 0) return -1;
+        if (i_keys[h] == ik && i_occ[h] == oocc) return i_idx[h];
+    }
+    return -1;
+}
+// The objects of this frame's draws and their occurrence per (obj, key): from the logged buffers' addresses.
+static uint64_t o_keys[1 << HBITS]; static uint32_t o_cnt[1 << HBITS];
+static void assign_objects(Frame *F) {
+    memset(o_keys, 0, sizeof o_keys);
+    for (uint32_t j = 0; j < F->ndraws; j++) {
+        DrawRec *d = &F->draws[j];
+        uint64_t obj = 0;
+        for (uint32_t i = 0; i < d->ncb; i++) {
+            CbRec *c = &F->cbs[d->first_cb + i];
+            if (c->stage == 0 && c->slot >= 2 && c->size >= 48) obj = (obj ^ c->addr ^ (uint64_t)c->slot << 56) * 0x9E3779B97F4A7C15ull;
+        }
+        d->obj = obj;
+        d->oocc = 0;
+        if (!obj) continue;
+        uint64_t ok = ihash(obj, d->key, 0) | 1;
+        uint32_t h = (uint32_t)(ok >> (64 - HBITS));
+        for (int i = 0; i < (1 << HBITS); i++, h = (h + 1) & ((1 << HBITS) - 1)) {
+            if (o_keys[h] == ok) { d->oocc = o_cnt[h]++; break; }
+            if (!o_keys[h]) { o_keys[h] = ok; o_cnt[h] = 1; break; }
+        }
+    }
+}
+
 static uint32_t mhash(uint64_t key, uint32_t occ) {
     return (uint32_t)((key ^ (uint64_t)occ * 0xff51afd7ed558ccdull) * 0x9E3779B97F4A7C15ull >> (64 - HBITS));
 }
@@ -159,6 +217,7 @@ static int pair_cmp(const void *a, const void *b) {
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
 static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI, not blended)
+static uint64_t st_id_pairs, st_content_pairs, s_id_pairs, s_content_pairs;  // (stats)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -175,6 +234,28 @@ static void match_all(void) {
     if (prev->ndraws > p_used_cap) { p_used_cap = prev->cap_draws; p_used = realloc(p_used, p_used_cap); }
     memset(p_used, 0, prev->ndraws);
     for (uint32_t j = 0; j < cur->ndraws; j++) p_order[j] = j, p_match[j] = -1;
+    // by identity: the object's draw in prev2 (same per-object buffer addresses) and that draw's partner in prev
+    st_id_pairs = st_content_pairs = 0;
+    if (prev2->ndraws && !prev2->overflow) {
+        index_prev2();
+        static int32_t *inv; static uint32_t inv_cap;  // prev2's draw -> prev's draw paired with it
+        if (prev2->ndraws > inv_cap) { inv_cap = prev2->cap_draws; inv = realloc(inv, sizeof *inv * inv_cap); }
+        for (uint32_t k = 0; k < prev2->ndraws; k++) inv[k] = -1;
+        for (uint32_t k = 0; k < prev->ndraws; k++) if (prev->draws[k].pair >= 0 && (uint32_t)prev->draws[k].pair < prev2->ndraws) inv[prev->draws[k].pair] = (int32_t)k;
+        for (uint32_t j = 0; j < cur->ndraws; j++) {
+            DrawRec *d = &cur->draws[j];
+            if (!d->obj) continue;
+            int32_t y = lookup_prev2(d->obj, d->key, d->oocc);
+            if (y < 0) continue;
+            int32_t x = inv[y];  // prev's draw paired with y
+            // (same pass of the object: its occurrence within (obj, key) - a pre-pass / colour-pass crossing made once
+            // by a tie would otherwise be carried along the parity chain for ever: flat-lit images every other frame)
+            if (x < 0 || p_used[x] || prev->draws[x].key != d->key || prev->draws[x].oocc != d->oocc) continue;
+            p_match[j] = x;
+            p_used[x] = 1;
+            st_id_pairs++;
+        }
+    }
     qsort(p_order, cur->ndraws, sizeof *p_order, order_cmp);
     static Pair pairs[GROUP_MAX * GROUP_MAX];
     for (uint32_t g = 0; g < cur->ndraws;) {
@@ -195,24 +276,36 @@ static void match_all(void) {
         // apart, and their order shifts whenever one is added (the Items menu's cursor moving a slot: every later quad
         // paired with its neighbour, the whole grid scrambled for an image). The HUD moving at the game's own 60 Hz is
         // not what the in-betweens are for.
+        uint32_t left = 0;  // (draws of the group not paired by identity)
+        for (uint32_t k = g; k < ge; k++) left += p_match[p_order[k]] == -1;
         if (object_bytes(&cur->draws[p_order[g]]) < 48) {
             for (uint32_t k = g; k < ge; k++) p_match[p_order[k]] = -2;
-        } else if (nprev == 1 && ncur == 1) p_match[p_order[g]] = cand[0];
+        } else if (!left) {
+        } else if (nprev == 1 && ncur == 1) { if (!p_used[cand[0]]) p_match[p_order[g]] = cand[0], p_used[cand[0]] = 1, st_content_pairs++; }
         else if (nprev >= GROUP_MAX || ncur > GROUP_MAX) {  // (too many: by occurrence, as before)
-            for (uint32_t k = g; k < ge; k++) p_match[p_order[k]] = lookup_prev(key, cur->draws[p_order[k]].occ);
+            for (uint32_t k = g; k < ge; k++) {
+                if (p_match[p_order[k]] != -1) continue;
+                int32_t pj = lookup_prev(key, cur->draws[p_order[k]].occ);
+                if (pj >= 0 && !p_used[pj]) p_match[p_order[k]] = pj, p_used[pj] = 1;
+            }
         } else if (nprev) {
             uint32_t np = 0;
             for (uint32_t c = 0; c < ncur; c++)
                 for (uint32_t q = 0; q < nprev; q++)
-                    pairs[np++] = (Pair){draw_distance(&cur->draws[p_order[g + c]], &prev->draws[cand[q]]), (uint16_t)c, (uint16_t)q,
-                                         (uint16_t)(c > q ? c - q : q - c)};  // (occ: cur draws sorted by occ, cand[q] = occ q)
+                {   // ties: the same pass of the object first (occurrence within obj + key), then the nearest occurrence
+                    const DrawRec *dc = &cur->draws[p_order[g + c]], *dp = &prev->draws[cand[q]];
+                    uint32_t dpass = dc->oocc > dp->oocc ? dc->oocc - dp->oocc : dp->oocc - dc->oocc;
+                    pairs[np++] = (Pair){draw_distance(dc, dp), (uint16_t)c, (uint16_t)q,
+                                         (uint16_t)((dpass > 255 ? 255 : dpass) << 8 | (c > q ? c - q : q - c) % 256)};
+                }
             qsort(pairs, np, sizeof *pairs, pair_cmp);
             for (uint32_t i = 0; i < np; i++) {
                 uint32_t j = p_order[g + pairs[i].c];
                 int32_t pj = cand[pairs[i].p];
-                if (p_match[j] >= 0 || p_used[pj] || pairs[i].d >= 1e30f) continue;
+                if (p_match[j] != -1 || p_used[pj] || pairs[i].d >= 1e30f) continue;
                 p_match[j] = pj;
                 p_used[pj] = 1;
+                st_content_pairs++;
             }
         }
         g = ge;
@@ -305,6 +398,7 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
     GROW(cur->cbs, cur->ncbs, cur->cap_cbs, 4096);
     CbRec *c = &cur->cbs[cur->ncbs++];
     c->stage = (uint8_t)stage, c->slot = (uint8_t)slot, c->off = (uint32_t)cur->nbytes, c->size = (uint32_t)size;
+    c->addr = (uint64_t)(uintptr_t)src;
     c->prev_off = c->blend = -1;
     c->snap = 0, c->maxd = -1;
     memcpy(cur->bytes + cur->nbytes, src, size);
@@ -358,12 +452,15 @@ static void log_cut(int why, const char *more) {
 
 void interp_force_cut(void) { force_cut = true; }
 
-// LARECOMP_INTERP_DUMP=<frame>:<path> (research): both frames' draws and uniform copies as text at that present frame
+// LARECOMP_INTERP_DUMP=<frame>:<path> (research): both frames' draws and uniform copies (with their guest addresses) as
+// text at present frames frame .. frame + 2 (<path>.0 .. .2)
 static void dump_frames(void) {
     static long df = -1; static char dpath[256];
     if (df < 0) { const char *e = getenv("LARECOMP_INTERP_DUMP"); df = 0; if (e) sscanf(e, "%ld:%255s", &df, dpath); }
-    if (df && (long)g_interp_present_frame == df) {
-        FILE *f = fopen(dpath, "w");
+    if (df && (long)g_interp_present_frame >= df && (long)g_interp_present_frame < df + 3) {  // (3 frames: N-1 .. N+2)
+        char path[300];
+        snprintf(path, sizeof path, "%s.%ld", dpath, (long)g_interp_present_frame - df);
+        FILE *f = fopen(path, "w");
         for (int which = 0; f && which < 2; which++) {
             Frame *F = which ? cur : prev;
             fprintf(f, "F %s %u\n", which ? "cur" : "prev", F->ndraws);
@@ -372,7 +469,7 @@ static void dump_frames(void) {
                 fprintf(f, "D %u %016llx %u %u\n", j, (unsigned long long)d->key, d->occ, d->ncb);
                 for (uint32_t i = 0; i < d->ncb; i++) {
                     CbRec *c = &F->cbs[d->first_cb + i];
-                    fprintf(f, "C %d %d %u", c->stage, c->slot, c->size);
+                    fprintf(f, "C %d %d %u %llx", c->stage, c->slot, c->size, (unsigned long long)c->addr);
                     const uint32_t *w = (const uint32_t *)(F->bytes + c->off);
                     for (uint32_t q = 0; q < c->size / 4; q++) fprintf(f, " %08x", w[q]);
                     fprintf(f, "\n");
@@ -391,13 +488,17 @@ bool interp_frame_end(bool log_next) {
     can_blend = false;
     if (!g_interp_log) { g_interp_log = log_next; return false; }
     g_interp_log = log_next;
+    for (uint32_t j = 0; j < cur->ndraws; j++) cur->draws[j].pair = -1;  // (set by match_all when the frame is paired)
     if (!was_open || !cur->ndraws || cur->overflow) return false;
     s_frames++;
     if (force_cut) { force_cut = false; log_cut(0, NULL); return false; }
     if (!prev_valid || prev->overflow) { log_cut(1, NULL); return false; }
     index_prev();
+    assign_objects(cur);
     dump_frames();
     match_all();
+    for (uint32_t j = 0; j < cur->ndraws; j++) cur->draws[j].pair = p_match[j];
+    s_id_pairs += st_id_pairs, s_content_pairs += st_content_pairs;
     float cut = cut_threshold();
     int stages = blend_stages();
     uint64_t matched = 0, changed = 0, cuts = 0;
@@ -534,7 +635,7 @@ void interp_replay_end(void) {
 }
 
 void interp_frame_rotate(void) {
-    Frame *t = prev; prev = cur; cur = t;
+    Frame *t = prev2; prev2 = prev; prev = cur; cur = t;
     prev_valid = prev->ndraws > 0 && !prev->overflow;
     frame_reset(cur);
     for (uint32_t i = 0; i < prev->ncbs; i++) prev->cbs[i].prev_off = prev->cbs[i].blend = -1;
@@ -680,17 +781,17 @@ void interp_log_stats(void) {
     int o = 0;
     for (int i = 0; i < 6; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
-    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%%, buffers blended %.0f/f jumps %.0f/f | images "
+    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f), buffers blended %.0f/f jumps %.0f/f | images "
         "%.1f/s planned (in-between %.1f/s), late %llu, skipped %llu | replay cpu %.2f ms avg %.2f max, gpu %.2f ms; "
         "present pass gpu %.2f ms; prep %.2f ms/f | latency %.1f ms | cuts:%s\n",
-        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_blended_cbs / n, s_cut_cbs / n,
+        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_blended_cbs / n, s_cut_cbs / n,
         s_shots / dt, s_mids / dt, (unsigned long long)s_late, (unsigned long long)s_skipped,
         s_replays ? s_replay_cpu / s_replays : 0, s_replay_cpu_max, gn ? s_replay_gpu / gn : 0, cn ? s_compose_gpu / cn : 0,
         s_prep / n, s_frames ? s_L / n : 0, o ? cuts : " none");
     if (st_replay_misses || st_replay_cb_miss)
         LOG("[interp] replay draw misses %llu/%llu, uniform misses %llu\n", (unsigned long long)st_replay_misses,
             (unsigned long long)st_replay_draws, (unsigned long long)st_replay_cb_miss);
-    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = 0;
+    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = 0;
     memset(s_cuts, 0, sizeof s_cuts);
     s_shots = s_mids = s_late = s_skipped = s_replays = 0;
     s_replay_cpu = s_replay_cpu_max = s_prep = s_L = s_replay_gpu = s_compose_gpu = 0;
