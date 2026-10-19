@@ -246,7 +246,7 @@ def run_one(job):
             sys.path.insert(0, os.path.join(HERE, '..', '..', 'third_party', 'LAS-Randomizer'))
             from RandomizerCore.Tools import leb
             import room_links
-            problems = room_links.check(os.path.join(tmp, 'full'), leb)
+            problems = room_links.check(os.path.join(tmp, 'full'), leb, romfs)
             if problems:
                 return sid, level, f'room links broken in {len(problems)} place(s), first: {problems[0]}', lost
         if r.returncode != 0:
