@@ -181,6 +181,7 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
   cleanly on GPU timeouts (#127); a strict Vulkan validation mode for automated tests (#128); Windows session logs: `lasrecomp.log` always the latest run, with five backups (#114); resumable game-code builds: a cancelled or interrupted setup picks up where it stopped (#56); randomizer check flags kept with committed saves (#170); save write fixes that keep a failed save from losing data (#169, merged in #182)
 - **[@gitarre1234rr5](https://github.com/gitarre1234rr5)** - controller rumble: the game's vibration on your controller
   (#104), and a regression test for the kernel's timed condition-variable wait (#88)
+- **[@rkammoun](https://github.com/rkammoun)** - diagnosed and patched the Metal 16-sampler limit behind the black walls in the Ukuku Prairie cave (#215, fixed in #216)
 
 Thanks also to everyone who reports issues and tests builds; your logs and screenshots find most of the bugs.
 
