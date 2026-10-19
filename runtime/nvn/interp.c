@@ -217,7 +217,7 @@ static int pair_cmp(const void *a, const void *b) {
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
 static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI, not blended)
-static uint64_t st_id_pairs, st_content_pairs, s_id_pairs, s_content_pairs;  // (stats)
+static uint64_t st_id_pairs, st_content_pairs, s_id_pairs, s_content_pairs, s_class_snaps;  // (stats)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -557,6 +557,28 @@ bool interp_frame_end(bool log_next) {
             cc->prev_off = pc->off;  // (a jump: those elements show the new value, the rest blends)
         }
     }
+    {   // One decision per shared block (Dusklight: one light camera, one decision for the caster pass and every
+        // receiver). The pass / camera / light blocks (slots 0 and 1) are bound to many draws and in both stages: the
+        // shadow pass draws with the light's block in the vertex stage, the ground reads a copy of it in the fragment
+        // stage. Decided per buffer, one copy could snap while the other blended: the shadow map drawn with one light
+        // matrix and read with another (acne, a wedge of shadow). A jump in any copy of a class (slot, size) snaps all.
+        struct { uint8_t slot; uint32_t size; bool snap; } cls[32];
+        int ncls = 0;
+        for (uint32_t i = 0; i < cur->ncbs; i++) {
+            CbRec *cc = &cur->cbs[i];
+            if (cc->slot > 1 || cc->prev_off < 0) continue;
+            int k = 0;
+            for (; k < ncls; k++) if (cls[k].slot == cc->slot && cls[k].size == cc->size) break;
+            if (k == ncls) { if (ncls == 32) continue; cls[ncls].slot = cc->slot, cls[ncls].size = cc->size, cls[ncls].snap = false; ncls++; }
+            cls[k].snap |= cc->snap;
+        }
+        for (uint32_t i = 0; i < cur->ncbs; i++) {
+            CbRec *cc = &cur->cbs[i];
+            if (cc->slot > 1 || cc->prev_off < 0 || cc->snap) continue;
+            for (int k = 0; k < ncls; k++)
+                if (cls[k].slot == cc->slot && cls[k].size == cc->size && cls[k].snap) { cc->snap = 1; s_class_snaps++; break; }
+        }
+    }
     s_draws += cur->ndraws, s_matched += matched, s_changed += changed, s_cut_cbs += cuts, s_blended_cbs += changed - cuts;
     s_prep += plat_now_ns() / 1e6 - t0;
     char why[96];
@@ -781,17 +803,17 @@ void interp_log_stats(void) {
     int o = 0;
     for (int i = 0; i < 6; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
-    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f), buffers blended %.0f/f jumps %.0f/f | images "
+    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class) | images "
         "%.1f/s planned (in-between %.1f/s), late %llu, skipped %llu | replay cpu %.2f ms avg %.2f max, gpu %.2f ms; "
         "present pass gpu %.2f ms; prep %.2f ms/f | latency %.1f ms | cuts:%s\n",
-        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_blended_cbs / n, s_cut_cbs / n,
+        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n,
         s_shots / dt, s_mids / dt, (unsigned long long)s_late, (unsigned long long)s_skipped,
         s_replays ? s_replay_cpu / s_replays : 0, s_replay_cpu_max, gn ? s_replay_gpu / gn : 0, cn ? s_compose_gpu / cn : 0,
         s_prep / n, s_frames ? s_L / n : 0, o ? cuts : " none");
     if (st_replay_misses || st_replay_cb_miss)
         LOG("[interp] replay draw misses %llu/%llu, uniform misses %llu\n", (unsigned long long)st_replay_misses,
             (unsigned long long)st_replay_draws, (unsigned long long)st_replay_cb_miss);
-    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = 0;
+    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_class_snaps = 0;
     memset(s_cuts, 0, sizeof s_cuts);
     s_shots = s_mids = s_late = s_skipped = s_replays = 0;
     s_replay_cpu = s_replay_cpu_max = s_prep = s_L = s_replay_gpu = s_compose_gpu = 0;
