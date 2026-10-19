@@ -182,6 +182,8 @@ static void index_prev(void) {
 // grass). Each is paired with the draw of the previous frame whose per-object uniforms are nearest to its own instead.
 static uint8_t *p_used; static uint32_t p_used_cap;
 static bool blendable(float a, float b);
+static float cut_threshold(void);
+static bool history_reset;  // a forced cut (a level change, a resize): the object identity chain starts over
 // How far apart two draws' objects are: the per-object uniforms (vertex stage, slots 2 and up: the model matrix, the
 // bones). The shared buffers (slots 0, 1: the pass, the camera) say nothing about the object and their unwritten tails
 // hold leftovers that differ from frame to frame (HUD quads: -3e38, 255, 1268 in slot 0's last rows).
@@ -198,6 +200,20 @@ static float draw_distance(const DrawRec *d, const DrawRec *p) {
             else if (a[q] != b[q]) dist += 1;  // (an integer / flag changed: another object)
     }
     return dist;
+}
+// The largest per-object element change between two draws: past the cut distance they are not one object that moved
+// but one that left and one that appeared (Dusklight, RT64: no match - drawn as it is, never blended with another).
+static float draw_maxdiff(const DrawRec *d, const DrawRec *p) {
+    float m = 0;
+    for (uint32_t i = 0; i < d->ncb && i < p->ncb; i++) {
+        const CbRec *cc = &cur->cbs[d->first_cb + i], *pc = &prev->cbs[p->first_cb + i];
+        if (cc->stage != 0 || cc->slot < 2 || pc->stage != cc->stage || pc->slot != cc->slot || pc->size != cc->size) continue;
+        const float *a = (const float *)(prev->bytes + pc->off), *b = (const float *)(cur->bytes + cc->off);
+        if (!memcmp(a, b, cc->size)) continue;
+        for (uint32_t q = 0; q < cc->size / 4; q++)
+            if (blendable(a[q], b[q])) { float dd = fabsf(b[q] - a[q]) - 0.05f * fmaxf(fabsf(a[q]), fabsf(b[q])); if (dd > m) m = dd; }
+    }
+    return m;
 }
 static uint32_t object_bytes(const DrawRec *d) {  // the per-object uniforms a draw has (none: HUD quads, decals)
     uint32_t n = 0;
@@ -219,8 +235,8 @@ static int pair_cmp(const void *a, const void *b) {
     if (x->d != y->d) return x->d < y->d ? -1 : 1;
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
-static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI, not blended)
-static uint64_t st_id_pairs, st_content_pairs, s_id_pairs, s_content_pairs, s_class_snaps, s_toggled;  // (stats)
+static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI; -3: just appeared - not blended)
+static uint64_t st_id_pairs, st_content_pairs, st_new_objects, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled;  // (stats)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -238,8 +254,8 @@ static void match_all(void) {
     memset(p_used, 0, prev->ndraws);
     for (uint32_t j = 0; j < cur->ndraws; j++) p_order[j] = j, p_match[j] = -1;
     // by identity: the object's draw in prev2 (same per-object buffer addresses) and that draw's partner in prev
-    st_id_pairs = st_content_pairs = 0;
-    if (prev2->ndraws && !prev2->overflow) {
+    st_id_pairs = st_content_pairs = st_new_objects = 0;
+    if (prev2->ndraws && !prev2->overflow && !history_reset) {
         index_prev2();
         static int32_t *inv; static uint32_t inv_cap;  // prev2's draw -> prev's draw paired with it
         if (prev2->ndraws > inv_cap) { inv_cap = prev2->cap_draws; inv = realloc(inv, sizeof *inv * inv_cap); }
@@ -284,7 +300,12 @@ static void match_all(void) {
         if (object_bytes(&cur->draws[p_order[g]]) < 48) {
             for (uint32_t k = g; k < ge; k++) p_match[p_order[k]] = -2;
         } else if (!left) {
-        } else if (nprev == 1 && ncur == 1) { if (!p_used[cand[0]]) p_match[p_order[g]] = cand[0], p_used[cand[0]] = 1, st_content_pairs++; }
+        } else if (nprev == 1 && ncur == 1) {
+            if (!p_used[cand[0]]) {
+                if (draw_maxdiff(&cur->draws[p_order[g]], &prev->draws[cand[0]]) > cut_threshold()) p_match[p_order[g]] = -3, st_new_objects++;
+                else p_match[p_order[g]] = cand[0], p_used[cand[0]] = 1, st_content_pairs++;
+            }
+        }
         else if (nprev >= GROUP_MAX || ncur > GROUP_MAX) {  // (too many: by occurrence, as before)
             for (uint32_t k = g; k < ge; k++) {
                 if (p_match[p_order[k]] != -1) continue;
@@ -306,6 +327,7 @@ static void match_all(void) {
                 uint32_t j = p_order[g + pairs[i].c];
                 int32_t pj = cand[pairs[i].p];
                 if (p_match[j] != -1 || p_used[pj] || pairs[i].d >= 1e30f) continue;
+                if (draw_maxdiff(&cur->draws[j], &prev->draws[pj]) > cut_threshold()) { p_match[j] = -3; st_new_objects++; continue; }  // (another object)
                 p_match[j] = pj;
                 p_used[pj] = 1;
                 st_content_pairs++;
@@ -453,7 +475,7 @@ static void log_cut(int why, const char *more) {
     if (on) LOG("[interp-cut] f%llu %s: %s%s\n", (unsigned long long)s_frame_no, game_level_name(), cut_name[why], more ? more : "");
 }
 
-void interp_force_cut(void) { force_cut = true; }
+void interp_force_cut(void) { force_cut = true; history_reset = true; }
 
 // LARECOMP_INTERP_DUMP=<frame>:<path> (research): both frames' draws and uniform copies (with their guest addresses) as
 // text at present frames frame .. frame + 2 (<path>.0 .. .2)
@@ -500,15 +522,16 @@ bool interp_frame_end(bool log_next) {
     assign_objects(cur);
     dump_frames();
     match_all();
-    for (uint32_t j = 0; j < cur->ndraws; j++) cur->draws[j].pair = p_match[j];
-    s_id_pairs += st_id_pairs, s_content_pairs += st_content_pairs;
+    for (uint32_t j = 0; j < cur->ndraws; j++) cur->draws[j].pair = p_match[j] >= 0 ? p_match[j] : -1;
+    history_reset = false;  // (this frame paired without the old chain: from here on it is the chain)
+    s_id_pairs += st_id_pairs, s_content_pairs += st_content_pairs, s_new_objects += st_new_objects;
     float cut = cut_threshold();
     int stages = blend_stages();
     uint64_t matched = 0, changed = 0, cuts = 0;
     for (uint32_t j = 0; j < cur->ndraws; j++) {
         DrawRec *d = &cur->draws[j];
         int32_t pj = p_match[j];
-        if (pj == -2) { matched++; continue; }  // (UI: shown as it is, a match for the cut rule)
+        if (pj == -2 || pj == -3) { matched++; continue; }  // (UI, or an object that just appeared: shown as it is)
         if (pj < 0) continue;
         matched++;
         DrawRec *p = &prev->draws[pj];
@@ -828,17 +851,17 @@ void interp_log_stats(void) {
     int o = 0;
     for (int i = 0; i < 6; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
-    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image | images "
+    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image | images "
         "%.1f/s planned (in-between %.1f/s), late %llu, skipped %llu | replay cpu %.2f ms avg %.2f max, gpu %.2f ms; "
         "present pass gpu %.2f ms; prep %.2f ms/f | latency %.1f ms | cuts:%s\n",
-        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0,
+        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0,
         s_shots / dt, s_mids / dt, (unsigned long long)s_late, (unsigned long long)s_skipped,
         s_replays ? s_replay_cpu / s_replays : 0, s_replay_cpu_max, gn ? s_replay_gpu / gn : 0, cn ? s_compose_gpu / cn : 0,
         s_prep / n, s_frames ? s_L / n : 0, o ? cuts : " none");
     if (st_replay_misses || st_replay_cb_miss)
         LOG("[interp] replay draw misses %llu/%llu, uniform misses %llu\n", (unsigned long long)st_replay_misses,
             (unsigned long long)st_replay_draws, (unsigned long long)st_replay_cb_miss);
-    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_class_snaps = s_toggled = 0;
+    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_new_objects = s_class_snaps = s_toggled = 0;
     memset(s_cuts, 0, sizeof s_cuts);
     s_shots = s_mids = s_late = s_skipped = s_replays = 0;
     s_replay_cpu = s_replay_cpu_max = s_prep = s_L = s_replay_gpu = s_compose_gpu = 0;
