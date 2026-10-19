@@ -1034,6 +1034,9 @@ void vk_exec_init(void) {
     gpu_timer_on = prof_qp != VK_NULL_HANDLE;
     LOG("[vk] GPU timer %s (dynamic resolution goes by %s)\n", gpu_timer_on ? "on" : "off", gpu_timer_on ? "GPU time" : "frame times");
     st_defaults();
+    // The heap's chunk / lazy decision now, on this thread, before the render thread and the build workers exist:
+    // they read gc_shift / gc_lazy directly (a buffer copy can come before any shader was translated)
+    gmem_chunk_shift();
 }
 
 void renderer_texture_scale(NvnTexture *t, float *sx, float *sy);
@@ -2634,9 +2637,18 @@ static bool gmem_lazy(void) {
     return lazy;
 }
 
+// Decided once (pthread_once): the render thread's draws, the translation and pipeline workers and the boot
+// (backend_guest_heap_prepare) all ask, and a second caller must not see a half-made decision (shift is 0 until the
+// fit loop below ends - a shader translated then would use one buffer while draws bind chunks).
+static int gc_shift_decided = -1;
+static void gmem_chunk_decide(void);
+static pthread_once_t gc_decide_once = PTHREAD_ONCE_INIT;
 static uint32_t gmem_chunk_shift(void) {
-    static int shift = -1;
-    if (shift >= 0) return (uint32_t)shift;
+    pthread_once(&gc_decide_once, gmem_chunk_decide);
+    return (uint32_t)gc_shift_decided;
+}
+static void gmem_chunk_decide(void) {
+    int shift;
     const char *e = getenv("LARECOMP_VK_GMEM_CHUNK_MB");
     uint64_t lim = g_vk.props.limits.maxStorageBufferRange;
     gc_lazy = gmem_lazy();
@@ -2673,7 +2685,7 @@ static uint32_t gmem_chunk_shift(void) {
     if (maxwell_gmem_fs_miss) LOG("[vk] lazy chunks: every fragment shader counts misses, no early tests (LARECOMP_VK_GMEM_FS_MISS)\n");
     if (shift) LOG("[vk] guest heap bound to shaders in %llu MB %s (storage buffers up to %llu MB here)\n",
                    (unsigned long long)(1ull << shift) >> 20, gc_lazy ? "chunks, imported as the game binds them" : "windows", (unsigned long long)lim >> 20);
-    return (uint32_t)shift;
+    gc_shift_decided = shift;
 }
 
 // The heap mapped so far, as the imports see it (SetHeapSize; pages beyond it don't exist yet).
@@ -2750,8 +2762,15 @@ static void gc_touch(uint64_t off, uint64_t size) {
 
 // The chunk set's layout: lazy mode the table (GChunks), GMiss and the draw's chunks (GDir<k>); windows one storage
 // binding each (shader.h).
+// (once: pipeline layouts are made on the build workers, sets on the render thread)
+static pthread_once_t gc_layout_once = PTHREAD_ONCE_INIT;
+static void gmem_chunk_layout_make(void);
 static VkDescriptorSetLayout gmem_chunk_layout(void) {
-    if (gc_layout) return gc_layout;
+    pthread_once(&gc_layout_once, gmem_chunk_layout_make);
+    return gc_layout;
+}
+static void gmem_chunk_layout_make(void) {
+    gmem_chunk_shift();  // (gc_lazy / gc_n decided)
     VkShaderStageFlags st_ = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
     static VkDescriptorSetLayoutBinding lb[GC_MAX];
     uint32_t nb = 0;
@@ -2765,7 +2784,6 @@ static VkDescriptorSetLayout gmem_chunk_layout(void) {
     }
     VkDescriptorSetLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = nb, .pBindings = lb};
     VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &ci, NULL, &gc_layout));
-    return gc_layout;
 }
 
 // The chunk set for the pending submission: the table of imported chunks, GMiss and the draw's chunks dk[k] (-1: none)
