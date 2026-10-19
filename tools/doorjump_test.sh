@@ -3,9 +3,9 @@
 # Walk every mismatched doorway of a generated-dungeon seed (rando/<seed>/door_jumps.tsv) and check Link ends up in
 # the room it leads to: tools/doorjump_test.sh <seed> [first] [count]. One game run per doorway (warp into the
 # cell, LARECOMP_DOORJUMP_TEST starts after the dungeon title card (Link is held while it shows: jumps undone), puts Link 1.2 inside the doorway and pushes the stick outward). Fresh scratch saves only.
-# Same-side doorways (dungeon_gen.side_groups / chaos_pairs: every doorway on one wall of a room leads to the same
+# Same-side doorways (dungeon_gen.chaos_pairs: every doorway on one wall of a single-screen room leads to the same
 # place) are checked first, without the game: a wall whose doorways lead to different rooms is a GROUP FAIL.
-# DJ_GROUPS=1: walk only those walls' doorways - every one, the lead's too (no row: it walks into the neighbour).
+# DJ_GROUPS=1: walk only those walls' doorways.
 # Results: build/doorjump_<seed>.txt (+ a screenshot per doorway in build/doorjump_<seed>/).
 SEED=$1; FIRST=${2:-1}; COUNT=${3:-999}
 JOB=${DJ_JOB:-$SEED}  # DJ_JOB=<name>: several jobs of one seed in parallel (own saves, shots, results)
@@ -44,14 +44,6 @@ def target(lv, cell, side, slot):  # (cell, side) the doorway leads into
 
 groups = []  # [(level, [(cell, side, centre)])]
 for lv in sorted(cells):
-    # the multi-cell rooms' walls, found as plan() finds them: from the rooms that stay
-    fixed = {k for k in set(dg.anchors_of(cat, lv)) | {dg.ENTRANCES[lv]} if k.rsplit('_', 1)[1] in cells[lv]}
-    walls = {}
-    for (cell, s), lead in sorted(dg.side_groups(cat, {k: k for k in fixed}).items()):
-        walls.setdefault(lead, [lead]).append((cell, s))
-    for members in walls.values():
-        groups.append((lv, [(c.rsplit('_', 1)[1], s, dg._centre(x[0])) for c, s in members
-                            for x in dg.openings(cat, c)[s]]))
     # one cell's side with several doorways that jump (Chaos / Madness)
     sides = {}
     for w in rows:

@@ -232,12 +232,7 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     if exit_side:
         exits[entrance].add(exit_side)
 
-    # same-side doorways of the multi-cell rooms (side_groups): the followers need no neighbour of their own - they
-    # jump to wherever the wall's lead doorway goes - and a room facing one must wall it off
-    sec = side_groups(cat, {k: k for k in fixed})
-    leads = set(sec.values())
-    so = {k: {s: () if s in exits.get(k, ()) or (k, s) in sec else op[k][s] for s in 'NSWE'}
-          for k in op}  # (hot: precomputed)
+    so = {k: {s: () if s in exits.get(k, ()) else op[k][s] for s in 'NSWE'} for k in op}  # (hot: precomputed)
     orig_nb = {k: {s: rooms.neighbour(k, s) for s in 'NSWE'} for k in op}
     names = {(c, r): cell_name(level, c, r) for c in range(-1, COLS + 1) for r in range(0, ROWS + 2)}
 
@@ -324,10 +319,6 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
                 if n in placed:
                     if not pinned_ok(room, s, placed[n]):
                         return None
-                    if (placed[n], rooms.OPP[s]) in sec and not walls_off(cat, placed[n], rooms.OPP[s], room):
-                        return None  # (an open tile across a follower doorway: Link would walk on instead of jumping)
-                    if (placed[n], rooms.OPP[s]) in leads and not all(landable(cat, room, s, x[0]) for x in op[room][s]):
-                        return None  # (the followers land in this room's doorway facing the lead one)
                     # next to its original neighbour, an original room always fits (the game proves it; the doorway
                     # model is stricter in a few spots, e.g. Face Shrine 03A under 02A's door)
                     if home and placed[n] == orig_nb[room][s]:
@@ -579,19 +570,17 @@ def _openings_match(a, b):
     return _heights_ok(a, b)
 
 
-def _jumps(cat, level, layout, romfs=None):
-    """[(level, cell, side, own centre, partner centre)] for every joined pair of doorways that don't line up; then
-    the rows of the same-side followers (group_rows: to where their wall's lead doorway goes)."""
+def _jumps(cat, level, layout):
+    """[(level, cell, side, own centre, partner centre)] for every joined pair of doorways that don't line up."""
     out = []
     pos = {cell_pos(c): c for c in layout}
-    sec = side_groups(cat, layout)
     for cell, room in sorted(layout.items()):
         c, r = cell_pos(cell)
         mine = openings(cat, room)
         for s in 'NSWE':
             dc, dr = rooms.STEP[s]
             nb = pos.get((c + dc, r + dr))
-            if not nb or not mine[s] or (cell, s) in sec or (nb, rooms.OPP[s]) in sec:
+            if not nb or not mine[s]:
                 continue
             if room == cell and layout[nb] == nb and rooms.neighbour(room, s) == nb:
                 continue  # an original pair: the game's own doorway (the catalog can differ, Angler's 06D/07D)
@@ -601,35 +590,14 @@ def _jumps(cat, level, layout, romfs=None):
             for x, y in zip(mine[s], theirs):
                 if x[0] != y[0]:
                     out.append((level, cell.rsplit('_', 1)[1], s, x[0], y[0]))
-    return out + group_rows(cat, level, layout, out, romfs, sec)
+    return out
 
 
-# ---- Same-side doorways (user 2026-10-18: a 2-cell-wide lava room's two north doorways led to two different rooms -
-# confusing). Every doorway on one wall of a room leads to the same place. One cell's side: Coherent already gives it
-# one neighbour (same doorway count); Chaos / Madness pair one of its free doorways and the others follow
-# (chaos_pairs). A multi-cell room (they stay home, anchors_of): one lead cell side per wall keeps a neighbour, the
-# other cells' doorways on that wall follow it - door jumps into the room it leads to, at its doorway facing the lead.
-# (A neighbour wide enough to meet them all would need a multi-cell room there: those never move.)
-
-def _hard(cat, room, side, x):
-    """A doorway that can't jump out (wide opening, one-way door, a puzzle object in it, a raised floor)."""
-    return not chaos_free(cat, room, side, x[0]) or (x[1] is not None and abs(x[1]) > 0.3)
-
-
-def landable(cat, room, side, slot):
-    """A doorway a follower may land in: past the room's own door if it has one (as Chaos; room_logic follows the
-    rows), a wide opening at its centre - never past the Nightmare door."""
-    return isinstance(slot, str) or not any(d[2] == 'bossdoor' and d[0] == side and abs(d[3] - slot) <= 1
-                                            for d in cat[room]['doors'] if len(d) > 3)
-
-
-def _centre(slot):
-    """A doorway's centre in half tiles (a wide opening 'w0-7': tiles 0..7)."""
-    if isinstance(slot, str):
-        a, b = map(int, slot[1:].split('-'))
-        return a + b + 1
-    return slot
-
+# ---- Same-side doorways (user 2026-10-18): the doorways on one side of a single-screen room - two doorways in the
+# same wall, differing only in position or floor height - lead to the same place. Coherent already gives such a side
+# one neighbour (same doorway count, _openings_match); Chaos / Madness pair one of its free doorways and the others
+# follow it (chaos_pairs). Multi-cell rooms are left alone: their cells' doorways are separate doorways into separate
+# rooms, as players expect there (user: Tail Cave 06C S grouped with 06E S was wrong).
 
 def walls_off(cat, room, side, other):
     """`other` (across `room`'s side) has no open tile in front of `room`'s doorways there - Link stops in them and
@@ -640,68 +608,14 @@ def walls_off(cat, room, side, other):
     return not any(tiles_of(x[0]) & across for x in openings(cat, room)[side] if not isinstance(x[0], str))
 
 
-def side_groups(cat, layout):
-    """{(cell, side): (lead cell, side)}: the cell sides of a multi-cell room whose doorways follow another cell side
-    of the same room along the same wall (Turtle Rock's lava room 05D-05E north). The lead: the one cell side with a
-    doorway that can't jump if there is one (a wall with two of those keeps its neighbours as they are), else the
-    first along the wall. Sides that lead out of the grid (the entrance, side-view passages) never group; a cell side
-    already open into a room of the layout (another room that stays: plan() passes those) has to lead."""
-    out = {}
-    done = set()
-    for cell, src in sorted(layout.items()):
-        unit = cat.get(src, {}).get('unit', [src])
-        if len(unit) < 2 or cell != src or tuple(sorted(unit)) in done:
-            continue
-        done.add(tuple(sorted(unit)))
-        if not all(layout.get(u) == u for u in unit):
-            continue
-        upos = {cell_pos(u): u for u in sorted(unit)}
-        for s in 'NSWE':
-            dc, dr = rooms.STEP[s]
-            walls = {}
-            for (c, r), u in sorted(upos.items(), key=lambda kv: (kv[0][1], kv[0][0])):
-                if (c + dc, r + dr) in upos or not openings(cat, u)[s] or s in _exit_sides(cat, u):
-                    continue
-                walls.setdefault(r if s in 'NS' else c, []).append(u)
-            for members in walls.values():
-                if len(members) < 2:
-                    continue
-                def bound(u):
-                    n = cell_name(rooms.level_of(u), cell_pos(u)[0] + dc, cell_pos(u)[1] + dr)
-                    return n in layout and not walls_off(cat, u, s, layout[n])
-                hard = [u for u in members if any(_hard(cat, u, s, x) for x in openings(cat, u)[s]) or bound(u)]
-                if len(hard) > 1:
-                    continue
-                lead = hard[0] if hard else members[0]
-                for u in members:
-                    if u != lead:
-                        out[(u, s)] = (lead, s)
-    return out
-
-
-def _side_target(cat, level, layout, rows, cell, side):
-    """Where a cell side leads: (pos, target cell, side, centre) - its first jump row, else the physical neighbour's
-    facing doorway; None if nothing is there."""
+def _side_target(level, rows, cell, side):
+    """Where a cell side's first jump row leads: (pos, target cell, side, centre), None without one."""
     short = cell.rsplit('_', 1)[1]
-    c, r = cell_pos(cell)
     for row in rows:
-        if row[0] == level and row[1] == short and row[2] == side:
-            if len(row) > 6:
-                t = f'{level}_{row[5]}'
-                return cell_pos(t), t, row[6], int(row[4])
-            dc, dr = rooms.STEP[side]
-            t = cell_name(level, c + dc, r + dr)
-            return (c + dc, r + dr), t, rooms.OPP[side], int(row[4])
-    dc, dr = rooms.STEP[side]
-    t = cell_name(level, c + dc, r + dr)
-    if t not in layout:
-        return None
-    mine = [x[0] for x in openings(cat, layout[cell])[side]]
-    theirs = [y[0] for y in openings(cat, layout[t])[rooms.OPP[side]]]
-    slot = mine[0] if mine and (mine[0] in theirs or not theirs) else theirs[0] if theirs else None
-    if slot is None:
-        return None
-    return (c + dc, r + dr), t, rooms.OPP[side], _centre(slot)
+        if row[0] == level and row[1] == short and row[2] == side and len(row) > 6:
+            t = f'{level}_{row[5]}'
+            return cell_pos(t), t, row[6], int(row[4])
+    return None
 
 
 def _follow_row(cat, level, layout, romfs, x, tgt, lead):
@@ -712,19 +626,6 @@ def _follow_row(cat, level, layout, romfs, x, tgt, lead):
     if romfs is None:  # (logic checks only: no landing spot needed)
         return (level, x[1].rsplit('_', 1)[1], x[2], x[3], tgt[3], tgt[1].rsplit('_', 1)[1], tgt[2], 2.2, 0.0)
     return _jump_row(cat, level, layout, romfs, x, tgt)
-
-
-def group_rows(cat, level, layout, rows, romfs=None, sec=None):
-    """Rows for the multi-cell rooms' follower doorways (side_groups), given the rows of everything else."""
-    sec = side_groups(cat, layout) if sec is None else sec
-    out = []
-    for (cell, s), (lead, ls) in sorted(sec.items()):
-        tgt = _side_target(cat, level, layout, rows, lead, ls)
-        if tgt is None:
-            continue
-        for x in openings(cat, layout[cell])[s]:
-            out.append(_follow_row(cat, level, layout, romfs, (cell_pos(cell), cell, s, x[0]), tgt, (lead, ls)))
-    return out
 
 
 WARP_PADS = {0xF3}  # ObjDungeonWarp: paired warp tiles naming '<room>_Warp' starts of their own dungeon
@@ -1060,7 +961,6 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None, madness
     stairs = {cell_pos(c) for c, r in layout.items() if c == r and
               any(t in a for a in cat[r]['actors'] for t in ('Downstairs', 'Upstairs'))}
     parent = {p: p for p in pos}
-    sec = side_groups(cat, layout)  # (multi-cell rooms' follower sides: rows of their own at the end)
     follow = {}  # one cell side's other free doorways: they go where its first one goes
 
     def find(p):
@@ -1081,7 +981,7 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None, madness
             dc, dr = rooms.STEP[s]
             n = pos.get((c + dc, r + dr))
             mine = op[s]
-            if not mine or (cell, s) in sec:
+            if not mine:
                 continue
             if n is not None:
                 theirs = openings(cat, layout[n])[rooms.OPP[s]]
@@ -1110,7 +1010,7 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None, madness
     if any(k not in by_comp for k in order) and len(order) > 1:
         return None  # a piece without a free doorway can't be reached
     if madness:
-        return _with_followers(cat, level, layout, romfs_for_tiles, follow, sec,
+        return _with_followers(cat, level, layout, romfs_for_tiles, follow,
                                _madness_rows(level, layout, order, by_comp, rng, romfs_for_tiles, cat))
     # spanning tree: each next piece links to the linked piece with the most free doorways left
     linked = [order[0]] if order else []
@@ -1144,18 +1044,18 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None, madness
     for a, b in pairs:
         for x, y in ((a, b), (b, a)) if a != b else ((a, b),):
             out.append(_jump_row(cat, level, layout, romfs_for_tiles, x, y))
-    return _with_followers(cat, level, layout, romfs_for_tiles, follow, sec, out)
+    return _with_followers(cat, level, layout, romfs_for_tiles, follow, out)
 
 
-def _with_followers(cat, level, layout, romfs, follow, sec, rows):
-    """rows + the rows of the doorways that follow another on their wall (after them: the map's letters label the
-    pairs first, runtime/ui/chaos_overlay.mm): a cell side's other free doorways, then the multi-cell followers."""
+def _with_followers(cat, level, layout, romfs, follow, rows):
+    """rows + the rows of a cell side's other free doorways, to where its paired one goes (after the pairs: the
+    map's letters label the pairs first, runtime/ui/chaos_overlay.mm)."""
     out = list(rows)
     for (cell, s), xs in sorted(follow.items()):
-        tgt = _side_target(cat, level, layout, rows, cell, s) if xs else None
+        tgt = _side_target(level, rows, cell, s) if xs else None
         for x in xs if tgt else ():
             out.append(_follow_row(cat, level, layout, romfs, x, tgt, (cell, s)))
-    return out + group_rows(cat, level, layout, out, romfs, sec)
+    return out
 
 
 def _jump_row(cat, level, layout, romfs, x, y):
@@ -1255,18 +1155,12 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                 free_cells = [(c, r) for c in range(COLS) for r in range(1, ROWS + 1)
                               if (c, r) not in taken and (c, r) not in reserved and on_map(romfs, lv, c, r)]
                 rng.shuffle(free_cells)
-                sec = side_groups(cat, L)
                 for c, r in free_cells:
                     ok = True
                     for s in 'NSWE':
                         dc, dr = rooms.STEP[s]
                         n = (c + dc, r + dr)
                         if n in taken:
-                            nb = cell_name(lv, *n)
-                            if (nb, rooms.OPP[s]) in sec and not walls_off(cat, L[nb], rooms.OPP[s], room):
-                                ok = False  # (a same-side follower doorway needs a wall across: side_groups)
-                            if (nb, rooms.OPP[s]) in sec.values() and openings(cat, room)[s]:
-                                ok = False  # (keep it simple: nothing new facing a lead doorway)
                             theirs = openings(cat, L[cell_name(lv, *n)])[rooms.OPP[s]]
                             mine = openings(cat, room)[s]
                             if theirs and mine and [x[0] for x in mine] == [x[0] for x in theirs]:
@@ -1446,7 +1340,7 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
     _dungeon_map_rooms(romfs, out, layout, entrance)
     # door jumps: rando/<seed>/door_jumps.tsv next to the seed's romfs (read by runtime/hle/doorjump.c)
     if jumps is None:  # (Chaos passes its own pairs)
-        jumps = _jumps(cat, level, layout, romfs)
+        jumps = _jumps(cat, level, layout)
     with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv'), 'a' if shared_flags else 'w') as f:
         for j in jumps:
             f.write('\t'.join(map(str, j)) + '\n')
