@@ -3347,8 +3347,11 @@ static void draw(CmdRec *r, bool indexed) {
     // resources
     if (g_interp_log) {  // (frame interpolation, runtime/nvn/interp.c: the draw's identity across frames)
         // LARECOMP_INTERP_KEY=<mask> (research): 1 draw arguments, 2 index buffer address, 4 programs, 8 vertex buffer 0
-        // address, 16 target object, 32 target size. Default 37: the game's render-target objects and its dynamic
-        // geometry's buffers change from frame to frame (measured: 44% matched with them, 100% without, Mabe Village).
+        // address, 16 target object, 32 target class (format, depth-only, aspect: not the size - Dynamic resolution
+        // changes the targets' size between frames, and keyed by size every draw of such a frame went unmatched: a
+        // cut, an interval without in-betweens; Dusklight keys by the object, never by a target). Default 37: the
+        // game's render-target objects and its dynamic geometry's buffers change from frame to frame (measured: 44%
+        // matched with them, 100% without, Mabe Village).
         static int kmask = -1;
         if (kmask < 0) kmask = getenv("LARECOMP_INTERP_KEY") ? atoi(getenv("LARECOMP_INTERP_KEY")) : 37;
         uint64_t args[7];
@@ -3358,7 +3361,7 @@ static void draw(CmdRec *r, bool indexed) {
         uint64_t key = (kmask & 1) ? hmix(1469598103934665603ull, args, sizeof args) : 1469598103934665603ull;
         uint64_t ids[5] = {(kmask & 4) ? st.program->stages[0].code_addr : 0, (kmask & 4) ? st.program->stages[1].code_addr : 0,
                            (kmask & 8) ? st.vbuf[0].addr : 0, (kmask & 16) ? (uint64_t)(uintptr_t)kt : 0,
-                           (kmask & 32) && kt ? (uint64_t)kt->width << 32 | kt->height : 0};
+                           (kmask & 32) && kt ? (uint64_t)kt->format << 32 | (st.rt.ncolor ? 0 : 1u << 31) | (kt->height ? kt->width * 16 / kt->height : 0) : 0};
         uint64_t fkey = hmix(key, ids, sizeof ids);
         {   // LARECOMP_INTERP_LOG_KEYS=1 (research): each key's components once
             static int on = -1; static uint64_t seen[4096]; static int nseen;
