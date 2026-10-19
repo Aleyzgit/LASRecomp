@@ -5,14 +5,16 @@
 // the previous frame and this one - matrices, colours, animation - as RT64 does for N64 games. The backend's present
 // (render thread) shows the images on the display's own vsyncs, a fixed latency behind the game.
 //
-// Draws are matched across frames by programs + draw arguments + target size and their occurrence in the frame (the
-// game's render-target objects and dynamic buffer addresses change every frame; this matched 96-100% of draws in
-// Mabe Village, Tail Cave, a door transition, a pit). Every uniform buffer of a matched draw is paired by position and
-// blended element-wise; integers (stored in float slots they read as denormals) never are. An element moving further
-// than the cut distance (+5% of its size: projection terms are large) is a jump - it shows its new value at once (a
-// camera's settings switching as Link enters another part of the overworld: one value of its buffer). Jumps in most
-// of the buffers that changed (a camera cut, a warp), a level change, too few matches or a texture going away during
-// the frame make the whole frame a cut: no in-between images, the frame shows as it is.
+// Draws are matched across frames by programs + draw arguments + target size (the game's render-target objects and
+// dynamic buffer addresses change every frame; this matched 96-100% of draws in Mabe Village, Tail Cave, a door
+// transition, a pit); several draws of one key (the same mesh for different objects: Cuccos, chain links) are paired
+// by the nearest per-object uniforms, not their order, which the game's depth sort changes between frames
+// (match_all). Every uniform buffer of a matched draw is paired by position and blended element-wise; integers
+// (stored in float slots they read as denormals) never are. An element moving further than the cut distance (+5% of
+// its size: projection terms are large) is a jump - it shows its new value at once (a camera's settings switching as
+// Link enters another part of the overworld: one value of its buffer). Jumps in most of the buffers that changed (a
+// camera cut, a warp), a level change, too few matches or a texture going away during the frame make the whole frame
+// a cut: no in-between images, the frame shows as it is.
 //
 //   LARECOMP_INTERP=on|measure|off   override the setting (measure: log and match only, no extra images)
 //   LARECOMP_INTERP_CUT=<d>          the jump distance (default 4 world units)
@@ -22,6 +24,9 @@
 //                                    cast shadows faded / dithered in the in-betweens)
 //   LARECOMP_INTERP_LOG=<s>          stats line period in seconds (default 2; 0: none)
 //   LARECOMP_INTERP_LOG_CUTS=1       log each frame cut and why
+//   research: LARECOMP_INTERP_LOG_MOVES=<d> [_FROM=<frame>] logs uniform buffers whose elements moved more than d in one
+//   frame; LARECOMP_INTERP_DUMP=<frame>:<path> writes both frames' draws and uniform copies as text at that frame;
+//   LARECOMP_INTERP_LOG_KEYS=1 (renderer.m) logs each draw key's components once
 #include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -104,6 +109,105 @@ static void index_prev(void) {
         uint32_t h = mhash(prev->draws[j].key, prev->draws[j].occ);
         while (m_idx[h] >= 0) h = (h + 1) & ((1 << HBITS) - 1);
         m_keys[h] = prev->draws[j].key, m_occ[h] = prev->draws[j].occ, m_idx[h] = (int32_t)j;
+    }
+}
+
+// Several draws of one key in a frame are the same mesh drawn for different objects (two Cuccos, BowWow's chain links,
+// grass tufts) - or the same object drawn in several passes. The game's order among them changes from frame to frame
+// (it sorts by depth: as the camera moves, two objects swap), so pairing them by occurrence blends one object's uniforms
+// with another's: the in-between shows the object half-way between the two, and its shadow with it (Mabe Village,
+// running east past the well: a Cucco on the path that was in the yard, BowWow gone, a dark wedge of shadow on the
+// grass). Each is paired with the draw of the previous frame whose per-object uniforms are nearest to its own instead.
+static uint8_t *p_used; static uint32_t p_used_cap;
+static bool blendable(float a, float b);
+// How far apart two draws' objects are: the per-object uniforms (vertex stage, slots 2 and up: the model matrix, the
+// bones). The shared buffers (slots 0, 1: the pass, the camera) say nothing about the object and their unwritten tails
+// hold leftovers that differ from frame to frame (HUD quads: -3e38, 255, 1268 in slot 0's last rows).
+static float draw_distance(const DrawRec *d, const DrawRec *p) {
+    float dist = 0;
+    for (uint32_t i = 0; i < d->ncb && i < p->ncb; i++) {
+        const CbRec *cc = &cur->cbs[d->first_cb + i], *pc = &prev->cbs[p->first_cb + i];
+        if (cc->stage != pc->stage || cc->slot != pc->slot || cc->size != pc->size) return 1e30f;
+        if (cc->stage != 0 || cc->slot < 2) continue;
+        const float *a = (const float *)(prev->bytes + pc->off), *b = (const float *)(cur->bytes + cc->off);
+        if (!memcmp(a, b, cc->size)) continue;
+        for (uint32_t q = 0; q < cc->size / 4; q++)
+            if (blendable(a[q], b[q])) dist += fabsf(b[q] - a[q]);
+            else if (a[q] != b[q]) dist += 1;  // (an integer / flag changed: another object)
+    }
+    return dist;
+}
+static uint32_t object_bytes(const DrawRec *d) {  // the per-object uniforms a draw has (none: HUD quads, decals)
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < d->ncb; i++) {
+        const CbRec *cc = &cur->cbs[d->first_cb + i];
+        if (cc->stage == 0 && cc->slot >= 2) n += cc->size;
+    }
+    return n;
+}
+
+// The pairing of a key's draws: every (this frame, previous frame) pair of the key by distance, nearest first, each draw
+// once (greedy in that order: the draws that didn't change pair first; one whose content jumped takes what is left,
+// its own, instead of taking another's and starting a chain of wrong pairs). Equal distances - the same object drawn
+// in two passes (depth pre-pass and colour pass: identical per-object data, different per-pass buffers) - keep the
+// occurrence order: crossing those blended one pass's camera / light buffer with the other's (whole scene flat-lit).
+typedef struct { float d; uint16_t c, p, docc; } Pair;
+static int pair_cmp(const void *a, const void *b) {
+    const Pair *x = a, *y = b;
+    if (x->d != y->d) return x->d < y->d ? -1 : 1;
+    return x->docc < y->docc ? -1 : x->docc > y->docc;
+}
+static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none)
+static uint32_t *p_order; static uint32_t p_order_cap;
+static int order_cmp(const void *a, const void *b) {
+    const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
+    if (x->key != y->key) return x->key < y->key ? -1 : 1;
+    return x->occ < y->occ ? -1 : x->occ > y->occ;
+}
+#define GROUP_MAX 64
+static void match_all(void) {
+    if (cur->ndraws > p_order_cap) {
+        p_order_cap = cur->cap_draws;
+        p_order = realloc(p_order, sizeof *p_order * p_order_cap);
+        p_match = realloc(p_match, sizeof *p_match * p_order_cap);
+    }
+    if (prev->ndraws > p_used_cap) { p_used_cap = prev->cap_draws; p_used = realloc(p_used, p_used_cap); }
+    memset(p_used, 0, prev->ndraws);
+    for (uint32_t j = 0; j < cur->ndraws; j++) p_order[j] = j, p_match[j] = -1;
+    qsort(p_order, cur->ndraws, sizeof *p_order, order_cmp);
+    static Pair pairs[GROUP_MAX * GROUP_MAX];
+    for (uint32_t g = 0; g < cur->ndraws;) {
+        uint64_t key = cur->draws[p_order[g]].key;
+        uint32_t ge = g + 1;
+        while (ge < cur->ndraws && cur->draws[p_order[ge]].key == key) ge++;
+        uint32_t ncur = ge - g;
+        int32_t cand[GROUP_MAX];
+        uint32_t nprev = 0;
+        for (; nprev < GROUP_MAX; nprev++) {
+            int32_t pj = lookup_prev(key, nprev);
+            if (pj < 0) break;
+            cand[nprev] = pj;
+        }
+        if (nprev == 1 && ncur == 1) p_match[p_order[g]] = cand[0];
+        else if (nprev >= GROUP_MAX || ncur > GROUP_MAX || object_bytes(&cur->draws[p_order[g]]) < 48) {
+            // (too many, or nothing per object to tell them apart: by occurrence - the HUD's order is stable)
+            for (uint32_t k = g; k < ge; k++) p_match[p_order[k]] = lookup_prev(key, cur->draws[p_order[k]].occ);
+        } else if (nprev) {
+            uint32_t np = 0;
+            for (uint32_t c = 0; c < ncur; c++)
+                for (uint32_t q = 0; q < nprev; q++)
+                    pairs[np++] = (Pair){draw_distance(&cur->draws[p_order[g + c]], &prev->draws[cand[q]]), (uint16_t)c, (uint16_t)q,
+                                         (uint16_t)(c > q ? c - q : q - c)};  // (occ: cur draws sorted by occ, cand[q] = occ q)
+            qsort(pairs, np, sizeof *pairs, pair_cmp);
+            for (uint32_t i = 0; i < np; i++) {
+                uint32_t j = p_order[g + pairs[i].c];
+                int32_t pj = cand[pairs[i].p];
+                if (p_match[j] >= 0 || p_used[pj] || pairs[i].d >= 1e30f) continue;
+                p_match[j] = pj;
+                p_used[pj] = 1;
+            }
+        }
+        g = ge;
     }
 }
 
@@ -246,6 +350,31 @@ static void log_cut(int why, const char *more) {
 
 void interp_force_cut(void) { force_cut = true; }
 
+// LARECOMP_INTERP_DUMP=<frame>:<path> (research): both frames' draws and uniform copies as text
+static void dump_frames(void) {
+    static long df = -1; static char dpath[256];
+    if (df < 0) { const char *e = getenv("LARECOMP_INTERP_DUMP"); df = 0; if (e) sscanf(e, "%ld:%255s", &df, dpath); }
+    if (df && (long)s_frame_no == df) {
+        FILE *f = fopen(dpath, "w");
+        for (int which = 0; f && which < 2; which++) {
+            Frame *F = which ? cur : prev;
+            fprintf(f, "F %s %u\n", which ? "cur" : "prev", F->ndraws);
+            for (uint32_t j = 0; j < F->ndraws; j++) {
+                DrawRec *d = &F->draws[j];
+                fprintf(f, "D %u %016llx %u %u\n", j, (unsigned long long)d->key, d->occ, d->ncb);
+                for (uint32_t i = 0; i < d->ncb; i++) {
+                    CbRec *c = &F->cbs[d->first_cb + i];
+                    fprintf(f, "C %d %d %u", c->stage, c->slot, c->size);
+                    const uint32_t *w = (const uint32_t *)(F->bytes + c->off);
+                    for (uint32_t q = 0; q < c->size / 4; q++) fprintf(f, " %08x", w[q]);
+                    fprintf(f, "\n");
+                }
+            }
+        }
+        if (f) fclose(f);
+    }
+}
+
 bool interp_frame_end(bool log_next) {
     double t0 = plat_now_ns() / 1e6;
     s_frame_no++;
@@ -259,12 +388,14 @@ bool interp_frame_end(bool log_next) {
     if (force_cut) { force_cut = false; log_cut(0, NULL); return false; }
     if (!prev_valid || prev->overflow) { log_cut(1, NULL); return false; }
     index_prev();
+    dump_frames();
+    match_all();
     float cut = cut_threshold();
     int stages = blend_stages();
     uint64_t matched = 0, changed = 0, cuts = 0;
     for (uint32_t j = 0; j < cur->ndraws; j++) {
         DrawRec *d = &cur->draws[j];
-        int32_t pj = lookup_prev(d->key, d->occ);
+        int32_t pj = p_match[j];
         if (pj < 0) continue;
         matched++;
         DrawRec *p = &prev->draws[pj];
@@ -290,6 +421,17 @@ bool interp_frame_end(bool log_next) {
                 if (!far && d > cut + 0.05f * fmaxf(fabsf(a[q]), fabsf(b[q]))) far = true, jq = q + 1;
             }
             cc->maxd = maxd;
+            {   // LARECOMP_INTERP_LOG_MOVES=<d>: buffers whose elements moved more than d in one frame (research:
+                // draws matched to another object of the same mesh)
+                static float lm = -2; static int nlm; static long lmf;  // LARECOMP_INTERP_LOG_MOVES_FROM=<frame>
+                if (lm < -1) { const char *e = getenv("LARECOMP_INTERP_LOG_MOVES"); lm = e ? (float)atof(e) : -1;
+                               e = getenv("LARECOMP_INTERP_LOG_MOVES_FROM"); lmf = e ? atol(e) : 0; }
+                if (lm >= 0 && maxd > lm && (long)s_frame_no >= lmf && nlm++ < 40000) {
+                    uint32_t mq = 0; for (uint32_t z = 0; z < nf; z++) if (blendable(a[z], b[z]) && fabsf(b[z] - a[z]) == maxd) { mq = z; break; }
+                    LOG("[interp-move] f%llu draw %u occ %u key %016llx stage %d slot %d size %u ncb %u: maxd %g at elem %u (%g -> %g) far %d\n",
+                        (unsigned long long)s_frame_no, j, d->occ, (unsigned long long)d->key, cc->stage, cc->slot, cc->size, d->ncb, maxd, mq, a[mq], b[mq], far);
+                }
+            }
             bool jump = far && (pc->maxd < 0 || maxd > 2.5f * pc->maxd + cut);
             q = jq;
             cc->snap = jump;

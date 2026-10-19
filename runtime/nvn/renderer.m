@@ -3359,7 +3359,24 @@ static void draw(CmdRec *r, bool indexed) {
         uint64_t ids[5] = {(kmask & 4) ? st.program->stages[0].code_addr : 0, (kmask & 4) ? st.program->stages[1].code_addr : 0,
                            (kmask & 8) ? st.vbuf[0].addr : 0, (kmask & 16) ? (uint64_t)(uintptr_t)kt : 0,
                            (kmask & 32) && kt ? (uint64_t)kt->width << 32 | kt->height : 0};
-        interp_draw(hmix(key, ids, sizeof ids));
+        uint64_t fkey = hmix(key, ids, sizeof ids);
+        {   // LARECOMP_INTERP_LOG_KEYS=1 (research): each key's components once
+            static int on = -1; static uint64_t seen[4096]; static int nseen;
+            if (on < 0) on = getenv("LARECOMP_INTERP_LOG_KEYS") != NULL;
+            if (on) {
+                bool known = false;
+                for (int i = 0; i < nseen; i++) if (seen[i] == fkey) { known = true; break; }
+                if (!known && nseen < 4096) {
+                    seen[nseen++] = fkey;
+                    LOG("[interp-key] %016llx vs %llx fs %llx fshash %016llx mode %llu count %llu inst %llu rt %ux%u ncolor %d fmt %#x depth %p dswrite %d ub0 %u ub1 %u ub2 %u ub3 %u ntex %d\n",
+                        (unsigned long long)fkey, st.program->stages[0].code_addr, st.program->stages[1].code_addr, (unsigned long long)g_cur_fs_hash,
+                        r->x[0], r->x[2], indexed ? r->x[6] : r->x[4], kt ? kt->width : 0, kt ? kt->height : 0, st.rt.ncolor,
+                        kt ? kt->format : 0, (void *)st.rt.depth, st.ds[0] && st.ds[1], (unsigned)st.ubuf[0][0].size, (unsigned)st.ubuf[0][1].size,
+                        (unsigned)st.ubuf[0][2].size, (unsigned)st.ubuf[0][3].size, pr->fi->ntex);
+                }
+            }
+        }
+        interp_draw(fkey);
     }
     bind_cbufs(0, pr->vi);
     bind_cbufs(1, pr->fi);
