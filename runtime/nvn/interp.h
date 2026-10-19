@@ -28,6 +28,10 @@ void interp_free_end(void);
 bool interp_frame_end(bool log_next);
 extern uint64_t g_interp_present_frame;  // (the backend: the frame number of the present being made, for the research hooks)
 void interp_force_cut(void);              // the next frame is a cut (the backend saw a level change, a resize...)
+// Before the in-betweens of a frame: false when there must be none - the game thread is already two frames past it
+// (its parity-double-buffered memory is being rewritten under the replays) or the render thread reached its present
+// over 100 ms late (a load, a hitch: Dusklight's epochs).
+bool interp_replays_allowed(uint64_t frame, uint64_t game_frame, uint64_t now);
 bool interp_prepare(float t);             // blends for an image at t (0 = previous frame, 1 = this one)
 bool interp_replay_lock(void);            // before replays: false when an object the frame used was freed
 void interp_replay_unlock(void);

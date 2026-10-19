@@ -89,6 +89,7 @@ typedef struct {
 static Frame fr[3];
 static Frame *cur = &fr[0], *prev = &fr[1], *prev2 = &fr[2];  // (prev2: the frame before prev - object identity, below)
 static bool prev_valid, frame_open, force_cut, can_blend;
+static _Atomic uint64_t called[256];  // the game thread's present call time per frame (interp_stamp)
 static uint8_t *blend_bytes; static uint64_t blend_n, blend_cap;
 
 #define GROW(p, n, cap, init) do { if ((n) >= (cap)) { (cap) = (cap) ? (cap) * 2 : (init); (p) = realloc((p), sizeof *(p) * (cap)); } } while (0)
@@ -483,6 +484,18 @@ static void log_cut(int why, const char *more) {
 
 void interp_force_cut(void) { force_cut = true; history_reset = true; }
 
+// Dusklight starts a new presentation epoch - no blending, history cleared - on a native gap over 250 ms
+// (src/dusk/game_clock.cpp): its sim never runs while it presents, so that is its only race. Ours runs ahead on its
+// own thread: the game's uniform blocks are double-buffered by frame parity, so once it is two frames past the frame
+// being presented it rewrites that frame's memory, and a replay's vertex data, index data and texture uploads (read
+// live, unlike the logged uniforms) tear. Also a present the render thread reached over 100 ms late: a load, a hitch.
+bool interp_replays_allowed(uint64_t frame, uint64_t game_frame, uint64_t now) {
+    if (game_frame >= frame + 2) { log_cut(7, NULL); return false; }
+    uint64_t c = atomic_load(&called[frame & 255]);
+    if (c && now > c && now - c > 100000000ull) { log_cut(5, " (present reached late)"); return false; }
+    return true;
+}
+
 // LARECOMP_INTERP_DUMP=<frame>:<path> (research): both frames' draws and uniform copies (with their guest addresses) as
 // text at present frames frame .. frame + 2 (<path>.0 .. .2)
 static void dump_frames(void) {
@@ -759,7 +772,6 @@ void interp_frame_rotate(void) {
 
 // ---- the game's timeline
 static _Atomic uint64_t stamps[256];
-static _Atomic uint64_t called[256];
 void interp_stamp(uint64_t frame, uint64_t vsync_ns, uint64_t call_ns) {
     atomic_store(&stamps[frame & 255], vsync_ns);
     atomic_store(&called[frame & 255], call_ns);
