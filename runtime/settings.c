@@ -16,6 +16,11 @@ static const char *settings_file(void) {
     return e && *e ? e : "larecomp.ini";
 }
 
+const char *const g_enemy_colour_modes[N_ENEMY_COLOUR_MODES] = {"Off", "Random per seed", "Random every load"};
+static const char *const k_enemy_colour_keys[N_ENEMY_COLOUR_MODES] = {"off", "seed", "load"};  // (larecomp.ini)
+const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game Boy Color", "Grayscale"};
+static const char *const k_screen_filter_keys[N_SCREEN_FILTERS] = {"off", "gameboy", "gameboy_color", "grayscale"};  // (else: off)
+
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
     .fullscreen = false,
@@ -204,8 +209,20 @@ void settings_load(void) {
         else if (!strcmp(key, "timer_position")) g_settings.timer_pos = !strcmp(val, "right") ? TIMER_POS_RIGHT : TIMER_POS_LEFT;
         else if (!strcmp(key, "livesplit")) g_settings.livesplit = atoi(val) != 0;
         else if (!strcmp(key, "livesplit_host")) strlcpy(g_settings.livesplit_host, val, sizeof g_settings.livesplit_host);
-        else if (!strcmp(key, "tunic")) { for (int i = 0; i < N_TUNIC_COLOURS; i++) if (!strcmp(val, g_tunic_colours[i])) g_settings.tunic = i; }
-        else if (!strcmp(key, "hearts")) { for (int i = 0; i < N_HEART_COLOURS; i++) if (!strcmp(val, g_heart_colours[i])) g_settings.hearts = i; }
+        else if (!strcmp(key, "tunic")) col_parse(&g_settings.tunic, val);  // (colour rows: runtime/cosmetic_colour.c)
+        else if (!strcmp(key, "hearts")) col_parse(&g_settings.hearts, val);
+        else if (!strcmp(key, "hair")) col_parse(&g_settings.hair, val);
+        else if (!strcmp(key, "shield")) col_parse(&g_settings.shield, val);
+        else if (!strcmp(key, "skin")) col_parse(&g_settings.skin, val);
+        else if (!strcmp(key, "leaves")) col_parse(&g_settings.leaves, val);
+        else if (!strcmp(key, "grass")) col_parse(&g_settings.grass, val);
+        else if (!strcmp(key, "sand")) col_parse(&g_settings.sand, val);
+        else if (!strcmp(key, "screen_filter")) {
+            for (int i = 0; i < N_SCREEN_FILTERS; i++) if (!strcmp(val, k_screen_filter_keys[i])) g_settings.screen_filter = i;
+        }
+        else if (!strcmp(key, "enemy_colours")) {
+            for (int i = 0; i < N_ENEMY_COLOUR_MODES; i++) if (!strcmp(val, k_enemy_colour_keys[i])) g_settings.enemy_colours = i;
+        }
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
@@ -262,7 +279,17 @@ void settings_save(void) {
     fprintf(f, "timer_position = %s\n", g_settings.timer_pos == TIMER_POS_RIGHT ? "right" : "left");
     fprintf(f, "timer = %d\nlivesplit = %d\nlivesplit_host = %s\n", g_settings.timer, g_settings.livesplit,
             g_settings.livesplit_host);
-    fprintf(f, "tunic = %s\nhearts = %s\n", g_tunic_colours[g_settings.tunic], g_heart_colours[g_settings.hearts]);
+    static const struct { const char *key; const CosColour *c; } cols[] = {
+        {"tunic", &g_settings.tunic}, {"hearts", &g_settings.hearts}, {"hair", &g_settings.hair},
+        {"shield", &g_settings.shield}, {"skin", &g_settings.skin},
+        {"leaves", &g_settings.leaves}, {"grass", &g_settings.grass}, {"sand", &g_settings.sand}};
+    for (size_t i = 0; i < sizeof cols / sizeof *cols; i++) {
+        char v[16];
+        col_format(cols[i].c, v, sizeof v);
+        fprintf(f, "%s = %s\n", cols[i].key, v);
+    }
+    fprintf(f, "enemy_colours = %s\n", k_enemy_colour_keys[g_settings.enemy_colours]);
+    fprintf(f, "screen_filter = %s\n", k_screen_filter_keys[g_settings.screen_filter]);
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);

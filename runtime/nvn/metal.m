@@ -19,6 +19,7 @@
 #include "renderer.h"
 #include "pace.h"
 #include "texpatch.h"
+#include "screen_filter.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandQueue> queue;
@@ -560,7 +561,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && g_frame_counter - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
     if (!b->tp) b->tp = texpatch_identify(t) + 1;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
-    bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != texpatch_generation();
+    bool restyle = b->tp > 0 && b->tp <= TEXPATCH_RECOLOUR_BASE && b->uploaded && b->tp_gen != texpatch_generation();
     if (!full && !restyle) {
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
@@ -798,8 +799,11 @@ static const char *present_src =
     "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
     "  V o; o.pos = float4(p * 2.0 - 1.0, 0, 1);\n"
     "  float2 uv = float2(p.x, pv[0].x > 0.5 ? p.y : 1.0 - p.y); o.uv = pv[1].xy + uv * pv[1].zw; return o; }\n"
-    "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
-    "  return float4(t.sample(s, in.uv).rgb, 1.0); }\n";
+    "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]],\n"
+    "                   constant float4 &pf [[buffer(0)]]) {\n"
+    "  float3 c = t.sample(s, in.uv).rgb;\n"
+    SCREEN_FILTER_SRC("float3")  // (the screen filter: screen_filter.h)
+    "  return float4(c, 1.0); }\n";
 
 void backend_init(void) {
     while (!atomic_load(&ui_ready)) usleep(1000);
@@ -1175,6 +1179,9 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     if (g_save_upright || strstr(path, "window")) flip = 0;  // the window image is already upright
     float pv[8] = {flip, 0, 0, 0, shot_crop[0], shot_crop[1], shot_crop[2], shot_crop[3]};
     [e setVertexBytes:pv length:sizeof pv atIndex:0];
+    float pf[4] = {0};
+    if (strstr(path, "frame_")) screen_filter_params(pf);  // (shots of the game image: as shown)
+    [e setFragmentBytes:pf length:sizeof pf atIndex:0];
     [e setFragmentTexture:raw_view(tex) atIndex:0];
     [e setFragmentSamplerState:present_sampler atIndex:0];
     [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -1320,6 +1327,9 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             [enc setRenderPipelineState:present_pipe];
             float pv[8] = {flip, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
             [enc setVertexBytes:pv length:sizeof pv atIndex:0];
+            float pf[4];
+            screen_filter_params(pf);
+            [enc setFragmentBytes:pf length:sizeof pf atIndex:0];
             [enc setFragmentTexture:src atIndex:0];
             [enc setFragmentSamplerState:present_sampler atIndex:0];
             [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];

@@ -21,6 +21,8 @@
 #include "vk.h"
 #include "../renderer.h"
 #include "../pace.h"
+#include "../recolour.h"
+#include "../screen_filter.h"
 #include "../shader_prep.h"
 #include "../../settings.h"
 
@@ -4226,7 +4228,14 @@ static void draw_(CmdRec *r, bool indexed) {
             }
     }
     float tint[8] = {0};
+    int recol = 0;  // a Cosmetics recolour texture's class (runtime/nvn/recolour.c)
     if (pr->fi->uses_tint) {
+        for (int i = 0; i < pr->fi->ntex; i++) {
+            NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+            const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+            if (b && b->tp > 0) recol = recolour_pick(recol, recolour_class_of(b->tp - 1));
+        }
+        if (recol) recolour_tint(recol, tint);  // (the highlights below win)
         extern bool pot_tint(const float *m, float tint[8], uint64_t mesh);
         extern bool pot_glow_active(void);
         // (uniform buffer 2 = the model matrix, hardware cbuf 5 - only when the vertex shader reads it: a binding left
@@ -4470,6 +4479,7 @@ static void draw_(CmdRec *r, bool indexed) {
             float rtint[8] = {0};
             extern void pot_gold_tint(float tint[8]);
             if (run_gold[ri]) pot_gold_tint(rtint);
+            else if (recol) recolour_tint(recol, rtint);
             VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, 0, NULL);
         }
@@ -4950,7 +4960,8 @@ static VkPipeline present_pipeline(VkFormat fmt) {
         VkDescriptorSetLayoutBinding b = {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
         VkDescriptorSetLayoutCreateInfo li = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &b};
         VK_CHECK(vkCreateDescriptorSetLayout(g_vk.dev, &li, NULL, &present_set_layout));
-        VkPushConstantRange r = {VK_SHADER_STAGE_VERTEX_BIT, 0, 32};
+        // (vertex: flip + crop, 32 bytes; fragment: the screen filter, 16 more)
+        VkPushConstantRange r = {VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48};
         VkPipelineLayoutCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1,
                                          .pSetLayouts = &present_set_layout, .pushConstantRangeCount = 1, .pPushConstantRanges = &r};
         VK_CHECK(vkCreatePipelineLayout(g_vk.dev, &ci, NULL, &present_layout));
@@ -5283,7 +5294,10 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
     VkViewport vp = {vx, vy, vw, vh, 0, 1};
     vkCmdSetViewport(cb, 0, 1, &vp);
-    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
+    float pc[12];
+    memcpy(pc, pv, 32);
+    screen_filter_params(pc + 8);
+    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pc);
     vkCmdDraw(cb, 3, 1, 0, 0);
     VkViewport full = {0, 0, (float)g_vk.sc_extent.width, (float)g_vk.sc_extent.height, 0, 1};
     vkCmdSetViewport(cb, 0, 1, &full);
@@ -5333,8 +5347,9 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VkRect2D sc = {{0, 0}, {w, h}};
     vkCmdSetViewport(cb, 0, 1, &vp);
     vkCmdSetScissor(cb, 0, 1, &sc);
-    float pv[8] = {renderer_origin_lower_left() && !strstr(path, "window") ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
-    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
+    float pv[12] = {renderer_origin_lower_left() && !strstr(path, "window") ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
+    if (strstr(path, "frame_")) screen_filter_params(pv + 8);  // (shots of the game image: as shown)
+    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 48, pv);
     vkCmdDraw(cb, 3, 1, 0, 0);
     vkCmdEndRendering(cb);
     vk_full_barrier(cb);
