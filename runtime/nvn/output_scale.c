@@ -93,6 +93,11 @@ static double g_dyn_last_raise = -100, g_dyn_last_lower = -100;
 static double g_hold_dt, g_hold_w;               // held: the frame interval at the floor (> 0) and W then
 static double g_probe_at, g_probe_wait = 10.0;  // looking for 60 again (from a hold)
 static bool g_probing;
+static double g_probe_start = -100, g_probe_ok_at = -100;  // when the last probe for 60 began / was last met
+static int g_probe_good;                                     // probing: decisions in a row that met 60
+static double g_probe_from;                                  // the factor the hold had when the probe began
+static double g_probe_fail_gw, g_probe_fail_at = -1000;      // the last failed probe: G + W at the floor then, when
+#define DYN_PROBE_MAX 60.0  // s: the longest wait between probes for 60 from a hold
 // held: G at the floor followed through the scene's load - measured there as the hold began, then scaled by how G
 // changed at each factor since (G right after a step is the reference at the new factor): the part of G that
 // doesn't scale with the resolution makes area estimates optimistic (UHD 770 1080p: ~6.5 of 9.1 ms at 0.50)
@@ -221,9 +226,25 @@ static void dyn_update(double now, double game_ms, double win_ms, double lines) 
                 } else {
                     LOG("[dynres] the floor would fit 60 fps now (game %.1f ms at %.2f: ~%.1f at %.2f, window %.1f): looking for it\n",
                         G, g_dyn, g_floor, g_dyn_floor, W);
-                    g_hold_dt = 0, g_probing = true;
+                    g_hold_dt = 0, g_probing = true, g_probe_start = now, g_probe_good = 0;
                 }
             }
+        }
+        // Held at 30 with the GPU 30% idle or more: G may be inflated by a lowered clock (an integrated GPU clocks down
+        // while frames wait for the display: UHD 770, 1080p window, G 15.9 ms at 0.50 held at 30 against 9-11 at 60),
+        // so the hold's own measure may never show 60 fitting again (it stayed at 30 for the rest of a run). Every probe
+        // wait (10 s, doubling each time a probe fails, at most a minute) it tries 60 at the floor; a probe that fails is
+        // back in the hold within ~1.5 s at the factor it had, with frames that were at 30 anyway. After a failed probe
+        // the next one waits until the floor's estimate is 10% under what that probe measured there (the scene got
+        // lighter) or 2 minutes have passed: a hold that is real (SMAA + FSR 1 at 1080p on the UHD 770) probes rarely.
+        double floor_gw = g_ref_g > 0 ? g_floor_g * G / g_ref_g + W : -1;
+        bool probe_ok = now - g_probe_fail_at > 120.0 || (floor_gw > 0 && floor_gw < 0.9 * g_probe_fail_gw);
+        if (g_hold_dt > 0 && !hold_up && hold_vsyncs() == 2 && avg_gpu < 0.7 * g_hold_dt && now >= g_probe_at && probe_ok) {
+            LOG("[dynres] held at 30 with the GPU %.0f%% busy (game %.1f + window %.1f ms at %.2f): its clock may be down, "
+                "trying 60 at %.2f\n", 100 * avg_gpu / g_hold_dt, G, W, g_dyn, g_dyn_floor);
+            g_hold_dt = 0, g_probing = true, g_probe_start = now, g_probe_good = 0;
+            g_hold_up_votes = g_hold_miss = g_hold_met_votes = 0;
+            g_probe_from = g_dyn, g_dyn = g_dyn_floor;
         }
         if (g_hold_dt > 0) budget = g_hold_dt * 0.87;
         // 60 out of reach at the floor and the frames wait for the display: lower gains nothing, hold that frame rate
@@ -231,13 +252,21 @@ static void dyn_update(double now, double game_ms, double win_ms, double lines) 
         // factor; at most 3 refreshes, 20 fps)
         double vsyncs = fmin(floor(avg_dt / (1000 / 60.0) + 0.1), DYN_HOLD_MAX);
         static int votes;  // (two half seconds in a row)
-        bool held_back = g_hold_dt == 0 && at_floor() && avg_gpu > DYN_BUDGET && vsyncs >= 2 && avg_dt >= 1.25 * avg_gpu;
+        bool held_back = g_hold_dt == 0 && at_floor() && avg_gpu > DYN_BUDGET && vsyncs >= 2 && avg_dt >= 1.25 * avg_gpu &&
+                         now - g_probe_start >= 1.5;  // (a probe: the clock comes back up first)
         votes = held_back ? votes + 1 : 0;
         if (held_back && votes >= 2) {
             g_hold_dt = vsyncs * 1000 / 60.0, g_hold_w = W;
             g_floor_g = g_ref_g = G, g_ref_pending = false;
             g_hold_miss = g_hold_up_votes = g_hold_met_votes = 0;
-            if (g_probing) g_probe_wait = fmin(g_probe_wait * 2, 160.0);
+            // a probe that failed, or one met a moment ago that didn't last: wait longer for the next
+            if (g_probing || now - g_probe_ok_at < 30.0) g_probe_wait = fmin(g_probe_wait * 2, DYN_PROBE_MAX);
+            if (g_probing && now - g_probe_start < 5.0) g_probe_fail_gw = G + W, g_probe_fail_at = now;
+            if (g_probing && now - g_probe_start < 5.0 && g_probe_from > g_dyn) {  // (a probe failed: the hold's factor again)
+                LOG("[dynres] 60 fps didn't fit: back to %.2f\n", g_probe_from);
+                g_ref_pending = true;  // (the floor's G as just measured; G's reference at that factor next)
+                g_dyn = g_probe_from;
+            }
             g_probing = false;
             g_probe_at = now + g_probe_wait;
             budget = g_hold_dt * 0.87;
@@ -249,7 +278,9 @@ static void dyn_update(double now, double game_ms, double win_ms, double lines) 
                 LOG("[dynres] game %.1f + window %.1f ms at %.2f (a frame every %.1f ms): 60 fps out of reach, holding %.0f "
                     "fps; the factor goes up while G + W fits %.1f ms\n", G, W, g_dyn, avg_dt, 1000 / g_hold_dt, budget);
         }
-        if (g_probing && g_hold_dt == 0 && avg_gpu <= DYN_BUDGET && avg_dt < 20) g_probing = false, g_probe_wait = 10.0;
+        // a probe met 60: two decisions in a row (one could be the game's own frames before its 30 fps mode ends)
+        g_probe_good = g_probing && g_hold_dt == 0 && avg_gpu <= DYN_BUDGET && avg_dt < 20 ? g_probe_good + 1 : 0;
+        if (g_probe_good >= 2) g_probing = false, g_probe_good = 0, g_probe_ok_at = now, g_probe_wait = 10.0;
     }
     bool slow = gpu ? avg_gpu > budget : avg_dt > 17.4;
     // held, but the frames came slower than the hold's (the display waits one more refresh): over budget too
@@ -262,7 +293,7 @@ static void dyn_update(double now, double game_ms, double win_ms, double lines) 
             if (vs < DYN_HOLD_MAX) {
                 LOG("[dynres] game %.1f + window %.1f ms at %.2f misses the %.0f fps hold's %.1f ms (a frame every %.1f ms): "
                     "holding %.0f fps\n", G, W, g_dyn, 1000 / g_hold_dt, budget, avg_dt, 60.0 / (vs + 1));
-                if (now - g_hold_up_at < 30.0) g_probe_wait = fmin(g_probe_wait * 2, 160.0);  // (the step up didn't hold)
+                if (now - g_hold_up_at < 30.0) g_probe_wait = fmin(g_probe_wait * 2, DYN_PROBE_MAX);  // (the step up didn't hold)
                 g_hold_dt = (vs + 1) * 1000 / 60.0;
                 budget = g_hold_dt * 0.87;
                 g_floor_g = g_ref_g = G, g_ref_pending = false;
