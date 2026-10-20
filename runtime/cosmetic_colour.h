@@ -15,7 +15,7 @@ typedef struct CosColour {
 
 // Which row (Random picks a colour per row, again whenever the row is set to Random)
 enum { COL_SLOT_TUNIC, COL_SLOT_HEARTS, COL_SLOT_HAIR, COL_SLOT_SKIN, COL_SLOT_SHIELD, COL_SLOT_LEAVES, COL_SLOT_GRASS,
-       COL_SLOTS };
+       COL_SLOT_SAND, COL_SLOTS };
 
 extern const char *const g_col_names[N_COL];
 extern const uint32_t g_col_rgb[N_COL];  // the named colours' targets (0 for Default / Random / Custom)

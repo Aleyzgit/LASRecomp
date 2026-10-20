@@ -30,6 +30,9 @@ typedef struct {
 int recolour_identify(const NvnTexture *t, uint64_t total);
 // The class of texpatch id `id` (0: not a recolour texture)
 int recolour_class_of(int id);
+// Of two classes a draw's textures have (0: none), the one to tint with: one whose option is on, and of two on the
+// higher class (e.g. a ground draw blending grass and sand maps: sand's, while the Sand row is set)
+int recolour_pick(int a, int b);
 // The per-draw tint of class `cls` (left untouched when its option is off)
 void recolour_tint(int cls, float tint[8]);
 // Packs a recolour tint: hue moved by `shift` (turns), saturation / value scaled, for colours whose hue lies within

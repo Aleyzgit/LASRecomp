@@ -452,22 +452,27 @@ static void tab_cosmetics(void) {
     opt_colour("Skin color", &g_settings.skin, "Link's skin color.");
     opt_colour("Shield color", &g_settings.shield, "The color of Link's shield.");
     opt_section("Overworld");
-    {   // Season: fills Leaves and Grass at once (palette indices: Orange 2, Gold 3, Pink 9, White 10); "Mixed" when
+    {   // Season: fills Leaves, Grass and Sand at once (palette: Orange 2, Gold 3, Pink 9, White 10); "Mixed" when
         // they match none
         static const char *const names[] = {"Spring", "Autumn", "Winter", "Cherry blossom", "Mixed"};
-        static const int preset[4][2] = {{COL_DEFAULT, COL_DEFAULT}, {2, 3}, {10, 10}, {9, COL_DEFAULT}};
+        static const int preset[4][3] = {{COL_DEFAULT, COL_DEFAULT, COL_DEFAULT}, {2, 3, 3}, {10, 10, 10},
+                                         {9, COL_DEFAULT, COL_DEFAULT}};
         int cur = 4;
         for (int i = 0; i < 4; i++)
-            if (g_settings.leaves.pick == preset[i][0] && g_settings.grass.pick == preset[i][1]) cur = i;
+            if (g_settings.leaves.pick == preset[i][0] && g_settings.grass.pick == preset[i][1] &&
+                g_settings.sand.pick == preset[i][2])
+                cur = i;
         int v = cur;
-        if (opt_choice("Season", &v, names, 5, 0, "Sets the leaves and grass colors below.") && v != cur) {
+        if (opt_choice("Season", &v, names, 5, 0, "Sets the leaves, grass and sand colors below.") && v != cur) {
             if (v == 4) v = cur == 0 ? 3 : 0;  // (Mixed is never chosen: past the ends, back round)
             g_settings.leaves.pick = preset[v][0];
             g_settings.grass.pick = preset[v][1];
+            g_settings.sand.pick = preset[v][2];
         }
     }
     opt_colour("Leaves color", &g_settings.leaves, "The overworld's tree leaves and bushes.");
     opt_colour("Grass color", &g_settings.grass, "The overworld's grass.");
+    opt_colour("Sand color", &g_settings.sand, "The beaches, the desert and the sandy south.");
     opt_section("Enemies");
     opt_choice("Enemy colors", &g_settings.enemy_colours, g_enemy_colour_modes, N_ENEMY_COLOUR_MODES, 0,
                "Each kind of enemy in another color. Enemies whose color shows their strength or type keep theirs.");

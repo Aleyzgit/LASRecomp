@@ -1817,7 +1817,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
                     }
                 }
                 if (!draw_heart) draw_heart = texpatch_heart_kind(id);
-                if (!draw_recolour) draw_recolour = recolour_class_of(id);
+                draw_recolour = recolour_pick(draw_recolour, recolour_class_of(id));
                 draw_item_cursor |= texpatch_is_item_cursor(id);
             }
             if (e->tex && i < 64) {

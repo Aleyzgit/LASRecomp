@@ -179,6 +179,21 @@ int recolour_class_of(int id) {
     return g_cr[id - TEXPATCH_RECOLOUR_BASE].cls;
 }
 
+static bool active(int cls) {
+    float t[8] = {0};
+    for (int k = 0; g_options[k]; k++)
+        if (cls >= g_options[k]->cls_lo && cls <= g_options[k]->cls_hi) return g_options[k]->tint(cls, t);
+    return false;
+}
+
+int recolour_pick(int a, int b) {
+    if (!a || a == b) return b ? b : a;
+    if (!b) return a;
+    bool aa = active(a), bb = active(b);
+    if (aa != bb) return aa ? a : b;
+    return a > b ? a : b;
+}
+
 void recolour_tint(int cls, float tint[8]) {
     for (int k = 0; g_options[k]; k++)
         if (cls >= g_options[k]->cls_lo && cls <= g_options[k]->cls_hi) {

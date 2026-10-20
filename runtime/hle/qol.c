@@ -215,7 +215,7 @@ static bool apply_tilt(int removed) {  // false: not set up yet (or not the name
 
 // LARECOMP_SETTING_AT="frame:key=value,..." (test): flip an in-game menu toggle at that presented frame, as the menu
 // would (move_360, blur_removal, dpad_move: 0 / 1; Cosmetics colour rows: a palette name or #RRGGBB - tunic, hearts,
-// hair, shield, skin, leaves, grass; enemy_colours: 0 / 1 / 2; screen_filter: 0-3).
+// hair, shield, skin, leaves, grass, sand; enemy_colours: 0 / 1 / 2; screen_filter: 0-3).
 static void setting_at_tick(void) {
     static const char *spec;
     static int init;
@@ -240,7 +240,7 @@ static void setting_at_tick(void) {
         CosColour *c = !strcmp(key, "tunic") ? &g_settings.tunic : !strcmp(key, "hearts") ? &g_settings.hearts :
                        !strcmp(key, "hair") ? &g_settings.hair : !strcmp(key, "shield") ? &g_settings.shield :
                        !strcmp(key, "skin") ? &g_settings.skin : !strcmp(key, "leaves") ? &g_settings.leaves :
-                       !strcmp(key, "grass") ? &g_settings.grass : NULL;
+                       !strcmp(key, "grass") ? &g_settings.grass : !strcmp(key, "sand") ? &g_settings.sand : NULL;
         if (c) { col_parse(c, val); LOG("[qol] test: f%llu %s = %s\n", (unsigned long long)now, key, val); }
     }
     last = now;

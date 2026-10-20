@@ -4230,10 +4230,10 @@ static void draw_(CmdRec *r, bool indexed) {
     float tint[8] = {0};
     int recol = 0;  // a Cosmetics recolour texture's class (runtime/nvn/recolour.c)
     if (pr->fi->uses_tint) {
-        for (int i = 0; i < pr->fi->ntex && !recol; i++) {
+        for (int i = 0; i < pr->fi->ntex; i++) {
             NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
             const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
-            if (b && b->tp > 0) recol = recolour_class_of(b->tp - 1);
+            if (b && b->tp > 0) recol = recolour_pick(recol, recolour_class_of(b->tp - 1));
         }
         if (recol) recolour_tint(recol, tint);  // (the highlights below win)
         extern bool pot_tint(const float *m, float tint[8], uint64_t mesh);
