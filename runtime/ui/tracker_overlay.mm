@@ -1,20 +1,21 @@
 // Check tracker for randomizer seeds: it takes over the pause menu's Map page (tools/patches.py MAP_PAGE_SITE). The
-// game's island art, zoom / scroll, explored fog and Link marker stay; the game's own side panel and cursor are hidden
-// (map_page_takeover) and our layer drives the page:
-//   badges   one per Field screen: the number of open checks, coloured by the best of them - green in logic now,
-//            amber needs an item, purple trick logic only, grey all collected; one icon per dungeon (found / total) at
-//            the overworld door that leads into it (dungeon entrance shuffle), labelled by the dungeon reached there.
-//            Dungeon room shuffle: a moved room's checks count for the dungeon it sits in now (tools/rando/tracker.py)
-//   filters  a bar along the top: "In logic now", "Hide checked" and one toggle per kind of check in the seed
-//            (chests, heart pieces, seashells, souls, shops, other on; bushes, digs, pots off). Filters only hide
-//            badges, never a check from a screen's own list. Saved in larecomp.ini (tracker_filters)
-//   cursor   the d-pad / stick snaps to the nearest badge in that direction (empty screens have none); A opens the
-//            screen panel (every check: open now / trick logic / "needs X" - the cheapest way: fewest missing items -
-//            / collected, struck out at the bottom), B goes back; Y (or up from the top row) reaches the filters.
-//            The mouse works too (hover, click, wheel, right click = back)
-//   input    while it drives, the left stick / d-pad, A and Y never reach the game, B neither while a panel or the
-//            filter bar is open (runtime/hle/input.c -> tracker_map_input); the right stick still zooms / scrolls the
-//            game's map. Outside rando (or with the tracker off) the Map page is vanilla
+// game's island art, zoom / scroll, explored fog, place names and Link marker stay; the game's own cursor and button
+// bar are hidden (map_page_takeover) and our layer drives the page:
+//   bullets  one small numbered bullet beside each of the game's place names ("Mabe Village"...): the area's open
+//            checks under the filters, coloured by the best of them - green in logic now, purple trick logic only,
+//            amber needs an item. A Field screen counts for the nearest place name; interiors count at their door.
+//            One icon per dungeon (found / total) at the overworld door that leads into it (dungeon entrance shuffle),
+//            labelled by the dungeon reached there; room shuffle: a moved room's checks count for the dungeon it sits
+//            in now (tools/rando/tracker.py)
+//   list     A on a bullet: the area's checks in one list by status (open in logic, needs an item with the cheapest
+//            missing items, trick logic, collected struck out); A on a row shows that check's spot, B goes back
+//   filters  "In logic now" (on by default), "Hide checked" and one toggle per kind of check in the seed. Filters only
+//            change the bullets, never a list. Game-styled, two layouts to compare: a line in the game's button row
+//            with a filter panel on Y (default), or a slim panel beside the parchment (LARECOMP_TRACKER_LAYOUT=side)
+//   input    while it drives, the left stick / d-pad, A and Y never reach the game, B neither while a list, a shown
+//            spot or the filters are up (runtime/hle/input.c -> tracker_map_input); the right stick still zooms /
+//            scrolls the game's map; ZR hands the page back to the game's own map (warp points, pins). The mouse
+//            works too. Outside rando (or with the tracker off) the Map page is vanilla
 // Never shows what a check holds. Data: rando/<seed>/tracker.tsv (tools/rando/tracker.py). Reachability = LAS's
 // fixpoint over its logic nodes from the live save's inventory (followers count once their location is reachable).
 #include "../game_addresses.h"
@@ -31,6 +32,7 @@
 #include <vector>
 
 #include "imgui.h"
+#include <SDL3/SDL_timer.h>
 
 extern "C" {
 #include "../hle.h"
@@ -540,9 +542,7 @@ static std::string item_name(int id, int cnt) {
     if (cnt > 1) {
         if (t == "sword" || t == "bracelet") return s + " L2";
         if (t == "shield") return "Mirror Shield";
-        char b[16];
-        snprintf(b, sizeof b, " x%d", cnt);
-        s += b;
+        return std::to_string(cnt) + " " + s;  // (5 Seashells, 3 D4 Small Keys)
     }
     return s;
 }
@@ -741,7 +741,7 @@ static void cycle_test(uint64_t obj) {
                     bool ok = false;
                     for (int k = 0; k < nr && !ok; k++) ok = p >= ra[k] && p + 0x800 > p && p + 0x800 <= ra[k] + rs[k];
                     if (!ok || !seen.emplace(p, 1).second) continue;
-                    if (!strcmp((const char *)(uintptr_t)(p + 0xB0), names[i])) hits.push_back(p);
+                    if (!strcmp((const char *)(uintptr_t)(p + 0xB0), names[i])) hits.push_back(p), LOG("[tracker] cycle: %s at depth %d (%zu seen)\n", names[i], d, seen.size());
                     next.push_back(p);
                 }
         }
@@ -763,12 +763,14 @@ static void map_page_takeover(uint64_t obj) {
     for (int k = 0; k < NPANES; k++) missing |= !g_pane[k];
     missing |= g_brackets.size() < 3;
     // (a new page object: find its panes; parts of the page are built after it opens, so look again a few times)
-    if (on && (g_panes_for != obj || (missing && tries < 12 && now - tried_at >= 20))) {
+    if (on && (g_panes_for != obj || (missing && tries < 8 && now - tried_at >= 60))) {
         pane_names();
         if (g_panes_for != obj)
             memset(g_pane, 0, sizeof g_pane), memset(g_hidden, 0, sizeof g_hidden), g_brackets.clear(), g_brackets_hidden.clear();
+        uint64_t t0 = SDL_GetTicksNS();
         find_panes(obj);
         g_panes_for = obj, tries++, tried_at = now;
+        LOG("[tracker] pane search %.1f ms\n", (SDL_GetTicksNS() - t0) / 1e6);
         int labels = 0;
         for (int k = PANE_LABEL0; k < NPANES; k++) labels += g_pane[k] != 0;
         LOG("[tracker] map page %llx: cursor %llx, button bar %llx, %d place names, %zu brackets (try %d)\n",
@@ -1418,7 +1420,7 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
             snprintf(sub, sizeof sub, "%d / %d collected", done, (int)rows.size());
             snprintf(filt, sizeof filt, "Filter: %s", filter_word);
             ui.panel_row = std::max(0, std::min(ui.panel_row, (int)rows.size() - 1));
-            dl->AddRectFilled(ImVec2(clip.x, clip.y), ImVec2(clip.z, clip.w), IM_COL32(40, 25, 5, 110));  // (the map, dimmed)
+            dl->AddRectFilled(ImVec2(ox + 187 * u, oy + 123 * u), ImVec2(ox + 1096 * u, oy + 630 * u), IM_COL32(40, 25, 5, 110), 6 * u);  // (the map, dimmed)
             ImVec2 a(ox + 260 * u, oy + 120 * u), z(ox + 1020 * u, oy + 636 * u);
             dl->AddRectFilled(ImVec2(a.x + 4 * u, a.y + 6 * u), ImVec2(z.x + 4 * u, z.y + 6 * u), IM_COL32(0, 0, 0, 80), 16 * u);
             dl->AddRectFilled(ImVec2(a.x - 3 * u, a.y - 3 * u), ImVec2(z.x + 3 * u, z.y + 3 * u), IM_COL32(0x4A, 0x30, 0x20, 255), 18 * u);
