@@ -11,7 +11,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parent.parent
 plat = 'windows' if os.name == 'nt' else 'macos' if sys.platform == 'darwin' else 'linux'
 flags = []
-if shutil.which('pkg-config') and subprocess.run(['pkg-config', '--exists', 'sdl3']).returncode == 0:
+deps = os.environ.get('DEPS')  # (a prefix with SDL3, as for make DEPS=)
+if deps:
+    flags = [f'-I{deps}/include', f'-L{deps}/lib', f'-Wl,-rpath,{deps}/lib', '-lSDL3']
+elif shutil.which('pkg-config') and subprocess.run(['pkg-config', '--exists', 'sdl3']).returncode == 0:
     flags = shlex.split(subprocess.run(['pkg-config', '--cflags', '--libs', 'sdl3'], capture_output=True, text=True,
                                        check=True).stdout)
 elif sys.platform == 'darwin':
@@ -28,4 +31,7 @@ with tempfile.TemporaryDirectory() as directory:
                     'tools/test_delete_guard.c', '-o', str(exe)] + flags + extra, cwd=ROOT, check=True)
     scratch = directory / 'scratch'
     scratch.mkdir()
-    subprocess.run([str(exe), str(scratch)], check=True)
+    run = subprocess.run([str(exe), str(scratch)], capture_output=True, text=True)
+    print(run.stderr + run.stdout, end='')
+    assert run.returncode == 0 and 'all checks passed' in run.stdout, f'{plat}: delete guard test failed'
+    print(f'{plat}: links and folders outside the data root are never deleted through')
