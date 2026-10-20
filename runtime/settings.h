@@ -82,6 +82,7 @@ typedef struct {
     bool livesplit;        // drive LiveSplit (its Server component) over TCP: start, splits, game time
     char livesplit_host[64];  // host:port of the LiveSplit Server ("localhost:16834")
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
+    char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
 } Settings;
 
 

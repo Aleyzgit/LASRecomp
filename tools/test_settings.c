@@ -54,6 +54,12 @@ int main(int argc, char **argv) {
         settings_save();
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "rando-options")) {  // the New seed options (an opaque seed ID), kept as saved
+        settings_load();
+        assert(!strcmp(g_settings.rando_options, argv[2]));
+        settings_save();
+        return 0;
+    }
     assert(argc == 3);
     settings_load();
     assert(!g_settings.upscaler_auto);

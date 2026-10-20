@@ -70,4 +70,14 @@ with tempfile.TemporaryDirectory() as directory:
     for line in ['tunic = Gold', 'hearts = Pink', 'hair = #12AB34', 'shield = Default', 'skin = Random']:
         assert line + '\n' in saved, (line, saved)
     count += 1
+    # the Randomizer tab's New seed options: an older file without the key stays without it (the defaults)
+    for lines, value in [(['rando_options = 50000-00004-20000-40G20-04000-0G11R', 'rando_seed = X'],
+                          '50000-00004-20000-40G20-04000-0G11R'), (['rando_seed = X'], '')]:
+        ini = directory / 'test.ini'
+        ini.write_text('\n'.join(lines) + '\n')
+        subprocess.run([str(exe), 'rando-options', value], env=dict(os.environ, LARECOMP_SETTINGS=str(ini)), check=True,
+                       capture_output=True)
+        saved = ini.read_text()
+        assert (f'rando_options = {value}\n' in saved) if value else 'rando_options' not in saved, saved
+        count += 1
     print(f'{count} parser, locale, upscaler / resolution default and roundtrip cases passed (LF/CRLF, empty/nonempty seeds)')
