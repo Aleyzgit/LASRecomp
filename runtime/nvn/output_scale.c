@@ -129,6 +129,36 @@ static void dyn_set_floor(double lines) {
     else g_dyn = dyn_grid(g_dyn);
 }
 
+// The window's size changed (fullscreen <-> windowed, a resize): every scalable target is reallocated and what was
+// measured belongs to the old size. The factor keeps the render height (to the nearest step), so the game's part of
+// the GPU time stays about the same. Before, the factor stayed as it was: a window made larger missed 60 until the
+// slow frames stepped it down, one made smaller sat blurry until a raise, and a hold (30 fps on an integrated GPU)
+// ended because the window step's time changed, so the factor went down to the floor and climbed back over the next
+// seconds - the image changed sharpness for a while after every switch (issue #205). A hold now keeps its frame rate
+// (its floor's G scaled to the new floor, the window step measured again, a probe for 60 fps a probe wait away); the
+// votes start over, the raise wait is back at its first 5 s, and the next decision comes 1 s after the change, from
+// frames at the new size only (a window dragged to size: none until it stops).
+static void dyn_window_changed(double now, double from, double to) {
+    double prev = g_dyn, prev_floor_lines = g_dyn_floor * from;
+    dyn_set_floor(to);
+    g_dyn = dyn_grid(prev * from / to);
+    if (g_hold_dt > 0) {
+        double r = g_dyn_floor * to / prev_floor_lines;
+        g_floor_g *= r * r;
+        g_ref_pending = true;  // (G's reference at the new size: the first decision there)
+        g_hold_w = -1;         // (the window step's time at the new size: the first decision there)
+        g_hold_miss = g_hold_up_votes = g_hold_met_votes = 0;
+        g_probe_at = fmax(g_probe_at, now + g_probe_wait);  // (a probe for 60: once the hold has measured the new size)
+    }
+    g_down_hist = 0, g_down_fast_votes = 0, g_dyn_good = 0, g_prev_G = -1;
+    memset(g_down_gw, 0, sizeof g_down_gw);
+    g_dyn_raise_wait = DYN_RAISE_WAIT, g_dyn_raise_at = now + DYN_RAISE_WAIT, g_dyn_last_raise = g_dyn_last_lower = -100;
+    g_dyn_cool_until = now + 1.0;
+    g_dyn_n = g_dyn_gpu_n = 0, g_dyn_gpu_sum = g_dyn_win_sum = 0;
+    LOG("[dynres] window %.0f -> %.0f lines: %.2f -> %.2f (render height %.0f -> %.0f)%s\n", from, to, prev, g_dyn, prev * from,
+        g_dyn * to, g_hold_dt > 0 ? ", the hold goes on" : "");
+}
+
 static DynSplit g_split;  // sums since the last decision
 static int g_split_n;
 void output_scale_note_split(const DynSplit *d) {
@@ -156,6 +186,9 @@ static void dyn_update(double now, double game_ms, double win_ms, double lines) 
     static int no_gpu = -1;
     if (no_gpu < 0) no_gpu = getenv("LARECOMP_DYN_NO_GPU") && atoi(getenv("LARECOMP_DYN_NO_GPU"));
     if (no_gpu) game_ms = -1;
+    static double prev_lines;
+    if (prev_lines > 0 && fabs(lines - prev_lines) > 0.5) dyn_window_changed(now, prev_lines, lines);
+    prev_lines = lines;
     dyn_set_floor(lines);
     static int start = -1;  // LARECOMP_DYN_START=<f>: Dynamic starts at factor f (tests: climbing back from the floor)
     if (start < 0) {
@@ -190,7 +223,8 @@ static void dyn_update(double now, double game_ms, double win_ms, double lines) 
     double budget = DYN_BUDGET;
     bool hold_up = false;  // (20 -> 30 fps this time: the factor was set to fit it already)
     if (gpu) {
-        if (g_hold_dt > 0 && fabs(W - g_hold_w) > fmax(1.0, 0.25 * g_hold_w)) {  // another upscaler / AA / window size
+        if (g_hold_dt > 0 && g_hold_w < 0) g_hold_w = W;  // (the window's size changed: its step's time there)
+        else if (g_hold_dt > 0 && fabs(W - g_hold_w) > fmax(1.0, 0.25 * g_hold_w)) {  // another upscaler / AA
             LOG("[dynres] window step %.1f -> %.1f ms: hold at %.0f fps ended\n", g_hold_w, W, 1000 / g_hold_dt);
             g_hold_dt = 0, g_probing = false, g_probe_wait = 10.0, g_hold_miss = g_hold_up_votes = g_hold_met_votes = 0;
         }
