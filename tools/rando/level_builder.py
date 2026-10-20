@@ -331,6 +331,10 @@ def fog_actors(template, kind, cell, side, slot, how, room_id):
     else:
         n = max(1, int(round(width / 3.0)))
         offs = [(i - (n - 1) / 2.0) * width / n for i in range(n)]
+        if kind.startswith('tailor:') and kind.count(':') == 2:  # 'tailor:<entry>:<n>': a veil of n emitters spread
+            # along the doorway (90% of its width), standing just past its edge (alternately 0.25 / 0.85 out)
+            n = max(1, min(8, int(kind.rsplit(':', 1)[1])))
+            offs = [0.0] if n == 1 else [(i / (n - 1) - 0.5) * width * 0.9 for i in range(n)]
     out = []
     for i, o in enumerate(offs):
         a = copy.deepcopy(template)
@@ -346,14 +350,15 @@ def fog_actors(template, kind, cell, side, slot, how, room_id):
             a.type = MAPFIXTURE
             a.parameters = [CLOUD_MODEL.encode(), 0, b'', b'', b'', b'', b'', b'']
         else:
-            a.posX, a.posY, a.posZ = px + 0.75 * ix, 0.0, pz + 0.75 * iz
+            d = 0.75 if kind.count(':') < 2 else -(0.25 + 0.6 * (i % 2))  # (into the room / past the edge)
+            a.posX, a.posY, a.posZ = px + d * ix, 0.0, pz + d * iz
             a.scaleX = a.scaleY = a.scaleZ = 1.0
             if kind == 'woods':
                 a.type = WOODS_FOG
                 a.parameters = [b'', b'', b'', b'', b'', b'', b'', b'']
             else:
                 a.type = TAILOR
-                a.parameters = [kind.split(':', 1)[1].encode(), 0, b'', b'', b'', b'', b'', b'']
+                a.parameters = [kind.split(':')[1].encode(), 0, b'', b'', b'', b'', b'', b'']
         a.roomID = room_id
         a.key = (FOG_KEY_TAG << 56) | (row << 24) | (col << 16) | (ord(side) << 8) | ((_slot_id(slot) << 3 | i) & 0xFF)
         prefix = {MAPFIXTURE: b'MapFixture', TAILOR: b'TagTailorPla', WOODS_FOG: b'TagMysteriou'}[a.type]
@@ -375,7 +380,7 @@ def add_passage_fog(romfs, out, cat, level, layout, rows, kind):
     files are the seed's (out); the cloud model's file is copied from the player's game files. Returns the number
     of passages."""
     from RandomizerCore.Tools import leb
-    if not (kind in ('woods', 'cloud') or kind.startswith('tailor:')):
+    if not (kind in ('woods', 'cloud') or kind.startswith('tailor:')):  # (tailor:<entry>[:<emitters>])
         return 0
     if kind == 'cloud':
         dst = os.path.join(out, 'region_common', 'map', CLOUD_MODEL + '.bfres')
