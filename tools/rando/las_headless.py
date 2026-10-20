@@ -122,7 +122,7 @@ def stage(label, frac):
     print(f'stage {frac:.3f} {label}', flush=True)
 
 
-def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps):
+def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps, lab=None):
     """Dungeon room shuffle (Coherent / Chaos, tools/rando/dungeon_gen.py) on top of the seed: the generator reads
     rooms from an overlay romfs where the seed's own room files (LAS chests, pots, bushes, entrances) replace the
     game's - as copies, since it writes the seed's rooms while still reading others."""
@@ -169,7 +169,7 @@ def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps):
                 os.remove(os.path.join(dst, f))
             shutil.copyfile(os.path.join(seed_lv, f), os.path.join(dst, f))
     try:
-        dungeon_gen.write_all(overlay, out_romfs, layouts, jumps)  # (jumps None: Coherent)
+        dungeon_gen.write_all(overlay, out_romfs, layouts, jumps, lab=lab)  # (jumps None: Coherent)
     finally:
         shutil.rmtree(overlay, ignore_errors=True)
     return f"{mode}, {len(layouts)} dungeons, {sum(sum(1 for k, v in L.items() if k != v) for L in layouts.values())} rooms moved"
@@ -404,7 +404,7 @@ def main():
             layouts = None
         if layouts is None:
             raise RuntimeError('no dungeon room layout for this seed')
-        room_plan = (layouts, jumps)
+        room_plan = (layouts, jumps, lab_info)
         if lab_info:  # (the doors' arrivals, the cross-wing links, statistics: read by stage 2 and seed_sweep.py)
             lab_info['planning-attempts'] = attempt + 1
             lab_info.update({'small-keys': item_defs['key-D1']['quantity'], 'spare-keys': room_logic.SPARE_KEYS,

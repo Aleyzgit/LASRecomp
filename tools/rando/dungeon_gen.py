@@ -1255,8 +1255,9 @@ LINKS_HEADER = ('# Labyrinth doorways into another level (tools/rando/labyrinth.
                 'partner centre, target cell, target side, landing depth, landing height, target level\n')
 
 
-def write_all(romfs, out, layouts, jumps=None):
-    """Writes every generated dungeon; global flags numbered across all of them, one door_jumps.tsv."""
+def write_all(romfs, out, layouts, jumps=None, lab=None):
+    """Writes every generated dungeon; global flags numbered across all of them, one door_jumps.tsv. lab: the
+    Labyrinth's info (labyrinth.json; tools/rando/labyrinth.py): its arrival start points, overworld doors, tower exit."""
     jumps_path = os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv')
     open(jumps_path, 'w').close()
     if jumps is not None:  # Chaos: discovered doorway pairs are event flags 3800+ (runtime/hle/flags_ext.c)
@@ -1271,9 +1272,16 @@ def write_all(romfs, out, layouts, jumps=None):
         used = [int(v['index']) for v in oead_tools.readSheet(sheet_path)['values']]
         start = max([start] + [u + 1 for u in used if u < 3800])  # (bushsanity's flags are 2048+ too)
     shared = FlagMap(next_global=start)
+    extra = {}
+    if lab:
+        import labyrinth
+        extra = labyrinth.starts(lab, jumps or ())
     for lv, L in layouts.items():  # (Labyrinth rows to another level: labyrinth_links.tsv below, never door_jumps.tsv)
         write(romfs, out, lv, L, ENTRANCES[lv], shared_flags=shared,
-              jumps=None if jumps is None else [j for j in jumps if j[0] == lv and not is_cross(j)])
+              jumps=None if jumps is None else [j for j in jumps if j[0] == lv and not is_cross(j)],
+              extra_starts=extra.get(lv))
+    if lab:
+        labyrinth.write_doors(romfs, out, lab, jumps or ())
     cross = [j for j in jumps or () if is_cross(j)]
     if cross:  # Labyrinth (tools/rando/labyrinth.py): doorways leading into another dungeon's level
         with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'labyrinth_links.tsv'), 'w') as f:
@@ -1306,7 +1314,8 @@ def write_all(romfs, out, layouts, jumps=None):
             f.write('dungeon generator: event flags up to %d\n' % shared.next_g)
 
 
-def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False, shared_flags=None, jumps=None):
+def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False, shared_flags=None, jumps=None,
+          extra_starts=None):
     rooms_list = []
     # camera zones use the target dungeon's own zone record (environment / lighting set / music): a zone naming
     # another dungeon's environment (e.g. 'Lv10Base') isn't loaded in this level and the load throws
@@ -1384,6 +1393,7 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
         rc = cell.rsplit('_', 1)[1]
         x0, z0 = (ord(rc[2]) - ord('A')) * 15.0, (int(rc[:2]) - 1) * 12.0
         starts.setdefault(cell, (x0 + 7.5, 0.0, z0 + 6.0, 0.0))
+    starts.update(extra_starts or {})  # (Labyrinth: arrivals at doorways, tools/rando/labyrinth.py starts)
     lvb = level_builder.build(base, rooms_list, starts=None if all_starts else starts, static=False)
     p = os.path.join(out, 'region_common', 'level', level, level + '.lvb')
     os.makedirs(os.path.dirname(p), exist_ok=True)

@@ -256,6 +256,114 @@ def pick_arrivals(cat, layouts, rng, romfs):
     return out
 
 
+# ---------------------------------------------------------------- game files (stage 2: runtime/hle/labyrinth.c)
+# the overworld dungeon doors (LAS data.DUNGEON_ENTRANCES): door region -> (Field room, the level its door opens)
+DOORS = {'tail-cave': ('Field_14D', 'Lv01TailCave'), 'bottle-grotto': ('Field_03E', 'Lv02BottleGrotto'),
+         'key-cavern': ('Field_12F', 'Lv03KeyCavern'), 'angler-tunnel': ('Field_03L', 'Lv04AnglersTunnel'),
+         'catfish-maw': ('Field_14J', 'Lv05CatfishsMaw'), 'face-shrine': ('Field_09M', 'Lv06FaceShrine'),
+         'turtle-rock': ('Field_02A', 'Lv08TurtleRock'), 'color-dungeon': ('Field_08H', 'Lv10ClothesDungeon')}
+# the Field start outside each door (where its dungeon's way out arrives: LAS data.DUNGEON_ENTRANCES)
+OUTSIDE = {'tail-cave': 'Field_14D', 'bottle-grotto': 'Field_03E', 'key-cavern': 'Field_12F',
+           'angler-tunnel': 'Field_03L_a', 'catfish-maw': 'Field_14J_b', 'face-shrine': 'Field_09M',
+           'eagle-tower': 'Field_01O', 'turtle-rock': 'Field_02A', 'color-dungeon': 'Field_08H'}
+# each wing's own entrance start (where its overworld door arrives in the game)
+ENTRANCE_START = {'Lv01TailCave': 'Lv01TailCave_08D', 'Lv02BottleGrotto': 'Lv02BottleGrotto_08C',
+                  'Lv03KeyCavern': 'Lv03KeyCavern_08B', 'Lv04AnglersTunnel': 'Lv04AnglersTunnel_08D',
+                  'Lv05CatfishsMaw': 'Lv05CatfishsMaw_08H', 'Lv06FaceShrine': 'Lv06FaceShrine_08D',
+                  'Lv07EagleTower': ET_START, 'Lv08TurtleRock': 'Lv08TurtleRock_08D_b',
+                  'Lv10ClothesDungeon': 'Lv10ClothesDungeon_08C'}
+# Link faces into the room he arrives in: a start's 4th value (tested 2026-10-20: only its sign counts - > 0 east,
+# < 0 west, 0 north; no value faces south, so a north doorway's arrival faces the doorway)
+FACING = {'N': 0.0, 'S': 0.0, 'W': 2.0, 'E': -2.0}
+
+
+def start_name(cell, side, slot):
+    """The start point at a doorway's landing spot: 'LabIn_<cell><side><slot>' (cell: '08C')."""
+    return f'LabIn_{cell}{side}{slot}'
+
+
+def landing(cell, side, slot, depth, height):
+    """(x, y, z, facing) just inside a doorway (as runtime/hle/doorjump.c lands a jump): depth from the room edge,
+    on the landing floor (height; < -90: the floor at 0)."""
+    x0, z0 = (ord(cell[2]) - ord('A')) * 15.0, (int(cell[:2]) - 1) * 12.0
+    along = int(slot) * 0.75
+    x, z = {'N': (x0 + along, z0 + depth), 'S': (x0 + along, z0 + 12.0 - depth),
+            'W': (x0 + depth, z0 + along), 'E': (x0 + 15.0 - depth, z0 + along)}[side]
+    return (x, height if height > -90 else 0.0, z, FACING[side])
+
+
+def starts(info, rows):
+    """{level: {start name: (x, y, z, facing)}}: a start at every doorway a level load arrives at - the target of
+    every row into another level (but Eagle's Tower's: ET_START) and every overworld door's arrival."""
+    out = {}
+    for r in rows:
+        if len(r) > 9 and r[9] != r[0] and r[9] != ET:
+            out.setdefault(r[9], {})[start_name(r[5], r[6], r[4])] = landing(r[5], r[6], r[4], float(r[7]), float(r[8]))
+    for region, a in (info.get('arrivals') or {}).items():
+        lv, cell, side, slot, depth, height, st = a
+        if st != 'entrance':
+            out.setdefault(lv, {})[st] = landing(cell, side, slot, depth, height)
+    return out
+
+
+def arrival_start(a):
+    """(level, start name, start mode) an arrival (labyrinth.json arrivals) puts Link at."""
+    lv, cell, side, slot, depth, height, st = a
+    if st == 'entrance':
+        return lv, ENTRANCE_START[lv], 'LevelDungeonIn'
+    return lv, st, ''
+
+
+def _start_pos(romfs, level, name):
+    import struct
+    import fixedhash
+    fh = fixedhash.FixedHash(open(os.path.join(romfs, 'region_common', 'level', level, level + '.lvb'), 'rb').read())
+    e = next(e for e in fh.get(b'tagPlayerStart').data.entries if e.name.decode() == name)
+    return struct.unpack_from('<4f', e.data, 0)
+
+
+def write_doors(romfs, out, info, rows):
+    """The overworld dungeon doors lead to their arrivals (their Field rooms' AreaLevelOpen), and Eagle's Tower's way
+    out (08B, 'DungeonOut') to the doorway its row links to. romfs: what to read (the seed's own files first)."""
+    import sys
+    sys.path.insert(0, os.path.join(HERE, '..', '..', 'third_party', 'LAS-Randomizer'))
+    from RandomizerCore.Tools import leb
+
+    def edit(level, room, match, target):
+        src = os.path.join(romfs, 'region_common', 'level', level, room + '.leb')
+        dst = os.path.join(out, 'region_common', 'level', level, room + '.leb')
+        r = leb.Room(open(dst if os.path.exists(dst) else src, 'rb').read())
+        hit = [a for a in r.actors if a.type == 0x190 and match(a)]
+        if len(hit) != 1:
+            raise RuntimeError(f'labyrinth: {room}: {len(hit)} matching level doors')
+        a = hit[0]
+        a.parameters[0], a.parameters[1], a.parameters[2] = (x.encode() for x in target)
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        open(dst, 'wb').write(r.repack())
+    n = 0
+    doors = []  # (labyrinth_doors.tsv: which door Link came in by - runtime/hle/labyrinth.c, the Escape Bottle)
+    for region, a in sorted((info.get('arrivals') or {}).items()):
+        room, lv = DOORS[region]
+        edit('Field', room, lambda x, lv=lv: x.parameters[0] == lv.encode(), arrival_start(a))
+        n += 1
+        lv2, st, _ = arrival_start(a)
+        x, _, z, _ = landing(*a[1:6]) if a[6] != 'entrance' else _start_pos(romfs, lv2, st)
+        doors.append((region, OUTSIDE[region], lv2, st, x, z))
+    x, _, z, _ = _start_pos(romfs, ET, ET_START)
+    doors.append(('eagle-tower', OUTSIDE['eagle-tower'], ET, ET_START, x, z))
+    with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'labyrinth_doors.tsv'), 'w') as f:
+        f.write('# Labyrinth overworld doors (tools/rando/labyrinth.py): door, Field start outside it, level and start '
+                'it leads to, x, z\n')
+        for d in doors:
+            f.write('%s\t%s\t%s\t%s\t%g\t%g\n' % d)
+    out_row = next((r for r in rows if r[0] == ET and len(r) > 9), None)
+    if out_row:
+        edit(ET, ET_CELL, lambda x: x.parameters[2] == b'DungeonOut',
+             (out_row[9], start_name(out_row[5], out_row[6], out_row[4]), ''))
+        n += 1
+    return n
+
+
 # ---------------------------------------------------------------- the plan
 def plan(cat, seed, romfs, mode, settings=None, et_locks=0, rounds=None):
     """-> ({level: layout}, rows, info): the wings' layouts (dungeon_gen names: {'Lv01TailCave_08D': room}), every
