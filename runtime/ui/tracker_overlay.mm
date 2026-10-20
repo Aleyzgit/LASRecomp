@@ -698,7 +698,7 @@ static void find_panes(uint64_t obj) {
     std::vector<uint64_t> cur{obj}, next;
     std::unordered_map<uint64_t, char> seen;
     seen[obj] = 1;
-    for (int depth = 0; depth < 7 && !cur.empty() && seen.size() < 60000; depth++) {
+    for (int depth = 0; depth < 7 && !cur.empty() && seen.size() < 200000; depth++) {
         next.clear();
         for (uint64_t o : cur)
             for (uint32_t off = 0; off < 0x800; off += 8) {
@@ -752,7 +752,7 @@ static void cycle_test(uint64_t obj) {
         int nr = kernel_data_regions(ra, rs, 256);
         std::vector<uint64_t> cur{obj}, next;
         std::unordered_map<uint64_t, char> seen;
-        for (int d = 0; d < 7 && !cur.empty() && seen.size() < 60000; d++, cur.swap(next)) {
+        for (int d = 0; d < 7 && !cur.empty() && seen.size() < 200000; d++, cur.swap(next)) {
             next.clear();
             for (uint64_t o : cur)
                 for (uint32_t off = 0; off < 0x800; off += 8) {
@@ -848,7 +848,7 @@ static void dgn_find(uint64_t obj) {
     std::vector<uint64_t> cur{obj}, next;
     std::unordered_map<uint64_t, char> seen;
     seen[obj] = 1;
-    for (int depth = 0; depth < 7 && !cur.empty() && seen.size() < 60000; depth++) {
+    for (int depth = 0; depth < 7 && !cur.empty() && seen.size() < 200000; depth++) {
         next.clear();
         for (uint64_t o : cur)
             for (uint32_t off = 0; off < 0x800; off += 8) {
