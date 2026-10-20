@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "nvn.h"
+#include "recolour.h"  // (TEXPATCH_RECOLOUR_BASE)
 
 #define TEXPATCH_UNKNOWN (-2)  // (backend's cached id before the first identification)
 

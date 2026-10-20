@@ -29,6 +29,7 @@
 #include "../rando.h"
 #include "../settings.h"
 #include "astc.h"
+#include "recolour.h"
 #include "tegra.h"
 
 #define STBTT_STATIC
@@ -275,7 +276,8 @@ int texpatch_identify(const NvnTexture *t) {
             return tu;
         }
     }
-    return -1;
+    int rc = recolour_identify(t, total);  // (Cosmetics recolours: identified only, runtime/nvn/recolour.c)
+    return rc >= 0 ? TEXPATCH_RECOLOUR_BASE + rc : -1;
 }
 
 static int prompt_style(void) {

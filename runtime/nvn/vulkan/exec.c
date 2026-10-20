@@ -21,6 +21,7 @@
 #include "vk.h"
 #include "../renderer.h"
 #include "../pace.h"
+#include "../recolour.h"
 #include "../shader_prep.h"
 #include "../../settings.h"
 
@@ -4226,7 +4227,14 @@ static void draw_(CmdRec *r, bool indexed) {
             }
     }
     float tint[8] = {0};
+    int recol = 0;  // a Cosmetics recolour texture's class (runtime/nvn/recolour.c)
     if (pr->fi->uses_tint) {
+        for (int i = 0; i < pr->fi->ntex && !recol; i++) {
+            NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+            const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
+            if (b && b->tp > 0) recol = recolour_class_of(b->tp - 1);
+        }
+        if (recol) recolour_tint(recol, tint);  // (the highlights below win)
         extern bool pot_tint(const float *m, float tint[8], uint64_t mesh);
         extern bool pot_glow_active(void);
         // (uniform buffer 2 = the model matrix, hardware cbuf 5 - only when the vertex shader reads it: a binding left
@@ -4468,6 +4476,7 @@ static void draw_(CmdRec *r, bool indexed) {
             float rtint[8] = {0};
             extern void pot_gold_tint(float tint[8]);
             if (run_gold[ri]) pot_gold_tint(rtint);
+            else if (recol) recolour_tint(recol, rtint);
             VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii);
             vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, 0, NULL);
         }
