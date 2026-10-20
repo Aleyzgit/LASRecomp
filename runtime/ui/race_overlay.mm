@@ -1,7 +1,7 @@
 // Speedrun overlays, drawn by menu.mm under the menu:
 //   the run timer (Gameplay tab "Timer"; runtime/hle/run_timer.c) in the bottom-left corner while Link is in play - the
-//   game's HUD keeps the top (hearts, item buttons) and the bottom right (rupees) - white with a dark rim like the
-//   HUD's numbers, gold once the run is finished, dimmed before a run has started
+//   game's HUD keeps the top (hearts, item buttons) and the bottom right (rupees) - on a small see-through parchment
+//   panel like the tracker's, gold once the run is finished
 //   the seed hash of a race seed (Randomizer tab "Race mode"; seed_hash.h) on the title / file select screen: five of
 //   the game's own item icons in the bottom-right corner, so racers can check they have the same seed
 #include <float.h>
@@ -96,15 +96,14 @@ static void load_icons(const int *idx, int n) {
     }
 }
 
-// text with the HUD's look: a dark rim all round and a soft shadow below
-static void rim_text(ImDrawList *dl, ImFont *font, float size, ImVec2 p, ImU32 col, const char *s, float rim) {
-    ImU32 dark = IM_COL32(24, 16, 8, (int)(((col >> IM_COL32_A_SHIFT) & 0xFF) * 0.85f));
-    dl->AddText(font, size, ImVec2(p.x, p.y + rim * 2.2f), IM_COL32(0, 0, 0, 90), s);
-    for (int k = 0; k < 16; k++) {
-        float a = k * 3.14159265f / 8;
-        dl->AddText(font, size, ImVec2(p.x + cosf(a) * rim, p.y + sinf(a) * rim), dark, s);
-    }
-    dl->AddText(font, size, p, col, s);
+// The timer's panel: the tracker's game-styled parchment (runtime/ui/tracker_overlay.mm: dark brown frame, parchment,
+// gold rim, brown ink), see-through so the game shows under it
+static void timer_panel(ImDrawList *dl, ImVec2 a, ImVec2 z, float u, bool done) {
+    float r = 10 * u;
+    dl->AddRectFilled(ImVec2(a.x + 2 * u, a.y + 3 * u), ImVec2(z.x + 2 * u, z.y + 3 * u), IM_COL32(0, 0, 0, 45), r);
+    dl->AddRectFilled(ImVec2(a.x - 2 * u, a.y - 2 * u), ImVec2(z.x + 2 * u, z.y + 2 * u), IM_COL32(0x4A, 0x30, 0x20, 150), r + 2 * u);
+    dl->AddRectFilled(a, z, done ? IM_COL32(0xF6, 0xE2, 0xA8, 165) : IM_COL32(0xF3, 0xE6, 0xC6, 140), r);
+    dl->AddRect(a, z, done ? IM_COL32(0xE8, 0xB8, 0x4A, 255) : IM_COL32(0xC8, 0x9B, 0x3C, 200), r, 0, (done ? 3.0f : 2.0f) * u);
 }
 
 extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale) {
@@ -119,16 +118,26 @@ extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale) {
                                   (unsigned long long)(ds / 600 % 60), (unsigned long long)(ds / 10 % 60), (unsigned long long)(ds % 10));
         else snprintf(t, sizeof t, "%llu:%02llu.%llu", (unsigned long long)(ds / 600), (unsigned long long)(ds / 10 % 60),
                       (unsigned long long)(ds % 10));
-        float size = 64 * scale;
-        // (digits drawn one by one at a fixed width: the time doesn't wobble as it counts)
-        float dw = font->CalcTextSizeA(size, FLT_MAX, 0, "0").x, x = 34 * scale, y = display.y - 22 * scale - size;
-        ImU32 col = st == 2 ? IM_COL32(246, 206, 92, 255) : st == 1 ? IM_COL32(255, 255, 255, 255) : IM_COL32(255, 255, 255, 130);
-        float rim = fmaxf(1.5f, 3.0f * scale);
+        float size = 50 * scale;
+        // (digits at a fixed width: the panel and the time don't wobble as it counts)
+        float dw = font->CalcTextSizeA(size, FLT_MAX, 0, "0").x, tw = 0;
         for (const char *c = t; *c; c++) {
             char one[2] = {*c, 0};
-            float cw = *c >= '0' && *c <= '9' ? dw : font->CalcTextSizeA(size, FLT_MAX, 0, one).x;
-            float ox = *c >= '0' && *c <= '9' ? (dw - font->CalcTextSizeA(size, FLT_MAX, 0, one).x) * 0.5f : 0;
-            rim_text(dl, font, size, ImVec2(roundf(x + ox), roundf(y)), col, one, rim);
+            tw += *c >= '0' && *c <= '9' ? dw : font->CalcTextSizeA(size, FLT_MAX, 0, one).x;
+        }
+        // Baloo's line box is tall: the panel hugs the digits (cap height ~ 0.5 of the size, from ~0.3 down)
+        float padx = 16 * scale, top = size * 0.24f, bot = size * 0.80f;
+        ImVec2 a(24 * scale, display.y - 24 * scale - (bot - top) - 2 * 8 * scale);
+        ImVec2 z(a.x + tw + 2 * padx, display.y - 24 * scale);
+        timer_panel(dl, a, z, scale, st == 2);
+        ImU32 ink = st == 2 ? IM_COL32(0x8A, 0x55, 0x00, 255) : IM_COL32(0x3B, 0x2A, 0x14, 255);
+        float x = a.x + padx, y = a.y + 8 * scale - top;
+        for (const char *c = t; *c; c++) {
+            char one[2] = {*c, 0};
+            float gw = font->CalcTextSizeA(size, FLT_MAX, 0, one).x, cw = *c >= '0' && *c <= '9' ? dw : gw;
+            ImVec2 p(roundf(x + (cw - gw) * 0.5f), roundf(y));
+            dl->AddText(font, size, ImVec2(p.x, p.y + 1.2f * scale), IM_COL32(255, 248, 228, 150), one);  // (a light emboss)
+            dl->AddText(font, size, p, ink, one);
             x += cw;
         }
     }
