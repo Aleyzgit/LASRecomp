@@ -25,6 +25,7 @@ Settings g_settings = {
     .rumble = true,
     .rumble_strength = 100,
     .controller_light = true,
+    .menu_confirm = MENU_CONFIRM_CONTROLLER,
     .show_fps = false,
     .inv_keys = true,
     .tracker = true,
@@ -173,8 +174,8 @@ void settings_load(void) {
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
         else if (!strcmp(key, "prompts")) g_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?
                                                               PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : PROMPTS_AUTO;
-        else if (!strcmp(key, "menu_confirm")) g_settings.menu_confirm = !strcmp(val, "controller") ? MENU_CONFIRM_CONTROLLER
-                                                                                                  : MENU_CONFIRM_GAME;
+        else if (!strcmp(key, "menu_confirm")) g_settings.menu_confirm = !strcmp(val, "game") ? MENU_CONFIRM_GAME
+                                                                                                  : MENU_CONFIRM_CONTROLLER;
         else if (!strcmp(key, "language")) {  // ("auto" or one of the game's codes; anything else: auto)
             // (zh-CN / zh-TW: what a settings file from before this wrote; the game reads zh-Hans / zh-Hant)
             const char *v = !strcmp(val, "zh-CN") ? "zh-Hans" : !strcmp(val, "zh-TW") ? "zh-Hant" : val;
