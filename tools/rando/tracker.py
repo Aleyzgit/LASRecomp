@@ -179,7 +179,7 @@ def name_checks(checks, romfs):
     for c in checks:
         if c['g'] >= 0:  # (dungeon checks: their dungeon's list)
             m = re.match(r'D\d-pot-(\d\d[A-P])-', c['n'])
-            c['dn'] = f"Pot, room {c.get('dc') or m.group(1)}" if m else display_name(c['n'], c['k'])
+            c['dn'] = f"Pot ({c.get('dc') or m.group(1)})" if m else display_name(c['n'], c['k'])
             n = seen[c['dn']] = seen.get(c['dn'], 0) + 1
             if n > 1:
                 c['dn'] += f' {n}'
@@ -456,6 +456,20 @@ def build(seed_dir, romfs):
         if any(c.get('d') == dk for c in checks):
             group(dk)
     name_checks(checks, romfs)
+    # the dungeon cells holding checks (vanilla layouts too): their floor page's shift, so the dungeon map draws a
+    # room's bullet only on its own floor
+    import dungeon_gen
+    lv_of = {v: k for k, v in DUNGEONS.items()}
+    for c in checks:
+        lv = lv_of.get(c.get('d') or '')
+        if lv and c.get('dc') and (lv, c['dc']) not in layout:
+            layout[(lv, c['dc'])] = f"{lv}_{c['dc']}"
+    for key in layout:
+        if key not in shifts:
+            try:
+                shifts[key] = dungeon_gen.map_shift(romfs, key[0], f'{key[0]}_{key[1]}')
+            except Exception:
+                shifts[key] = (0.0, 0.0)
     rooms = [{'level': lv, 'cell': c, 'room': r, 'shift': shifts.get((lv, c), (0, 0))} for (lv, c), r in sorted(layout.items())]
     out = {'settings': {k: 1 for k, v in settings.items() if v is True}, 'nodes': nodes, 'checks': checks,
            'groups': groups, 'rooms': rooms, 'logic': settings.get('logic', 'basic'),
@@ -469,6 +483,7 @@ def build(seed_dir, romfs):
             f.write(f'S\t{k}\n')
         for k in out['off']:
             f.write(f'F\t{k}\n')
+        f.write(f"O\tdungeon-room-shuffle\t{settings.get('dungeon-room-shuffle') or 'off'}\n")
         for n in nodes:
             f.write(f"N\t{n['t']}\t{n['n']}\t{n['r'] or '-'}\t{n['c'] or '-'}\t{n.get('pit', '-')}\t{n.get('heavy', '-')}"
                     f"\t{n.get('trick', '-') or '-'}\n")

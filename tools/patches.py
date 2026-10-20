@@ -317,6 +317,21 @@ def _dgn_map(gen, a):
 PATCHES[DGN_MAP_SITE] = _dgn_map
 
 
+# ... and its epilogue: the check tracker hides the dungeon map page's own cursor and button bar there
+# (tracker_overlay.mm), after the update that may have shown them again.
+DGN_MAP_END_SITE = A.DGN_MAP_END_SITE
+
+
+def _dgn_map_end(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x910243ff, hex(w)  # add sp, sp, #0x90
+    return ('{ extern void rt_dgnmap_end(Cpu *); rt_dgnmap_end(c); c->sp += 0x90; }'
+            f'  /* {a:#x}: add sp, sp, #0x90 (dungeon map page updated) */')
+
+
+PATCHES[DGN_MAP_END_SITE] = _dgn_map_end
+
+
 # Debug (LARECOMP_LOG_RESNAME=1): main+0x10def30 builds a resource handle from a name (x2 -> {char *name, ...})
 # and looks it up; the generated-dungeon map crash dereferences a handle whose resource wasn't found.
 RES_NAME_SITE = A.RES_NAME_SITE

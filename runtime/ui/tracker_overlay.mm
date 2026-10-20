@@ -129,6 +129,7 @@ static std::vector<Room> g_rooms;
 static std::vector<int> g_seed_settings, g_seed_off;
 static std::unordered_map<std::string, int> g_flag_idx;  // flags.tsv (trade flags)
 static int g_loaded = 0;
+static std::string g_room_shuffle;  // tracker.tsv O dungeon-room-shuffle (off / coherent / chaos / madness)
 static bool g_kind_present[K_N];
 
 static int tok(const std::string &s) {
@@ -190,6 +191,7 @@ static void load(void) {
         for (char *s = line, *t; (t = strsep(&s, "\t"));) c.push_back(t);
         if (c[0][0] == 'S' && c.size() >= 2) g_seed_settings.push_back(tok(c[1]));
         else if (c[0][0] == 'F' && c.size() >= 2) g_seed_off.push_back(tok(c[1]));
+        else if (c[0][0] == 'O' && c.size() >= 3 && !strcmp(c[1], "dungeon-room-shuffle")) g_room_shuffle = c[2];
         else if (c[0][0] == 'N' && c.size() >= 7) {
             static const char *types[] = {"region", "item", "room", "interaction", "enemy", "trick", "follower"};
             Node n;
@@ -249,7 +251,7 @@ static void ui_reset(void);
 static void index_reset(void);
 RT_ON_RESET(tracker_reset) {  // (reboot: the next seed's tracker.tsv; the map page object was guest memory)
     g_tok.clear(), g_tok_names.clear(), g_nodes.clear(), g_checks.clear(), g_groups.clear(), g_rooms.clear();
-    g_seed_settings.clear(), g_seed_off.clear(), g_flag_idx.clear(), g_acc.clear(), g_acc_trick.clear();
+    g_seed_settings.clear(), g_seed_off.clear(), g_flag_idx.clear(), g_acc.clear(), g_acc_trick.clear(), g_room_shuffle.clear();
     memset(g_kind_present, 0, sizeof g_kind_present);
     g_loaded = 0;
     g_map_frame = g_map_opened = g_map_obj = g_draw_frame = 0;
@@ -499,13 +501,13 @@ static void solve_costs(void) {
     }
 }
 
-static std::string needs_text(int check);
+static std::string needs_text(int check, ImFont *font, float max_w);
 static std::vector<int> g_status;  // per check
 static void debug_dump(void) {
     if (!ENV("LARECOMP_LOG_TRACKER")) return;
     for (size_t i = 0; i < g_checks.size() && i < g_status.size(); i++)
         LOG("[tracker] %-28s %-6s st %d %s\n", g_checks[i].name.c_str(), g_checks[i].dungeon.c_str(), g_status[i],
-            g_status[i] == 2 ? needs_text((int)i).c_str() : "");
+            g_status[i] == 2 ? needs_text((int)i, nullptr, 0).c_str() : "");
     int nd = 0;
     for (auto &n : g_nodes) nd += A(n.id) > 0;
     LOG("[tracker] solved: %d/%zu nodes; mabe %d tarin %d sword %d\n", nd, g_nodes.size(), A(tok("mabe")),
@@ -523,7 +525,7 @@ static std::string item_name(int id, int cnt) {
     static const struct { const char *tok, *name; } names[] = {
         {"sword", "Sword"}, {"shield", "Shield"}, {"bracelet", "Power Bracelet"}, {"bomb", "Bombs"}, {"bow", "Bow"},
         {"hookshot", "Hookshot"}, {"boomerang", "Boomerang"}, {"rod", "Magic Rod"}, {"shovel", "Shovel"},
-        {"powder", "Magic Powder"}, {"feather", "Roc's Feather"}, {"boots", "Pegasus Boots"}, {"ocarina", "Ocarina"},
+        {"powder", "Magic Powder"}, {"feather", "Feather"}, {"boots", "Pegasus Boots"}, {"ocarina", "Ocarina"},
         {"bottle", "Bottle"}, {"flippers", "Flippers"}, {"medicine", "Secret Medicine"}, {"tail-key", "Tail Key"},
         {"slime-key", "Slime Key"}, {"angler-key", "Angler Key"}, {"face-key", "Face Key"}, {"bird-key", "Bird Key"},
         {"full-moon-cello", "Full Moon Cello"}, {"conch-horn", "Conch Horn"}, {"sea-lilys-bell", "Sea Lily's Bell"},
@@ -541,10 +543,17 @@ static std::string item_name(int id, int cnt) {
     const std::string &t = g_tok_names[id];
     std::string s;
     for (auto &x : names) if (t == x.tok) s = x.name;
-    if (s.empty() && !t.compare(0, 4, "key-")) s = t.substr(4) + " Small Keys";
-    else if (s.empty() && !t.compare(0, 14, "nightmare-key-")) return t.substr(14) + " Nightmare Key";
-    else if (s.empty() && !t.compare(0, 5, "soul-")) s = pretty(t.substr(5)) + " soul";
-    else if (s.empty()) s = pretty(t);
+    // (in-game wording: the list already names the dungeon; a soul by its owner, "Moldorm's soul")
+    if (s.empty() && !t.compare(0, 4, "key-")) return cnt > 1 ? std::to_string(cnt) + " small keys" : "a small key";
+    else if (s.empty() && !t.compare(0, 14, "nightmare-key-")) return "Nightmare Key";
+    else if (s.empty() && !t.compare(0, 5, "soul-")) {
+        std::string n = t.substr(5);
+        for (size_t i = 0; i < n.size(); i++) {
+            if (n[i] == '-') n[i] = ' ';
+            if (i == 0 || n[i - 1] == ' ') n[i] = (char)toupper(n[i]);
+        }
+        return n + "'s soul";
+    } else if (s.empty()) s = pretty(t);
     if (cnt > 1) {
         if (t == "sword" || t == "bracelet") return s + " L2";
         if (t == "shield") return "Mirror Shield";
@@ -590,6 +599,7 @@ static UiState g_ui;
 static std::atomic<bool> g_panel_open{false}, g_filter_open{false};
 static std::atomic<bool> g_vanilla{false};  // ZR: the game's own map for now (warp points, pins); reset on reopening
 static volatile uint64_t g_avail_frame;     // the tracker could drive the page (drawn, in either mode)
+static volatile uint64_t g_dgn_avail_frame; // (the same on the dungeon map page)
 static std::atomic<uint32_t> g_evq[64];
 static std::atomic<uint32_t> g_evw{0}, g_evr{0};
 static void ui_reset(void) {
@@ -605,10 +615,12 @@ static void ev_push(uint32_t ev) {  // EV_NAV carries a direction: angle in degr
     g_evw.store(w + 1);
 }
 
-static bool takeover_active(void) {
+static bool dgn_takeover_active(void);
+static bool field_takeover_active(void) {
     uint64_t now = renderer_present_count();
     return !g_vanilla && g_draw_frame && now - g_draw_frame <= 3 && now - g_map_frame <= 2;
 }
+static bool takeover_active(void) { return field_takeover_active() || dgn_takeover_active(); }
 
 // Game thread (runtime/hle/input.c fill_state): while the tracker drives the Map page, the left stick / d-pad, A and Y
 // are ours, B too while a panel or the filter bar is open (then it closes that, not the pause menu). ZR switches
@@ -622,7 +634,8 @@ extern "C" uint64_t tracker_map_input(uint64_t b, int32_t st[4]) {
     prev = b;
     hide &= b;  // (released: the game may see it again)
     uint64_t now0 = renderer_present_count();
-    if (g_avail_frame && now0 - g_avail_frame <= 3 && now0 - g_map_frame <= 2 && (press & BZR)) {
+    bool dgn_avail = g_dgn_avail_frame && now0 - g_dgn_avail_frame <= 3;
+    if (((g_avail_frame && now0 - g_avail_frame <= 3 && now0 - g_map_frame <= 2) || dgn_avail) && (press & BZR)) {
         g_vanilla = !g_vanilla;
         g_panel_open = false, g_filter_open = false;
         hide |= BZR;
@@ -757,10 +770,11 @@ static void cycle_test(uint64_t obj) {
 }
 
 static bool takeover_active(void);
+static bool field_takeover_active(void);
 static void map_page_takeover(uint64_t obj) {
     if (!obj) return;
     cycle_test(obj);
-    bool on = takeover_active();
+    bool on = field_takeover_active();
     static int tries;
     static uint64_t tried_at;
     uint64_t now = renderer_present_count();
@@ -804,6 +818,76 @@ static void map_page_takeover(uint64_t obj) {
         uint8_t fl = LD8(p + 0x58);
         if (on && (fl & 1)) ST8(p + 0x58, fl & ~1), g_hidden[1] = true;
         else if (!on && g_hidden[1]) ST8(p + 0x58, fl | 1), g_hidden[1] = false;
+    }
+}
+
+
+// ---- the dungeon map page (tools/patches.py DGN_MAP_SITE / DGN_MAP_END_SITE, runtime/ui/chaos_overlay.mm): while the
+// tracker drives it, the page's cursor brackets (W_Cursor_00) and its button bar (L_Operation_00) are switched off the
+// same way, found breadth first from the page object (LARECOMP_PANE_SCAN=<frame>:1 lists its panes)
+namespace {
+struct DgnHide {
+    uint64_t obj = 0, ops = 0;
+    std::vector<uint64_t> panes;  // W_Cursor_00 ...
+    std::vector<char> hidden;
+    bool ops_hidden = false;
+    int tries = 0;
+    uint64_t tried_at = 0;
+};
+}  // namespace
+static DgnHide g_dh;
+static volatile uint64_t g_dgn_draw_frame;
+extern "C" bool chaos_dgnmap_shown(void);
+static bool dgn_takeover_active(void) {
+    uint64_t now = renderer_present_count();
+    return !g_vanilla && g_dgn_draw_frame && now - g_dgn_draw_frame <= 3 && chaos_dgnmap_shown();
+}
+static void dgn_find(uint64_t obj) {
+    static uint64_t ra[256], rs[256];
+    int nr = kernel_data_regions(ra, rs, 256);
+    std::vector<uint64_t> cur{obj}, next;
+    std::unordered_map<uint64_t, char> seen;
+    seen[obj] = 1;
+    for (int depth = 0; depth < 7 && !cur.empty() && seen.size() < 60000; depth++) {
+        next.clear();
+        for (uint64_t o : cur)
+            for (uint32_t off = 0; off < 0x800; off += 8) {
+                uint64_t p = LD64(o + off);
+                bool ok = false;
+                for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 > p && p + 0x800 <= ra[i] + rs[i];
+                if (!ok || !seen.emplace(p, 1).second) continue;
+                const char *nm = (const char *)(uintptr_t)(p + 0xB0);
+                if (!g_dh.ops && !strcmp(nm, "L_Operation_00")) g_dh.ops = p;
+                if (!strcmp(nm, "W_Cursor_00") && g_dh.panes.size() < 8 &&
+                    std::find(g_dh.panes.begin(), g_dh.panes.end(), p) == g_dh.panes.end())
+                    g_dh.panes.push_back(p), g_dh.hidden.push_back(0);
+                next.push_back(p);
+            }
+        cur.swap(next);
+    }
+}
+extern "C" void tracker_dgnmap_takeover(uint64_t obj) {
+    if (!obj) return;
+    bool on = dgn_takeover_active();
+    uint64_t now = renderer_present_count();
+    if (g_dh.obj != obj) g_dh = DgnHide(), g_dh.obj = obj;
+    if (on && (!g_dh.tries || ((!g_dh.ops || g_dh.panes.empty()) && g_dh.tries < 6 && now - g_dh.tried_at >= 60))) {
+        dgn_find(obj);
+        g_dh.tries++, g_dh.tried_at = now;
+        LOG("[tracker] dungeon map page %llx: button bar %llx, %zu cursor panes (try %d)\n", (unsigned long long)obj,
+            (unsigned long long)g_dh.ops, g_dh.panes.size(), g_dh.tries);
+    }
+    for (size_t i = 0; i < g_dh.panes.size(); i++) {
+        uint64_t p = g_dh.panes[i];
+        if (strcmp((const char *)(uintptr_t)(p + 0xB0), "W_Cursor_00")) continue;
+        uint8_t fl = LD8(p + 0x58);
+        if (on && (fl & 1)) ST8(p + 0x58, fl & ~1), g_dh.hidden[i] = 1;
+        else if (!on && g_dh.hidden[i]) ST8(p + 0x58, fl | 1), g_dh.hidden[i] = 0;
+    }
+    if (g_dh.ops && !strcmp((const char *)(uintptr_t)(g_dh.ops + 0xB0), "L_Operation_00")) {
+        uint8_t fl = LD8(g_dh.ops + 0x58);
+        if (on && (fl & 1)) ST8(g_dh.ops + 0x58, fl & ~1), g_dh.ops_hidden = true;
+        else if (!on && g_dh.ops_hidden) ST8(g_dh.ops + 0x58, fl | 1), g_dh.ops_hidden = false;
     }
 }
 
@@ -897,15 +981,16 @@ static void update_status(void) {
     }
 }
 
-static std::string needs_text(int check) {
+// "needs 2 small keys, Nightmare Key"; wider than max_w (in font units at size 1, 0 = any): the first need + "+N"
+static std::string needs_text(int check, ImFont *font, float max_w) {
     int n = g_checks[check].node;
     if (n >= (int)g_cost.size() || g_cost[n].inf || g_cost[n].miss.empty()) return "out of logic";
-    std::string s = "needs ";
-    for (size_t i = 0; i < g_cost[n].miss.size(); i++) {
-        int32_t m = g_cost[n].miss[i];
-        if (i) s += " + ";
-        s += item_name(m & 0xFFFFF, m >> 20);
-    }
+    std::vector<std::string> parts;
+    for (int32_t m : g_cost[n].miss) parts.push_back(item_name(m & 0xFFFFF, m >> 20));
+    std::string s = "needs " + parts[0];
+    for (size_t i = 1; i < parts.size(); i++) s += ", " + parts[i];
+    if (font && max_w > 0 && parts.size() > 1 && font->CalcTextSizeA(1, FLT_MAX, 0, s.c_str()).x > max_w)
+        s = "needs " + parts[0] + " +" + std::to_string(parts.size() - 1);
     return s;
 }
 
@@ -980,6 +1065,200 @@ static float draw_prompt(ImDrawList *dl, ImFont *font, float fs, ImVec2 p, const
     dl->AddText(font, bs, ImVec2(c.x - bt.x * 0.5f - (strlen(btn) > 1 ? 1 : 0), c.y - bt.y * 0.5f), IM_COL32(60, 45, 25, 255), btn);
     shadow_text(dl, font, fs, ImVec2(p.x + g + 6 * u, p.y), label, u);
     return g + 6 * u + text_size(font, fs, label).x;
+}
+
+// ---- the filters: the two switches, then one toggle per kind of check in the seed; the panel Y opens (game-styled)
+namespace {
+struct Chip { int bit; std::string label; };
+}
+static std::vector<Chip> make_chips(void) {
+    std::vector<Chip> chips;
+    chips.push_back({F_IN_LOGIC, "In logic now"});
+    chips.push_back({F_HIDE_DONE, "Hide checked"});
+    for (int k = 0; k < K_N; k++) if (g_kind_present[k]) chips.push_back({1 << k, kind_label(k)});
+    return chips;
+}
+// returns whether the mouse is over it; a click outside closes it
+static bool draw_filter_panel(ImDrawList *dl, ImFont *font, float ox, float oy, float u, int &f, ImVec2 mouse, bool mouse_moved,
+                              bool &click) {
+    UiState &ui = g_ui;
+    std::vector<Chip> chips = make_chips();
+    bool mouse_on_ui = false;
+    auto filter_row = [&](size_t i, ImVec2 a, float w, float h, float fs) {
+        const Chip &c = chips[i];
+        bool on = f & c.bit, focus = (int)i == ui.chip;
+        ImVec2 z(a.x + w, a.y + h);
+        if (focus) {
+            dl->AddRectFilled(a, z, P_PARCH_DK, 5 * u);
+            dl->AddRect(a, z, P_GOLD, 5 * u, 0, 2 * u);
+        }
+        float bx = a.x + 8 * u, by = a.y + h * 0.5f, bs = h * 0.28f;
+        dl->AddRectFilled(ImVec2(bx, by - bs), ImVec2(bx + 2 * bs, by + bs), P_PARCH_LT, 2 * u);
+        dl->AddRect(ImVec2(bx, by - bs), ImVec2(bx + 2 * bs, by + bs), P_BROWN, 2 * u, 0, 1.5f * u);
+        if (on) {  // a tick
+            dl->AddLine(ImVec2(bx + bs * 0.4f, by), ImVec2(bx + bs * 0.9f, by + bs * 0.6f), P_GREEN, 2.4f * u);
+            dl->AddLine(ImVec2(bx + bs * 0.9f, by + bs * 0.6f), ImVec2(bx + bs * 1.7f, by - bs * 0.7f), P_GREEN, 2.4f * u);
+        }
+        ImVec2 ts = text_size(font, fs, c.label.c_str());
+        dl->AddText(font, fs, ImVec2(bx + 2 * bs + 8 * u, by - ts.y * 0.5f), P_INK, c.label.c_str());
+        if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) {
+            mouse_on_ui = true;
+            if (mouse_moved) ui.chip = (int)i;
+            if (click) set_filters(f ^ c.bit), f = filters(), click = false;
+        }
+    };
+    float w = 300 * u, rh = 30 * u, h = 56 * u + rh * chips.size() + 14 * u;
+    ImVec2 a(ox + 640 * u - w * 0.5f, oy + 380 * u - h * 0.5f), z(a.x + w, a.y + h);
+    parchment(dl, a, z, u);
+    if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) mouse_on_ui = true;
+    dl->AddText(font, 24 * u, ImVec2(a.x + 20 * u, a.y + 14 * u), P_INK, "Filters");
+    for (size_t i = 0; i < chips.size(); i++) {
+        if (i == 2) dl->AddLine(ImVec2(a.x + 18 * u, a.y + 52 * u + rh * 2 + 0.5f), ImVec2(z.x - 18 * u, a.y + 52 * u + rh * 2 + 0.5f), P_LINE, 1.2f * u);
+        filter_row(i, ImVec2(a.x + 12 * u, a.y + 52 * u + rh * i + (i >= 2 ? 6 * u : 0)), w - 24 * u, rh - 2 * u, 18 * u);
+    }
+    if (click && !mouse_on_ui) ui.filter_focus = false;
+    return mouse_on_ui;
+}
+
+// ---- the check list (one list by status), game-styled: parchment, gold border, brown ink, centred over the dimmed
+// map. Used by the island's areas and dungeons and by the dungeon map page.
+namespace {
+struct ListView {
+    std::string title, sub, filt;
+    std::vector<std::string> pills;  // (dungeons: small keys, Nightmare Key, boss soul, room shuffle)
+    const char *foot;
+    ImVec4 dim;                      // the map paper to dim
+};
+}  // namespace
+static std::string room_label(const Check &c) {  // "Room B5" (column letter, row number: the game's grid)
+    if (c.dcell.size() != 3) return "";
+    int row = (c.dcell[0] - '0') * 10 + (c.dcell[1] - '0');
+    char b[24];
+    snprintf(b, sizeof b, "Room %c%d", c.dcell[2], row);
+    return b;
+}
+// Draws the list; returns the check of a row clicked (-1: none). *close: clicked outside / right click.
+static int draw_list(ImDrawList *dl, ImFont *font, float ox, float oy, float u, const ListView &v, const std::vector<Row> &rows,
+                     int &row, float &scroll, ImVec2 mouse, bool mouse_moved, bool &click, bool rclick, float wheel, bool *close) {
+    int chosen = -1;
+    row = std::max(0, std::min(row, (int)rows.size() - 1));
+    dl->AddRectFilled(ImVec2(v.dim.x, v.dim.y), ImVec2(v.dim.z, v.dim.w), IM_COL32(40, 25, 5, 110), 6 * u);  // (the map, dimmed)
+    ImVec2 a(ox + 260 * u, oy + 120 * u), z(ox + 1020 * u, oy + 636 * u);
+    dl->AddRectFilled(ImVec2(a.x + 4 * u, a.y + 6 * u), ImVec2(z.x + 4 * u, z.y + 6 * u), IM_COL32(0, 0, 0, 80), 16 * u);
+    dl->AddRectFilled(ImVec2(a.x - 3 * u, a.y - 3 * u), ImVec2(z.x + 3 * u, z.y + 3 * u), IM_COL32(0x4A, 0x30, 0x20, 255), 18 * u);
+    dl->AddRectFilled(a, z, IM_COL32(0xF3, 0xE6, 0xC6, 255), 16 * u);
+    dl->AddRect(a, z, IM_COL32(0xC8, 0x9B, 0x3C, 255), 16 * u, 0, 4 * u);
+    bool in_panel = mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y;
+    float x = a.x + 34 * u, y = a.y + 22 * u;
+    float fs_t = 32 * u, fs_s = 18 * u, fs_r = 17 * u, fs_w = 14 * u, fs_k = 13 * u;
+    ImU32 ink = IM_COL32(0x3B, 0x26, 0x14, 255), ink2 = IM_COL32(0x6B, 0x4E, 0x2E, 255), gold = IM_COL32(0xC8, 0x9B, 0x3C, 255);
+    dl->AddText(font, fs_t, ImVec2(x, y), ink, v.title.c_str());
+    ImVec2 tt = text_size(font, fs_t, v.title.c_str());
+    float base = y + tt.y * 0.78f;
+    dl->AddText(font, fs_s, ImVec2(x + tt.x + 14 * u, base - text_size(font, fs_s, v.sub.c_str()).y * 0.78f), ink2, v.sub.c_str());
+    ImVec2 ft = text_size(font, fs_w, v.filt.c_str());
+    dl->AddText(font, fs_w, ImVec2(z.x - 34 * u - ft.x, base - ft.y * 0.78f), ink2, v.filt.c_str());
+    y += tt.y + 8 * u;
+    if (!v.pills.empty()) {  // header pills
+        float px = x;
+        for (size_t i = 0; i < v.pills.size(); i++) {
+            ImVec2 ps = text_size(font, fs_w, v.pills[i].c_str());
+            bool last_mode = i + 1 == v.pills.size() && !v.pills[i].compare(0, 12, "Room shuffle");
+            ImVec2 pa(px, y), pz(px + ps.x + 24 * u, y + ps.y + 10 * u);
+            dl->AddRectFilled(pa, pz, last_mode ? IM_COL32(0xE3, 0xD3, 0xF2, 255) : IM_COL32(0xEA, 0xD9, 0xB0, 255), pz.y - pa.y);
+            dl->AddText(font, fs_w, ImVec2(pa.x + 12 * u, pa.y + 5 * u), last_mode ? IM_COL32(0x4A, 0x2E, 0x7A, 255) : ink, v.pills[i].c_str());
+            px = pz.x + 10 * u;
+        }
+        y += text_size(font, fs_w, "X").y + 18 * u;
+    }
+    dl->AddRectFilled(ImVec2(x, y), ImVec2(z.x - 34 * u, y + 2 * u), gold);
+    y += 12 * u;
+    float rh = 38 * u, top = y, bottom = z.y - 52 * u;
+    int vis = std::max(1, (int)((bottom - top) / rh));
+    if (row < (int)scroll) scroll = (float)row;
+    if (row >= (int)scroll + vis) scroll = (float)(row - vis + 1);
+    if (in_panel && wheel != 0) scroll = std::max(0.0f, std::min((float)std::max(0, (int)rows.size() - vis), scroll - wheel));
+    static const ImU32 dot[4] = {IM_COL32(0x2E, 0x9B, 0x5F, 255), IM_COL32(0x7E, 0x5F, 0xD0, 255), IM_COL32(0xD9, 0x82, 0x1F, 255),
+                                 IM_COL32(0x9A, 0x8A, 0x72, 255)};
+    dl->PushClipRect(ImVec2(a.x, top - 4 * u), ImVec2(z.x, bottom), true);
+    for (int i = (int)scroll; i < (int)rows.size() && i < (int)scroll + vis + 1; i++) {
+        const Row &r = rows[i];
+        const Check &c = g_checks[r.check];
+        float ry = top + (i - scroll) * rh;
+        ImVec2 ra(x - 6 * u, ry), rz(z.x - 28 * u, ry + rh - 6 * u);
+        bool sel = i == row;
+        dl->AddRectFilled(ra, rz, sel ? IM_COL32(0xFF, 0xF6, 0xDD, 255) : IM_COL32(0xEA, 0xD9, 0xB0, 255), 10 * u);
+        if (sel) dl->AddRect(ra, rz, IM_COL32(0x4A, 0x30, 0x20, 255), 10 * u, 0, 3 * u);
+        if (mouse.x >= ra.x && mouse.x <= rz.x && mouse.y >= ra.y && mouse.y <= rz.y) {
+            if (mouse_moved) row = i;
+            if (click) row = i, chosen = r.check, click = false;
+        }
+        float cy = (ra.y + rz.y) * 0.5f;
+        dl->AddCircleFilled(ImVec2(ra.x + 20 * u, cy), 7 * u, dot[r.st]);
+        std::string nm = c.title.empty() ? pretty(c.name) : c.title;
+        ImU32 ncol = r.st == ST_DONE ? IM_COL32(0x8C, 0x7B, 0x62, 255) : ink;
+        std::string where = !c.dcell.empty() ? room_label(c) : !c.spot.empty() ? c.spot : c.area.empty() ? "" : area_name(c.area);
+        std::string tag = r.st == ST_TRICK ? "trick logic" : r.st == ST_NEEDS ? needs_text(r.check, font, 210 * u / fs_k) : "";
+        ImVec2 tg = tag.empty() ? ImVec2(0, 0) : text_size(font, fs_k, tag.c_str());
+        float tag_w = tag.empty() ? 0 : std::min(tg.x + 20 * u, 230 * u);
+        float wx = rz.x - 14 * u - tag_w - (tag_w > 0 ? 12 * u : 0) - 140 * u;  // the spot column
+        dl->PushClipRect(ImVec2(ra.x, ra.y), ImVec2(wx - 10 * u, rz.y), true);
+        ImVec2 ns = text_size(font, fs_r, nm.c_str());
+        dl->AddText(font, fs_r, ImVec2(ra.x + 36 * u, cy - ns.y * 0.5f), ncol, nm.c_str());
+        if (r.st == ST_DONE) dl->AddLine(ImVec2(ra.x + 36 * u, cy + 1 * u), ImVec2(ra.x + 36 * u + ns.x, cy + 1 * u), ncol, 1.6f * u);
+        dl->PopClipRect();
+        dl->PushClipRect(ImVec2(wx, ra.y), ImVec2(wx + 136 * u, rz.y), true);
+        dl->AddText(font, fs_w, ImVec2(wx, cy - text_size(font, fs_w, "X").y * 0.5f), ink2, where.c_str());
+        dl->PopClipRect();
+        if (!tag.empty()) {
+            while (tg.x + 20 * u > tag_w && tag.size() > 8) tag = tag.substr(0, tag.size() - 4) + "...", tg = text_size(font, fs_k, tag.c_str());
+            ImVec2 ta(rz.x - 14 * u - tag_w, cy - tg.y * 0.5f - 3 * u), tz(rz.x - 14 * u, cy + tg.y * 0.5f + 3 * u);
+            bool tr = r.st == ST_TRICK;
+            dl->AddRectFilled(ta, tz, tr ? IM_COL32(0xDE, 0xD3, 0xF4, 255) : IM_COL32(0xF2, 0xD2, 0x9B, 255), tz.y - ta.y);
+            dl->AddText(font, fs_k, ImVec2(ta.x + 10 * u, ta.y + 3 * u), tr ? IM_COL32(0x3E, 0x28, 0x7E, 255) : IM_COL32(0x6A, 0x3C, 0x05, 255),
+                        tag.c_str());
+        }
+    }
+    dl->PopClipRect();
+    dl->AddText(font, 16 * u, ImVec2(x, z.y - 36 * u), IM_COL32(0x4A, 0x30, 0x20, 255), v.foot);
+    *close = (click && !in_panel) || rclick;
+    return chosen;
+}
+
+// the rows of a list: open in logic, needs an item, trick logic, collected (struck out, last)
+static void list_rows(const std::vector<int> &list, std::vector<Row> &rows) {
+    rows.clear();
+    static const int order[4] = {0, 2, 1, 3};  // (by St: logic 0, trick 2, needs 1, done 3)
+    for (int i : list) rows.push_back({i, g_status[i]});
+    std::stable_sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
+        if (order[a.st] != order[b.st]) return order[a.st] < order[b.st];
+        const Check &x = g_checks[a.check], &y = g_checks[b.check];
+        return (x.title.empty() ? x.name : x.title) < (y.title.empty() ? y.name : y.title);
+    });
+}
+
+// a dungeon's header pills: small keys, Nightmare Key, boss soul, room shuffle
+extern "C" int souls_owned(int dungeon);  // runtime/hle/souls.c: -1 = no boss souls in this seed
+static std::vector<std::string> dungeon_pills(const std::string &dk) {
+    std::vector<std::string> p;
+    if (dk.size() != 2 || dk[0] != 'D') return p;
+    int d = dk[1] - '0', rec = d == 0 ? 18 : 2 * (d - 1);
+    uint64_t r = SAVE + 0xE0 + 0x10ull * rec;
+    int held = LD8(r), most = 0;  // (the most this dungeon's logic ever asks for)
+    int key = tok("key-" + dk);
+    for (auto &n : g_nodes)
+        for (int32_t o : n.cond) if (o >= 0 && (o & 0xFFFFF) == key) most = std::max(most, o >> 20);
+    char b[64];
+    if (most) snprintf(b, sizeof b, "Small keys %d / %d", held, most), p.push_back(b);
+    p.push_back((LD8(r + 1) >> 3) & 1 ? "Nightmare Key: found" : "Nightmare Key: not found");
+    int s = souls_owned(d);
+    if (s >= 0) p.push_back(s ? "Boss soul: found" : "Boss soul: needed");
+    if (!g_room_shuffle.empty() && g_room_shuffle != "off") {
+        std::string m = g_room_shuffle;
+        m[0] = (char)toupper(m[0]);
+        p.push_back("Room shuffle: " + m);
+    }
+    return p;
 }
 
 extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
@@ -1117,11 +1396,7 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     }
 
     // ---- the filters: the two switches, then one toggle per kind of check in the seed
-    struct Chip { int bit; std::string label; };
-    std::vector<Chip> chips;
-    chips.push_back({F_IN_LOGIC, "In logic now"});
-    chips.push_back({F_HIDE_DONE, "Hide checked"});
-    for (int k = 0; k < K_N; k++) if (g_kind_present[k]) chips.push_back({1 << k, kind_label(k)});
+    std::vector<Chip> chips = make_chips();
     if (ui.chip >= (int)chips.size()) ui.chip = (int)chips.size() - 1;
 
     auto panel_list = [&](int type, int id) -> const std::vector<int> * {
@@ -1136,17 +1411,11 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         ui.panel = true, ui.panel_type = type, ui.panel_id = id, ui.panel_row = 0, ui.panel_scroll = 0;
         ui.filter_focus = false, ui.spot = -1;
     };
-    // the panel's rows: open in logic, needs an item, trick logic, collected (struck out, last)
     std::vector<Row> rows;
     auto build_rows = [&]() {
         rows.clear();
         const std::vector<int> *list = ui.panel || ui.spot >= 0 ? panel_list(ui.panel_type, ui.panel_id) : nullptr;
-        if (!list) return;
-        static const int order[4] = {0, 2, 1, 3};  // (by St: logic 0, trick 2, needs 1, done 3)
-        for (int i : *list) rows.push_back({i, g_status[i]});
-        std::stable_sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
-            return order[a.st] != order[b.st] ? order[a.st] < order[b.st] : g_checks[a.check].name < g_checks[b.check].name;
-        });
+        if (list) list_rows(*list, rows);
     };
     build_rows();
 
@@ -1285,30 +1554,6 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     bool tri = triforce_counts(&tri_have, &tri_need);
     float pfs = 19 * u;  // (the game's button prompts' size)
 
-    // one filter row: a check box and its label (game-styled, on parchment); mouse toggles
-    auto filter_row = [&](size_t i, ImVec2 a, float w, float h, float fs) {
-        const Chip &c = chips[i];
-        bool on = f & c.bit, focus = ui.filter_focus && (int)i == ui.chip;
-        ImVec2 z(a.x + w, a.y + h);
-        if (focus) {
-            dl->AddRectFilled(a, z, P_PARCH_DK, 5 * u);
-            dl->AddRect(a, z, P_GOLD, 5 * u, 0, 2 * u);
-        }
-        float bx = a.x + 8 * u, by = a.y + h * 0.5f, bs = h * 0.28f;
-        dl->AddRectFilled(ImVec2(bx, by - bs), ImVec2(bx + 2 * bs, by + bs), P_PARCH_LT, 2 * u);
-        dl->AddRect(ImVec2(bx, by - bs), ImVec2(bx + 2 * bs, by + bs), P_BROWN, 2 * u, 0, 1.5f * u);
-        if (on) {  // a tick
-            dl->AddLine(ImVec2(bx + bs * 0.4f, by), ImVec2(bx + bs * 0.9f, by + bs * 0.6f), P_GREEN, 2.4f * u);
-            dl->AddLine(ImVec2(bx + bs * 0.9f, by + bs * 0.6f), ImVec2(bx + bs * 1.7f, by - bs * 0.7f), P_GREEN, 2.4f * u);
-        }
-        ImVec2 ts = text_size(font, fs, c.label.c_str());
-        dl->AddText(font, fs, ImVec2(bx + 2 * bs + 8 * u, by - ts.y * 0.5f), P_INK, c.label.c_str());
-        if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) {
-            mouse_on_ui = true;
-            if (mouse_moved && ui.filter_focus) ui.chip = (int)i;
-            if (click) set_filters(f ^ c.bit), f = filters(), click = false;
-        }
-    };
     const char *filter_word = (f & F_IN_LOGIC) ? "In logic now" : (f & F_HIDE_DONE) ? "Hide checked" : "Everything";
 
     // ---- one line where the game's own button prompts were (L_Operation_00, hidden): the cursor's area and the run's
@@ -1327,7 +1572,7 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     int k = 0;
     if (ui.spot >= 0) {
         int st = g_status[ui.spot];
-        std::string t = st == ST_LOGIC ? "in logic" : st == ST_TRICK ? "trick logic" : st == ST_NEEDS ? needs_text(ui.spot) : "collected";
+        std::string t = st == ST_LOGIC ? "in logic" : st == ST_TRICK ? "trick logic" : st == ST_NEEDS ? needs_text(ui.spot, nullptr, 0) : "collected";
         k = snprintf(info, sizeof info, "%s   %s     ", sel_name.c_str(), t.c_str());
     } else if (!sel_name.empty() && !ui.panel) {
         k = snprintf(info, sizeof info, "%s   %d in logic", sel_name.c_str(), n_sel[ST_LOGIC]);
@@ -1342,104 +1587,293 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     dl->PushClipRect(ImVec2(x0, y - 4 * u), ImVec2(ox + 1226 * u - pw - 16 * u, y + 40 * u), true);
     shadow_text(dl, font, pfs * 0.92f, ImVec2(x0, y + pfs * 0.04f), info, u);
     dl->PopClipRect();
-    if (ui.filter_focus) {  // the filter panel, over the map
-        float w = 300 * u, rh = 30 * u, h = 56 * u + rh * chips.size() + 14 * u;
-        ImVec2 a(ox + 640 * u - w * 0.5f, oy + 380 * u - h * 0.5f), z(a.x + w, a.y + h);
-        parchment(dl, a, z, u);
-        if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) mouse_on_ui = true;
-        dl->AddText(font, 24 * u, ImVec2(a.x + 20 * u, a.y + 14 * u), P_INK, "Filters");
-        for (size_t i = 0; i < chips.size(); i++) {
-            if (i == 2) dl->AddLine(ImVec2(a.x + 18 * u, a.y + 52 * u + rh * 2 + 0.5f), ImVec2(z.x - 18 * u, a.y + 52 * u + rh * 2 + 0.5f), P_LINE, 1.2f * u);
-            filter_row(i, ImVec2(a.x + 12 * u, a.y + 52 * u + rh * i + (i >= 2 ? 6 * u : 0)), w - 24 * u, rh - 2 * u, 18 * u);
-        }
-        if (click && !mouse_on_ui) ui.filter_focus = false;
-    }
+    if (ui.filter_focus) mouse_on_ui |= draw_filter_panel(dl, font, ox, oy, u, f, mouse, mouse_moved, click);
 
-    // ---- the area panel (one list by status): parchment, gold border, brown ink, centred over the dimmed map
+    // ---- the list (one list by status)
     if (ui.panel) {
         if (rows.empty() && !panel_list(ui.panel_type, ui.panel_id)) ui.panel = false;
         else {
             int done = 0;
             for (auto &r : rows) done += r.st == ST_DONE;
-            std::string title = title_of(ui.panel_type, ui.panel_id);
-            char sub[64], filt[64];
-            snprintf(sub, sizeof sub, "%d / %d collected", done, (int)rows.size());
-            snprintf(filt, sizeof filt, "Filter: %s", filter_word);
-            ui.panel_row = std::max(0, std::min(ui.panel_row, (int)rows.size() - 1));
-            dl->AddRectFilled(ImVec2(ox + 187 * u, oy + 123 * u), ImVec2(ox + 1096 * u, oy + 630 * u), IM_COL32(40, 25, 5, 110), 6 * u);  // (the map, dimmed)
-            ImVec2 a(ox + 260 * u, oy + 120 * u), z(ox + 1020 * u, oy + 636 * u);
-            dl->AddRectFilled(ImVec2(a.x + 4 * u, a.y + 6 * u), ImVec2(z.x + 4 * u, z.y + 6 * u), IM_COL32(0, 0, 0, 80), 16 * u);
-            dl->AddRectFilled(ImVec2(a.x - 3 * u, a.y - 3 * u), ImVec2(z.x + 3 * u, z.y + 3 * u), IM_COL32(0x4A, 0x30, 0x20, 255), 18 * u);
-            dl->AddRectFilled(a, z, IM_COL32(0xF3, 0xE6, 0xC6, 255), 16 * u);
-            dl->AddRect(a, z, IM_COL32(0xC8, 0x9B, 0x3C, 255), 16 * u, 0, 4 * u);
-            bool in_panel = mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y;
-            float x = a.x + 34 * u, y = a.y + 22 * u;
-            float fs_t = 32 * u, fs_s = 18 * u, fs_r = 17 * u, fs_w = 14 * u, fs_k = 13 * u;
-            ImU32 ink = IM_COL32(0x3B, 0x26, 0x14, 255), ink2 = IM_COL32(0x6B, 0x4E, 0x2E, 255), gold = IM_COL32(0xC8, 0x9B, 0x3C, 255);
-            dl->AddText(font, fs_t, ImVec2(x, y), ink, title.c_str());
-            ImVec2 tt = text_size(font, fs_t, title.c_str());
-            float base = y + tt.y * 0.78f;
-            dl->AddText(font, fs_s, ImVec2(x + tt.x + 14 * u, base - text_size(font, fs_s, sub).y * 0.78f), ink2, sub);
-            ImVec2 ft = text_size(font, fs_w, filt);
-            dl->AddText(font, fs_w, ImVec2(z.x - 34 * u - ft.x, base - ft.y * 0.78f), ink2, filt);
-            y += tt.y + 10 * u;
-            dl->AddRectFilled(ImVec2(x, y), ImVec2(z.x - 34 * u, y + 2 * u), gold);
-            y += 12 * u;
-            float rh = 38 * u, top = y, bottom = z.y - 52 * u;
-            int vis = std::max(1, (int)((bottom - top) / rh));
-            if (ui.panel_row < (int)ui.panel_scroll) ui.panel_scroll = (float)ui.panel_row;
-            if (ui.panel_row >= (int)ui.panel_scroll + vis) ui.panel_scroll = (float)(ui.panel_row - vis + 1);
-            if (in_panel && io.MouseWheel != 0)
-                ui.panel_scroll = std::max(0.0f, std::min((float)std::max(0, (int)rows.size() - vis), ui.panel_scroll - io.MouseWheel));
-            static const ImU32 dot[4] = {IM_COL32(0x2E, 0x9B, 0x5F, 255), IM_COL32(0x7E, 0x5F, 0xD0, 255), IM_COL32(0xD9, 0x82, 0x1F, 255),
-                                         IM_COL32(0x9A, 0x8A, 0x72, 255)};
-            dl->PushClipRect(ImVec2(a.x, top - 4 * u), ImVec2(z.x, bottom), true);
-            for (int i = (int)ui.panel_scroll; i < (int)rows.size() && i < (int)ui.panel_scroll + vis + 1; i++) {
-                const Row &r = rows[i];
-                const Check &c = g_checks[r.check];
-                float ry = top + (i - ui.panel_scroll) * rh;
-                ImVec2 ra(x - 6 * u, ry), rz(z.x - 28 * u, ry + rh - 6 * u);
-                bool sel = i == ui.panel_row;
-                dl->AddRectFilled(ra, rz, sel ? IM_COL32(0xFF, 0xF6, 0xDD, 255) : IM_COL32(0xEA, 0xD9, 0xB0, 255), 10 * u);
-                if (sel) dl->AddRect(ra, rz, IM_COL32(0x4A, 0x30, 0x20, 255), 10 * u, 0, 3 * u);
-                if (mouse.x >= ra.x && mouse.x <= rz.x && mouse.y >= ra.y && mouse.y <= rz.y) {
-                    if (mouse_moved) ui.panel_row = i;
-                    if (click) ui.panel_row = i, ui.spot = r.check, ui.panel = false, click = false;
-                }
-                float cy = (ra.y + rz.y) * 0.5f;
-                dl->AddCircleFilled(ImVec2(ra.x + 20 * u, cy), 7 * u, dot[r.st]);
-                std::string nm = c.title.empty() ? pretty(c.name) : c.title;
-                ImU32 ncol = r.st == ST_DONE ? IM_COL32(0x8C, 0x7B, 0x62, 255) : ink;
-                std::string where = !c.dcell.empty() ? "room " + c.dcell : !c.spot.empty() ? c.spot : c.area.empty() ? "" : area_name(c.area);
-                std::string tag = r.st == ST_TRICK ? "trick logic" : r.st == ST_NEEDS ? needs_text(r.check) : "";
-                ImVec2 tg = tag.empty() ? ImVec2(0, 0) : text_size(font, fs_k, tag.c_str());
-                float tag_w = tag.empty() ? 0 : std::min(tg.x + 20 * u, 230 * u);
-                float wx = rz.x - 14 * u - tag_w - (tag_w > 0 ? 12 * u : 0) - 160 * u;  // the spot column
-                dl->PushClipRect(ImVec2(ra.x, ra.y), ImVec2(wx - 10 * u, rz.y), true);
-                ImVec2 ns = text_size(font, fs_r, nm.c_str());
-                dl->AddText(font, fs_r, ImVec2(ra.x + 36 * u, cy - ns.y * 0.5f), ncol, nm.c_str());
-                if (r.st == ST_DONE) dl->AddLine(ImVec2(ra.x + 36 * u, cy + 1 * u), ImVec2(ra.x + 36 * u + ns.x, cy + 1 * u), ncol, 1.6f * u);
-                dl->PopClipRect();
-                dl->PushClipRect(ImVec2(wx, ra.y), ImVec2(wx + 156 * u, rz.y), true);
-                dl->AddText(font, fs_w, ImVec2(wx, cy - text_size(font, fs_w, "X").y * 0.5f), ink2, where.c_str());
-                dl->PopClipRect();
-                if (!tag.empty()) {
-                    while (tg.x + 20 * u > tag_w && tag.size() > 8) tag = tag.substr(0, tag.size() - 4) + "...", tg = text_size(font, fs_k, tag.c_str());
-                    ImVec2 ta(rz.x - 14 * u - tag_w, cy - tg.y * 0.5f - 3 * u), tz(rz.x - 14 * u, cy + tg.y * 0.5f + 3 * u);
-                    bool tr = r.st == ST_TRICK;
-                    dl->AddRectFilled(ta, tz, tr ? IM_COL32(0xDE, 0xD3, 0xF4, 255) : IM_COL32(0xF2, 0xD2, 0x9B, 255), tz.y - ta.y);
-                    dl->AddText(font, fs_k, ImVec2(ta.x + 10 * u, ta.y + 3 * u), tr ? IM_COL32(0x3E, 0x28, 0x7E, 255) : IM_COL32(0x6A, 0x3C, 0x05, 255),
-                                tag.c_str());
-                }
-            }
-            dl->PopClipRect();
-            const char *foot = "Up / Down  choose      A  show on map      B  back";
-            dl->AddText(font, 16 * u, ImVec2(x, z.y - 36 * u), IM_COL32(0x4A, 0x30, 0x20, 255), foot);
-            if ((click && !in_panel) || rclick) ui.panel = false;
+            ListView v;
+            v.title = title_of(ui.panel_type, ui.panel_id);
+            char sub[64];
+            snprintf(sub, sizeof sub, ui.panel_type == 1 ? "%d / %d found" : "%d / %d collected", done, (int)rows.size());
+            v.sub = sub;
+            v.filt = std::string("Filter: ") + filter_word;
+            if (ui.panel_type == 1) v.pills = dungeon_pills(g_groups[ui.panel_id].label);
+            v.foot = "Up / Down  choose      A  show on map      B  back";
+            v.dim = R(187, 123, 1096, 630);
+            bool close = false;
+            int ch = draw_list(dl, font, ox, oy, u, v, rows, ui.panel_row, ui.panel_scroll, mouse, mouse_moved, click, rclick, io.MouseWheel, &close);
+            if (ch >= 0) ui.spot = ch, ui.panel = false;
+            else if (close) ui.panel = false;
         }
     } else if (rclick && ui.spot >= 0) ui.spot = -1, ui.panel = true;
     else if (rclick && ui.filter_focus) ui.filter_focus = false;
     (void)mouse_on_ui;
     g_panel_open = ui.panel || ui.spot >= 0;  // (B is ours while the list or a shown spot is up)
+    g_filter_open = ui.filter_focus;
+}
+
+// ---- the dungeon map page (the game's own: its room grid, floors and icons stay). Per room with checks on the floor
+// shown: a numbered bullet in the room's top-left corner (the Chaos letters sit on doorway edges, never there); a
+// legend (keys, Nightmare Key, boss soul, found / total, the letters); the bottom line; A opens the dungeon's list.
+// The room a check sits in comes from tracker.tsv (the seed's shuffled layout; absent rooms aren't listed) and each
+// room's floor from its R row (the floor page's shift, tools/rando/dungeon_gen.py map_shift).
+extern "C" bool chaos_dgnmap_view(float v[8]);
+extern "C" const char *chaos_current_level(void);
+
+static std::string level_dungeon(const char *lv) {  // Lv01TailCave -> D1, Lv10ClothesDungeon -> D0
+    if (!lv || strncmp(lv, "Lv", 2) || !isdigit((unsigned char)lv[2]) || !isdigit((unsigned char)lv[3])) return "";
+    int n = (lv[2] - '0') * 10 + (lv[3] - '0');
+    if (n == 10) return "D0";
+    if (n < 1 || n > 8) return "";
+    return std::string("D") + (char)('0' + n);
+}
+
+extern "C" bool tracker_dungeon_wanted(void) {
+    if (!rando_seed_dir() || !g_settings.tracker || !chaos_dgnmap_shown()) return false;
+    if (!g_loaded) load();
+    return g_loaded > 0 && !level_dungeon(chaos_current_level()).empty();
+}
+
+extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font) {
+    uint64_t now = renderer_present_count();
+    UiState &ui = g_ui;
+    static uint64_t seen_at;
+    bool reopened = now - seen_at > 2;
+    seen_at = now;
+    if (!g_indexed) build_index();
+    if (reopened || ui.last_solve == ~0ull || now - ui.last_solve > 30) update_status(), ui.last_solve = now;
+    if (reopened) ui.panel = false, ui.filter_focus = false, ui.spot = -1, g_vanilla = false, ui.sel_type = -1;
+    g_dgn_avail_frame = now;
+    float bw = fminf(display.x, display.y * 16.0f / 9.0f), bh = bw * 9.0f / 16.0f;
+    float ox = (display.x - bw) * 0.5f, oy = (display.y - bh) * 0.5f, u = bw / 1280.0f;
+    ImDrawList *dl = ImGui::GetForegroundDrawList();
+    if (g_vanilla) {
+        draw_prompt(dl, font, 19 * u, ImVec2(ox + 64 * u, oy + 668 * u), "ZR", "Tracker", u);
+        g_panel_open = false, g_filter_open = false;
+        return;
+    }
+    float v[8];
+    const char *lv = chaos_current_level();
+    std::string dk = level_dungeon(lv);
+    if (!chaos_dgnmap_view(v) || dk.empty()) return;
+    g_dgn_draw_frame = now;
+    auto to_screen = [&](float lx, float ly) {  // layout (centre origin, y up) inside the map -> screen
+        float x = v[0] + v[2] * (v[3] + v[5] * (v[6] + lx)), y = v[1] + v[2] * (v[4] + v[5] * (v[7] + ly));
+        return ImVec2(ox + (640 + x) * u, oy + (360 - y) * u);
+    };
+    const float CW = 81.5f, CH = 64.75f;
+    float sc = v[2] * v[5], zs = sc > 1 ? fminf(sc, 1.6f) : 1.0f;
+    ImGuiIO &io = ImGui::GetIO();
+    ImVec2 mouse = io.MousePos;
+    bool click = ImGui::IsMouseClicked(0), rclick = ImGui::IsMouseClicked(1);
+    static ImVec2 last_mouse;
+    bool mouse_moved = fabsf(mouse.x - last_mouse.x) + fabsf(mouse.y - last_mouse.y) > 2;
+    last_mouse = mouse;
+    int f = filters();
+    const char *filter_word = (f & F_IN_LOGIC) ? "In logic now" : (f & F_HIDE_DONE) ? "Hide checked" : "Everything";
+
+    // this dungeon's checks, by room
+    std::vector<int> all;
+    std::unordered_map<std::string, std::vector<int>> by_room;
+    for (int i = 0; i < (int)g_checks.size(); i++)
+        if (g_checks[i].dungeon == dk) {
+            all.push_back(i);
+            if (!g_checks[i].dcell.empty()) by_room[g_checks[i].dcell].push_back(i);
+        }
+    auto on_page = [&](const std::string &cell) {  // (a room on another floor: not on this page)
+        for (auto &r : g_rooms)
+            if (r.cell == cell && r.level == lv) return fabsf(r.sx - v[6]) < 0.5f && fabsf(r.sy - v[7]) < 0.5f;
+        return true;
+    };
+    struct RB { std::string cell; Badge b; float x, y; };  // x, y: layout units (the bullet's centre)
+    std::vector<RB> rbs;
+    for (auto &e : by_room) {
+        if (e.first.size() != 3 || !on_page(e.first)) continue;
+        Badge b = badge_of(e.second, f);
+        if (!b.open) continue;
+        int row = (e.first[0] - '0') * 10 + (e.first[1] - '0'), col = e.first[2] - 'A';
+        float x0 = -326 + col * CW, top = 259 - (row - 1) * CH;
+        rbs.push_back({e.first, b, x0 + 13, top - 13});
+    }
+    std::sort(rbs.begin(), rbs.end(), [](const RB &a, const RB &b) { return a.cell < b.cell; });
+    int cur = -1;
+    for (size_t i = 0; i < rbs.size(); i++) if (ui.sel_type == 2 && ui.sel_id == (int)i) cur = (int)i;
+    static std::string cur_cell;
+    if (cur < 0 || cur >= (int)rbs.size() || rbs[cur].cell != cur_cell) {
+        cur = -1;
+        for (size_t i = 0; i < rbs.size(); i++) if (rbs[i].cell == cur_cell) cur = (int)i;
+        if (cur < 0 && !rbs.empty()) cur = 0;
+    }
+    std::vector<Chip> chips = make_chips();
+    if (ui.chip >= (int)chips.size()) ui.chip = (int)chips.size() - 1;
+    std::vector<Row> rows;
+    list_rows(all, rows);
+    auto open_list = [&](const std::string &cell) {
+        ui.panel = true, ui.panel_type = 1, ui.panel_row = 0, ui.panel_scroll = 0, ui.filter_focus = false;
+        for (size_t i = 0; i < rows.size(); i++)
+            if (g_checks[rows[i].check].dcell == cell) { ui.panel_row = (int)i; break; }
+    };
+
+    // controller events
+    for (uint32_t r = g_evr.load(); r != g_evw.load(); r = g_evr.load()) {
+        uint32_t ev = g_evq[r & 63];
+        g_evr.store(r + 1);
+        int kind = ev & 0xff;
+        if (kind == EV_NAV) {
+            float a = (float)(ev >> 8) * 0.0174533f, dx = cosf(a), dy = -sinf(a);
+            if (ui.panel) {
+                if (fabsf(dy) > fabsf(dx)) ui.panel_row += dy > 0 ? 1 : -1;
+            } else if (ui.filter_focus) {
+                if (fabsf(dy) > fabsf(dx)) ui.chip = (ui.chip + (dy > 0 ? 1 : (int)chips.size() - 1)) % (int)chips.size();
+            } else if (cur >= 0) {  // the nearest room bullet that way
+                int best = -1;
+                float bs = 1e9f;
+                for (int pass = 0; pass < 2 && best < 0; pass++)
+                    for (size_t i = 0; i < rbs.size(); i++) {
+                        if ((int)i == cur) continue;
+                        float vx = rbs[i].x - rbs[cur].x, vy = -(rbs[i].y - rbs[cur].y);
+                        float along = vx * dx + vy * dy, side = fabsf(vx * dy - vy * dx);
+                        if (along <= 1 || (pass == 0 && side > along * 2.2f)) continue;
+                        float s = along + (pass == 0 ? 2 : 4) * side;
+                        if (s < bs) bs = s, best = (int)i;
+                    }
+                if (best >= 0) cur = best;
+            }
+        } else if (kind == EV_A) {
+            if (ui.filter_focus) set_filters(f ^ chips[ui.chip].bit), f = filters();
+            else if (ui.panel && ui.panel_row < (int)rows.size()) {  // A on a row: that room
+                const std::string &cell = g_checks[rows[ui.panel_row].check].dcell;
+                for (size_t i = 0; i < rbs.size(); i++) if (rbs[i].cell == cell) cur = (int)i;
+                ui.panel = false;
+            } else if (!ui.panel) open_list(cur >= 0 ? rbs[cur].cell : "");
+        } else if (kind == EV_B) {
+            if (ui.panel) ui.panel = false;
+            else ui.filter_focus = false;
+        } else if (kind == EV_Y) {
+            if (!ui.panel) ui.filter_focus = !ui.filter_focus;
+        }
+    }
+    if (cur >= 0) cur_cell = rbs[cur].cell, ui.sel_type = 2, ui.sel_id = cur;
+
+    // bullets (inside the map window)
+    dl->PushClipRect(ImVec2(ox + 64 * u, oy + 116 * u), ImVec2(ox + 1216 * u, oy + 636 * u), true);
+    float br = 10.5f * u * zs;
+    int hover = -1;
+    for (size_t i = 0; i < rbs.size(); i++) {
+        ImVec2 p = to_screen(rbs[i].x, rbs[i].y);
+        const Badge &b = rbs[i].b;
+        dl->AddCircleFilled(ImVec2(p.x + 1.5f * u, p.y + 2 * u), br + 2 * u, IM_COL32(40, 25, 5, 90));
+        dl->AddCircleFilled(p, br + 2 * u, P_BROWN);
+        dl->AddCircleFilled(p, br, kStCol[b.best]);
+        char t[8];
+        snprintf(t, sizeof t, "%d", b.open);
+        float fs = (b.open > 9 ? 13.0f : 15.0f) * u * zs;
+        ImVec2 ts = text_size(font, fs, t);
+        dl->AddText(font, fs, ImVec2(p.x - ts.x * 0.5f, p.y - ts.y * 0.5f), kStFg[b.best], t);
+        if (hypotf(mouse.x - p.x, mouse.y - p.y) < br * 1.4f) hover = (int)i;
+        if ((int)i == cur && !ui.filter_focus) {
+            float pulse = 1.0f + 0.12f * sinf((float)now * 0.12f);
+            dl->AddCircle(p, (br + 6 * u) * pulse, P_BROWN, 0, 5 * u);
+            dl->AddCircle(p, (br + 6 * u) * pulse, IM_COL32(0xFF, 0xE0, 0x6A, 255), 0, 3 * u);
+        }
+    }
+    dl->PopClipRect();
+    if (!ui.panel && !ui.filter_focus && hover >= 0) {
+        if (mouse_moved || click) cur = hover, cur_cell = rbs[hover].cell;
+        if (click) open_list(rbs[hover].cell), click = false;
+    }
+
+    // the legend: right of the map paper
+    {
+        std::vector<std::string> pills = dungeon_pills(dk);
+        int found = 0;
+        for (int i : all) found += g_status[i] == ST_DONE;
+        char b[48];
+        snprintf(b, sizeof b, "%d / %d found", found, (int)all.size());
+        pills.push_back(b);
+        float fs = 14 * u, lh = fs + 6 * u, w = 168 * u;
+        bool letters = g_settings.chaos_letters != CHAOS_LETTERS_OFF && g_room_shuffle != "off" && !g_room_shuffle.empty() &&
+                       g_room_shuffle != "coherent";
+        float h = 16 * u + lh * pills.size() + (letters ? lh * 3 + 10 * u : 0);
+        ImVec2 a(ox + 1222 * u - w, oy + 128 * u), z(ox + 1222 * u, oy + 128 * u + h);
+        parchment(dl, a, z, u);
+        float y = a.y + 9 * u;
+        for (auto &p : pills) {
+            std::string t = p.compare(0, 14, "Room shuffle: ") ? p : p.substr(14) + " shuffle";
+            dl->AddText(font, fs, ImVec2(a.x + 12 * u, y), P_INK, t.c_str());
+            y += lh;
+        }
+        if (letters) {  // what the letters on doorways mean (runtime/ui/chaos_overlay.mm draws them)
+            y += 4 * u;
+            dl->AddLine(ImVec2(a.x + 12 * u, y), ImVec2(z.x - 12 * u, y), P_LINE, 1.2f * u);
+            y += 6 * u;
+            float r = fs * 0.62f;
+            ImVec2 c(a.x + 12 * u + r, y + lh * 0.5f);
+            dl->AddCircleFilled(c, r, IM_COL32(40, 22, 10, 220));
+            ImVec2 ts = text_size(font, fs, "A");
+            dl->AddText(font, fs, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), IM_COL32(255, 240, 200, 255), "A");
+            dl->AddText(font, fs, ImVec2(c.x + r + 8 * u, y), P_INK, "leads to A");
+            y += lh;
+            if (g_room_shuffle == "madness") {
+                c.y += lh;
+                dl->AddRectFilled(ImVec2(c.x - r, c.y - r * 0.7f), ImVec2(c.x + r, c.y + r * 0.7f), IM_COL32(90, 30, 20, 230), r * 0.3f);
+                dl->AddTriangleFilled(ImVec2(c.x - r * 0.5f, c.y - r * 0.4f), ImVec2(c.x - r * 0.5f, c.y + r * 0.4f), ImVec2(c.x + r * 0.4f, c.y),
+                                      IM_COL32(255, 200, 120, 255));
+                dl->AddText(font, fs, ImVec2(c.x + r + 8 * u, y), P_INK, "one-way");
+            }
+        }
+    }
+
+    // the bottom line: the cursor's room, the prompts
+    {
+        float y = oy + 668 * u, pfs = 19 * u;
+        std::vector<std::pair<const char *, std::string>> pr;
+        if (ui.panel) pr = {};
+        else if (ui.filter_focus) pr = {{"A", "Toggle"}, {"Y", "Close"}};
+        else pr = {{"Y", std::string("Filter: ") + filter_word}, {"A", "Open"}, {"ZR", "Game map"}};
+        float pw = 0;
+        for (auto &p : pr) pw += prompt_width(font, pfs, p.first, p.second.c_str()) + 22 * u;
+        float px = ox + 1226 * u - pw;
+        for (auto &p : pr) px += draw_prompt(dl, font, pfs, ImVec2(px, y), p.first, p.second.c_str(), u) + 22 * u;
+        char info[160] = "";
+        if (cur >= 0 && !ui.panel) {
+            int n[4] = {0, 0, 0, 0};
+            for (int i : by_room[rbs[cur].cell]) n[g_status[i]]++;
+            Check tmp;
+            tmp.dcell = rbs[cur].cell;
+            int k = snprintf(info, sizeof info, "%s: %d in logic", room_label(tmp).c_str(), n[ST_LOGIC]);
+            if (n[ST_TRICK] && k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d trick", n[ST_TRICK]);
+            if (n[ST_NEEDS] && k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d need an item", n[ST_NEEDS]);
+        }
+        dl->PushClipRect(ImVec2(ox + 64 * u, y - 4 * u), ImVec2(ox + 1226 * u - pw - 16 * u, y + 40 * u), true);
+        shadow_text(dl, font, pfs * 0.92f, ImVec2(ox + 64 * u, y + pfs * 0.04f), info, u);
+        dl->PopClipRect();
+    }
+    if (ui.filter_focus) draw_filter_panel(dl, font, ox, oy, u, f, mouse, mouse_moved, click);
+    if (ui.panel) {
+        int found = 0;
+        for (auto &r : rows) found += r.st == ST_DONE;
+        ListView lvw;
+        lvw.title = dungeon_name(dk);
+        char sub[48];
+        snprintf(sub, sizeof sub, "%d / %d found", found, (int)rows.size());
+        lvw.sub = sub;
+        lvw.filt = std::string("Filter: ") + filter_word;
+        lvw.pills = dungeon_pills(dk);
+        lvw.foot = "Up / Down  choose      A  show room      B  back";
+        lvw.dim = ImVec4(ox + 300 * u, oy + 100 * u, ox + 980 * u, oy + 640 * u);
+        bool close = false;
+        int ch = draw_list(dl, font, ox, oy, u, lvw, rows, ui.panel_row, ui.panel_scroll, mouse, mouse_moved, click, rclick,
+                           io.MouseWheel, &close);
+        if (ch >= 0) {
+            for (size_t i = 0; i < rbs.size(); i++) if (rbs[i].cell == g_checks[ch].dcell) cur_cell = rbs[i].cell;
+            ui.panel = false;
+        } else if (close) ui.panel = false;
+    } else if (rclick) ui.filter_focus = false;
+    g_panel_open = ui.panel;
     g_filter_open = ui.filter_focus;
 }
