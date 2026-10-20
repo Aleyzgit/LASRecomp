@@ -22,7 +22,8 @@ bool opt_int(const char *label, int *v, int lo, int hi, int step, int def, const
 // a Cosmetics colour row (the shared palette, runtime/cosmetic_colour.h): Default, the named colours, Random, Custom;
 // with Custom, a row under it shows the colour and opens a colour picker. True when the colour changed.
 struct CosColour;
-bool opt_colour(const char *label, CosColour *c, const char *desc);
+// slot: the row (COL_SLOT_*): on Default it shows the randomizer seed's colour as "Seed: <colour>" when it has one.
+bool opt_colour(const char *label, CosColour *c, int slot, const char *desc);
 // an action: true when activated
 bool opt_button(const char *label, const char *desc);
 // one of a set of choices (a ring on the right, filled when selected); true when chosen

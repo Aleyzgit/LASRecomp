@@ -441,8 +441,10 @@ static void tab_display(void) {
     opt_end();
 }
 
+extern "C" bool cosmetics_seed_on(void);  // runtime/cosmetics_seed.c
+
 // Cosmetics: tunic / heart colours, live (runtime/nvn/texpatch.c), and recolours by draw (runtime/nvn/recolour*.c);
-// never part of a seed
+// a seed made with "Random cosmetics" fills the rows left on Default (shown as "Seed: <colour>")
 static void tab_cosmetics(void) {
     opt_begin("##cosmetics", ImGui::GetFontSize() / 34);
     CosColour *rows[] = {&g_settings.tunic, &g_settings.hearts, &g_settings.hair, &g_settings.skin, &g_settings.shield,
@@ -455,21 +457,23 @@ static void tab_cosmetics(void) {
         g_settings.screen_filter = 0;
     }
     opt_section("Colors");
-    opt_colour("Tunic color", &g_settings.tunic, "Link's tunic color. Default: the game's own (or the randomizer seed's).");
-    opt_colour("Heart color", &g_settings.hearts, "The color of the hearts on the HUD.");
-    opt_colour("Hair color", &g_settings.hair, "Link's hair color.");
-    opt_colour("Body color", &g_settings.skin, "Link's body color.");  // (larecomp.ini: skin)
-    opt_colour("Shield color", &g_settings.shield, "The color of Link's shield.");
+    opt_colour("Tunic color", &g_settings.tunic, COL_SLOT_TUNIC,
+               "Link's tunic color. Default: the game's own (or the randomizer seed's).");
+    opt_colour("Heart color", &g_settings.hearts, COL_SLOT_HEARTS, "The color of the hearts on the HUD.");
+    opt_colour("Hair color", &g_settings.hair, COL_SLOT_HAIR, "Link's hair color.");
+    opt_colour("Body color", &g_settings.skin, COL_SLOT_SKIN, "Link's body color.");  // (larecomp.ini: skin)
+    opt_colour("Shield color", &g_settings.shield, COL_SLOT_SHIELD, "The color of Link's shield.");
     opt_section("Overworld");
     {   // Season: fills Leaves, Grass and Sand at once (palette: Orange 2, Gold 3, Pink 9, White 10); "Mixed" when
         // they match none
         static const char *const names[] = {"Spring", "Autumn", "Winter", "Cherry blossom", "Mixed"};
         static const int preset[4][3] = {{COL_DEFAULT, COL_DEFAULT, COL_DEFAULT}, {2, 3, 3}, {10, 10, 10},
                                          {9, COL_DEFAULT, COL_DEFAULT}};
-        int cur = 4;
+        int cur = 4;  // (as shown: a row on Default shows the seed's colour, if it has its own)
         for (int i = 0; i < 4; i++)
-            if (g_settings.leaves.pick == preset[i][0] && g_settings.grass.pick == preset[i][1] &&
-                g_settings.sand.pick == preset[i][2])
+            if (col_pick(&g_settings.leaves, COL_SLOT_LEAVES) == preset[i][0] &&
+                col_pick(&g_settings.grass, COL_SLOT_GRASS) == preset[i][1] &&
+                col_pick(&g_settings.sand, COL_SLOT_SAND) == preset[i][2])
                 cur = i;
         int v = cur;
         if (opt_choice("Season", &v, names, 5, 0, "Sets the leaves, grass and sand colors below.") && v != cur) {
@@ -479,12 +483,17 @@ static void tab_cosmetics(void) {
             g_settings.sand.pick = preset[v][2];
         }
     }
-    opt_colour("Leaves color", &g_settings.leaves, "The overworld's tree leaves and bushes.");
-    opt_colour("Grass color", &g_settings.grass, "The overworld's grass.");
-    opt_colour("Sand color", &g_settings.sand, "The beaches, the desert and the sandy south.");
+    opt_colour("Leaves color", &g_settings.leaves, COL_SLOT_LEAVES, "The overworld's tree leaves and bushes.");
+    opt_colour("Grass color", &g_settings.grass, COL_SLOT_GRASS, "The overworld's grass.");
+    opt_colour("Sand color", &g_settings.sand, COL_SLOT_SAND, "The beaches, the desert and the sandy south.");
     opt_section("Enemies");
-    opt_choice("Enemy colors", &g_settings.enemy_colours, g_enemy_colour_modes, N_ENEMY_COLOUR_MODES, 0,
-               "Each kind of enemy in another color. Enemies whose color shows their strength or type keep theirs.");
+    {   // (Off in a seed with its own cosmetics: "Seed", its enemies are per seed)
+        const char *modes[N_ENEMY_COLOUR_MODES];
+        for (int i = 0; i < N_ENEMY_COLOUR_MODES; i++) modes[i] = g_enemy_colour_modes[i];
+        if (cosmetics_seed_on()) modes[0] = "Seed";
+        opt_choice("Enemy colors", &g_settings.enemy_colours, modes, N_ENEMY_COLOUR_MODES, 0,
+                   "Each kind of enemy in another color. Enemies whose color shows their strength or type keep theirs.");
+    }
     opt_section("Screen");
     opt_choice("Screen filter", &g_settings.screen_filter, g_screen_filters, N_SCREEN_FILTERS, 0,
                "A filter over the whole picture, the HUD included.");

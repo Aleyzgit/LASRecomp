@@ -37,6 +37,16 @@ void col_format(const CosColour *c, char *out, size_t n) {
     else snprintf(out, n, "%s", g_col_names[c->pick >= 0 && c->pick < N_COL ? c->pick : 0]);
 }
 
+int (*g_col_seed_pick)(int slot);
+
+int col_pick(const CosColour *c, int slot) {
+    if (c->pick == COL_DEFAULT && g_col_seed_pick) {
+        int p = g_col_seed_pick(slot);
+        if (p > COL_DEFAULT && p < COL_RANDOM) return p;
+    }
+    return c->pick;
+}
+
 bool col_target(const CosColour *c, int slot, uint32_t *rgb) {
     static int picks[COL_SLOTS];
     static unsigned seed;
@@ -52,8 +62,9 @@ bool col_target(const CosColour *c, int slot, uint32_t *rgb) {
         *rgb = g_col_rgb[picks[slot]];
         return true;
     }
-    if (c->pick <= COL_DEFAULT || c->pick >= COL_RANDOM) return false;
-    *rgb = g_col_rgb[c->pick];
+    int p = col_pick(c, slot);  // (Default: the seed's colour, if it has one)
+    if (p <= COL_DEFAULT || p >= COL_RANDOM) return false;
+    *rgb = g_col_rgb[p];
     return true;
 }
 

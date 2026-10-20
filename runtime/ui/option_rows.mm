@@ -198,9 +198,14 @@ bool opt_action(const char *label, const char *value, const char *desc, bool upp
     return row(label, value ? value : "", changed, desc, upper) == 2;
 }
 
-bool opt_colour(const char *label, CosColour *c, const char *desc) {
+bool opt_colour(const char *label, CosColour *c, int slot, const char *desc) {
     int prev = c->pick;
-    bool changed = opt_choice(label, &c->pick, g_col_names, N_COL, COL_DEFAULT, desc);
+    const char *names[N_COL];
+    for (int i = 0; i < N_COL; i++) names[i] = g_col_names[i];
+    char seed[48];
+    int sp = col_pick(c, slot);  // (Default: the seed's own colour, shown as such)
+    if (c->pick == COL_DEFAULT && sp != COL_DEFAULT) snprintf(seed, sizeof seed, "Seed: %s", g_col_names[sp]), names[0] = seed;
+    bool changed = opt_choice(label, &c->pick, names, N_COL, COL_DEFAULT, desc);
     if (changed && c->pick == COL_CUSTOM && prev != COL_CUSTOM)  // (Custom starts from the colour it was on)
         c->rgb = prev > COL_DEFAULT && prev < COL_RANDOM ? g_col_rgb[prev] : (c->rgb ? c->rgb : 0xF2F0EA);
     if (c->pick != COL_CUSTOM) return changed;
