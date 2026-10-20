@@ -68,6 +68,8 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Game-files delete guard (links, outside the data folder)
+        run: DEPS="$HOME/sdl3" python3 tools/test_delete_guard.py
       - name: Dynamic resolution controller (simulated GPU)
         run: python3 tools/test_dynres.py
       - name: Controller light colours
@@ -124,6 +126,8 @@ jobs:
           build/test-condvar
       - name: Settings regression tests
         run: python3 tools/test_settings.py
+      - name: Game-files delete guard (links, outside the data folder)
+        run: python3 tools/test_delete_guard.py
       - name: Dynamic resolution controller (simulated GPU)
         run: python3 tools/test_dynres.py
       - name: Controller light colours
@@ -165,6 +169,8 @@ jobs:
           python3 tools/test_windows_processes.py
       - name: Save I/O regression tests
         run: python3 tools/test_save.py
+      - name: Game-files delete guard (junctions, outside the data folder)
+        run: python3 tools/test_delete_guard.py
       - name: Movie extractor lifecycle regression
         run: |
           clang -std=gnu11 -O1 tools/test_movie_extractor.c -lavformat -lavcodec -lavutil -lswscale -o build/test-movie-extractor.exe
