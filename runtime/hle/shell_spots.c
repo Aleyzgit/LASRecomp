@@ -288,18 +288,34 @@ static uint64_t fly_motion(uint64_t actor, const float at[3]) {
     return fabsf(f[0] - at[0]) < 0.3f && fabsf(f[1] - at[1]) < 0.6f && fabsf(f[2] - at[2]) < 0.3f ? m : 0;
 }
 
-static void fly_start(Cpu *c, Spot *s) {
+static void fly_start(Cpu *c, Spot *s, uint64_t frame) {
     extern uint64_t digs_last_actor;
     const char *strs[5] = {s->model, s->mname, s->entry, s->flag, s->shell ? "true" : "false"};
     bool up;
     s->fly_queued = false;
     if (s->item) digs_drop_ref(c, &s->item);
-    bool loaded = digs_spawn_item(c, s->room, 0x7d00000000000000ull | (uint64_t)s->index, g_zone, s->from, s->scale,
-                                  s->turn, strs, &s->item, &up);
+    // the room it is spawned into: the landing tile's screen (it lies there - a screen's actors go with its room;
+    // the Tal Tal hole's item lands on the plateau of the next screen), else the hole's own, else Link's
+    char rooms[3][16] = {"", "", ""};
+    int nr = 0;
+    if (!strcmp(s->level, "Field")) {
+        snprintf(rooms[nr++], 16, "Field_%02d%c", (int)floorf(s->z / 12.0f) + 1, 'A' + (int)floorf(s->x / 15.0f));
+        uint64_t pc0 = doorjump_player(frame);
+        const float *p = pc0 ? (const float *)(uintptr_t)(pc0 + 0x80) : NULL;
+        if (p) snprintf(rooms[2], 16, "Field_%02d%c", (int)floorf(p[2] / 12.0f) + 1, 'A' + (int)floorf(p[0] / 15.0f));
+    }
+    snprintf(rooms[nr++], 16, "%s", s->room);
+    if (rooms[2][0]) memcpy(rooms[nr++], rooms[2], 16);
+    bool loaded = false;
+    int r;
+    for (r = 0; r < nr && !loaded; r++)
+        loaded = digs_spawn_item(c, rooms[r], 0x7d00000000000000ull | (uint64_t)s->index, g_zone, s->from, s->scale,
+                                 s->turn, strs, &s->item, &up);
     if (!loaded || !up || !digs_last_actor) {
-        LOG("[shells] %s: item %s not up (%s)\n", s->name, s->mname, loaded ? "spawn failed" : "screen not loaded");
+        LOG("[shells] %s: item %s not up (%s)\n", s->name, s->mname, loaded ? "spawn failed" : "no screen loaded");
         return;  // (s->dropped stays: Link leaving the screen lets it drop again)
     }
+    if (r > 1) LOG("[shells] %s: (spawned into %s)\n", s->name, rooms[r - 1]);
     // the shell's upward speed (at least enough to come down on the landing tile), sideways aimed at the tile
     float dx = s->x - s->from[0], dz = s->z - s->from[2], d = sqrtf(dx * dx + dz * dz);
     float vy = (s->v0[1] > 0.5f ? s->v0[1] : 2.24133f) / 60.0f, sum = 0;
@@ -435,7 +451,7 @@ void shell_spots_tick(Cpu *c, uint64_t frame) {
     }
     for (int i = 0; i < g_n; i++) {  // a tree's / bomb hole's item: launched, then flying
         Spot *s = &g_spots[i];
-        if (s->fly_queued && !strcmp(lv, s->level)) fly_start(c, s);
+        if (s->fly_queued && !strcmp(lv, s->level)) fly_start(c, s, frame);
         else if (s->fly_t >= 0) fly_step(s);
     }
     for (int i = 0; i < g_n; i++) {
