@@ -26,11 +26,14 @@ typedef struct {
     double secs;
     double wobble;      // the scene's load swings +-this over 20 s (0: 3%; frame to frame +-2%: the floor's 30.6 fps)
     double heavy_at, heavy, heavy_until;  // > 0: G x heavy from heavy_at (s) until heavy_until (0: the end)
+    double wander;      // > 0: the scene's load wanders at random (walking around: +-this typical, over a few seconds)
+    double lines;       // the window's height (0: 2160, 4K); the floor depends on it (1080: 0.50, 2160: 1/3)
 } Case;
 
 typedef struct {
     double f_end, fps_end, hold_end;  // hold_end: the frame rate the controller says it holds (0: none)
     int changes_last60, hold_changes;  // hold_changes: the held rate changed (30 <-> 20 <-> 60), the whole run
+    int changes_settled;  // factor changes after the first 20 s
     double f_min_last60, f_max_last60;
     double hold_t;  // when the held rate last changed (s)
 } Result;
@@ -39,17 +42,20 @@ static Result run(const Case *c) {
     g_rng = 7;
     double now = 1.0, f = output_scale_dynamic_factor(), g_prev = -1, w_prev = -1;
     double frames_end = 0, t_end = 0, last_f = f, f_min = 1, f_max = 0, last_hold = 0, hold_t = 0;
-    int changes = 0, hold_changes = 0;
+    int changes = 0, hold_changes = 0, settled = 0;
+    double walk = 0;  // (wander: the load's random part, log scale)
     printf("%s\n  t=0s %.2f", c->name, f);
     int col = 0;
     while (now < c->secs) {
         OutScale o;
-        output_scale(3840, 2160, false, now, g_prev, w_prev, &o);
+        double lines = c->lines > 0 ? c->lines : 2160;
+        output_scale(lines * 16 / 9, lines, false, now, g_prev, w_prev, &o);
         f = output_scale_dynamic_factor();
         if (f != last_f) {
             printf(" | %.0fs %.2f", now, f);
             if (++col % 8 == 0) printf("\n ");
             if (now > c->secs - 60) changes++;
+            if (now > 20) settled++;
             last_f = f;
         }
         double hold = output_scale_dynamic_hold_fps();
@@ -61,6 +67,11 @@ static Result run(const Case *c) {
         if (now > c->secs - 60) { f_min = fmin(f_min, f); f_max = fmax(f_max, f); }
         double scene = (1 + (c->wobble > 0 ? c->wobble : 0.03) * sin(now * 2 * M_PI / 20)) * (c->light_at > 0 && now > c->light_at ? 0.6 : 1.0);
         if (c->heavy_at > 0 && now > c->heavy_at && (c->heavy_until <= 0 || now < c->heavy_until)) scene *= c->heavy;
+        if (c->wander > 0) {  // mean-reverting over ~3 s, typical size c->wander
+            double gauss = (rnd() + rnd() + rnd() + rnd() - 2) * 1.732, dt = 1 / 60.0;
+            walk += -walk / 3.0 * dt + c->wander * sqrt(2 / 3.0) * sqrt(dt) * gauss;
+            scene *= exp(walk);
+        }
         double g = (c->a + c->b * f * f) * scene * (0.98 + 0.04 * rnd()), w = c->w * (0.99 + 0.02 * rnd());
         double gw = g + w, p = c->fifo ? ceil(gw / 16.667 - 1e-9) * 16.667 : gw;
         if (p < 16.667) p = 16.667;
@@ -68,9 +79,9 @@ static Result run(const Case *c) {
         now += p / 1000;
         if (now > c->secs - 10) frames_end++, t_end += p / 1000;
     }
-    Result r = {f, frames_end / t_end, last_hold, changes, hold_changes, f_min, f_max, hold_t};
-    printf("\n  end: factor %.2f, %.1f fps over the last 10 s (holding %.0f), %d change%s in the last 60 s (%.2f-%.2f)\n\n",
-           r.f_end, r.fps_end, r.hold_end, changes, changes == 1 ? "" : "s", f_min, f_max);
+    Result r = {f, frames_end / t_end, last_hold, changes, hold_changes, f_min, f_max, hold_t, settled};
+    printf("\n  end: factor %.2f, %.1f fps over the last 10 s (holding %.0f), %d change%s in the last 60 s (%.2f-%.2f), %d after 20 s\n\n",
+           r.f_end, r.fps_end, r.hold_end, changes, changes == 1 ? "" : "s", f_min, f_max, settled);
     return r;
 }
 
@@ -89,9 +100,9 @@ int main(int argc, char **argv) {
         {"4K SMAA + FSR 1 (G 13.1 + W 20.2 at 0.50, fifo)", 3.3, 39.2, 20.2, 1, 0, 180},
         // 1080p, bilinear: G 10.9 W 0.2 at 0.65, hunting 0.65 <-> 0.75 before (the old raise needed G < 10.5, a step
         // down G + W > 14.5): G = 0.3 + 25.1 f^2 (10.9 at 0.65, 14.4 at 0.75), the load swinging +-5%
-        {"1080p bilinear (G 10.9 + W 0.2 at 0.65, fifo)", 0.3, 25.1, 0.2, 1, 0, 180, 0.05},
+        {"1080p bilinear (G 10.9 + W 0.2 at 0.65, fifo)", 0.3, 25.1, 0.2, 1, 0, 180, 0.05, 0, 0, 0, 0, 1080},
         // 1080p, SMAA + FSR 1: G 9.1 W 8.1 at 0.50 -> 30 fps (G = 6.5 + 10.4 f^2: a large part that doesn't scale)
-        {"1080p SMAA + FSR 1 (G 9.1 + W 8.1 at 0.50, fifo)", 6.5, 10.4, 8.1, 1, 0, 180},
+        {"1080p SMAA + FSR 1 (G 9.1 + W 8.1 at 0.50, fifo)", 6.5, 10.4, 8.1, 1, 0, 180, 0, 0, 0, 0, 0, 1080},
         // control: the frames don't wait (mailbox): every step down is a faster frame, so down to the floor as before
         {"4K bilinear, mailbox (G 16.3 + W 0.9 at 0.50)", 4.1, 48.8, 0.9, 0, 0, 120},
         // the scene gets lighter (x0.6) at 90 s: 60 fps fits at the floor again
@@ -103,9 +114,9 @@ int main(int argc, char **argv) {
         // a busier scene: its load swings +-15%: it follows the scene, the hold stays
         {"4K bilinear, load swinging +-15% (fifo)", 4.1, 48.8, 0.9, 1, 0, 180, 0.15},
         // 1080p bilinear with the load swinging +-15%: steps with the scene, slowly (the raise wait doubles)
-        {"1080p bilinear, load swinging +-15% (fifo)", 0.3, 25.1, 0.2, 1, 0, 180, 0.15},
+        {"1080p bilinear, load swinging +-15% (fifo)", 0.3, 25.1, 0.2, 1, 0, 180, 0.15, 0, 0, 0, 0, 1080},
         // the game's own scaler off (it rendered 1280x720 here before): 1080p at 0.50 G 13.9-14.5 ms, 43.7 fps
-        {"1080p bilinear, game scaler off (G 14.2 + W 0.2 at 0.50, fifo)", 3, 44.8, 0.2, 1, 0, 180},
+        {"1080p bilinear, game scaler off (G 14.2 + W 0.2 at 0.50, fifo)", 3, 44.8, 0.2, 1, 0, 180, 0, 0, 0, 0, 0, 1080},
         // 4K, SMAA + FSR 1 with the game scaler off: G + W 44 ms at 0.50 (no reaction before: at the floor already)
         {"4K SMAA + FSR 1, game scaler off (G 23.8 + W 20.2 at 0.50, fifo)", 6, 71.2, 20.2, 1, 0, 180},
         // a hold whose G grows (UHD 770 4K bilinear: 19.4 -> 27.9 ms at 0.50 after holding 30; G mostly fixed here):
@@ -118,6 +129,11 @@ int main(int argc, char **argv) {
         {"4K bilinear, held 30, G x1.8 from 60 s to 150 s (fifo)", 14, 37.6, 0.9, 1, 0, 300, 0, 60, 1.8, 150},
         // x1.8 swinging +-15%: 20 fps, no hunting between 20 and 30
         {"4K bilinear, held 30, G x1.8 from 30 s, load swinging +-15% (fifo)", 14, 37.6, 0.9, 1, 0, 240, 0.15, 30, 1.8},
+        // walking around, a fast GPU at the edge (5120x1440 class: G 13.6 + W 1 at 1.00, the load wandering +-10%):
+        // it hunted here - 45 steps in 6 min before. A few changes at most
+        {"edge at 1.00, load wandering +-10% (fifo)", 1.6, 12, 1.0, 1, 0, 360, 0.01, 0, 0, 0, 0.10},
+        // the same edge lower down (G 13.2 at 0.80), wandering +-15%
+        {"edge at 0.80, load wandering +-15% (fifo)", 1.5, 18.3, 0.8, 1, 0, 360, 0.01, 0, 0, 0, 0.15},
     };
     int n = sizeof cases / sizeof *cases;
     if (argc < 2) { printf("%d\n", n); return 0; }
@@ -125,16 +141,18 @@ int main(int argc, char **argv) {
     Result r = run(&cases[i]);
     // (the floor is 1/3 since the game's scaler is off: the cases that held 30 at 0.50 reach 60 under it)
     switch (i) {
+    // (the floor: 1/3 at 4K, 0.50 in a 1080p window - 540 lines)
     case 0: check(r.f_end >= 0.35 && r.fps_end > 58 && r.changes_last60 == 0, "4K bilinear: 60 under 0.50"); break;
     case 1: check(r.fps_end > 28 && r.changes_last60 <= 2, "4K FSR: 30 fps at the floor"); break;
     case 2: check(r.fps_end > 58 && r.changes_last60 == 0 && r.f_end >= 0.65, "1080p bilinear: settle at 60"); break;
-    case 3: check(r.fps_end > 58 && r.changes_last60 <= 2, "1080p FSR: 60 at the floor"); break;
+    // (a 1080p window's floor is 0.50 now, 960x540: 60 is out of reach there, so it holds 30 - much sharper)
+    case 3: check(near(r.hold_end, 30) && r.fps_end > 29 && r.changes_last60 == 0, "1080p FSR: 30, sharper"); break;
     case 4: check(r.fps_end > 58 && r.f_end <= 0.45, "mailbox: 60 under 0.50"); break;
     case 5: check(r.fps_end > 58, "lighter scene: back to 60"); break;
     case 6: check(r.f_end >= 0.35 && r.fps_end > 58 && r.changes_last60 == 0, "4K bilinear f^2: 60 under 0.50"); break;
     case 7: check(r.f_end == 1.0 && r.fps_end > 58, "fast GPU: full resolution"); break;
-    case 8: check(r.f_min_last60 >= 0.35 && r.fps_end > 58 && r.changes_last60 <= 6, "4K bilinear +-15%: 60, steps with the scene"); break;
-    case 9: check(r.fps_end > 58 && r.changes_last60 <= 4, "1080p bilinear +-15%: 60, few steps"); break;
+    case 8: check(r.fps_end > 58 && r.changes_last60 <= 2, "4K bilinear +-15%: 60, steady"); break;
+    case 9: check(r.fps_end > 58 && r.changes_last60 <= 2, "1080p bilinear +-15%: 60, few steps"); break;
     case 10: check(r.fps_end > 58 && r.changes_last60 == 0, "1080p game scaler off: 60"); break;
     case 11: check(near(r.hold_end, 20) && r.fps_end > 19 && r.changes_last60 <= 2 && r.hold_changes <= 2, "4K FSR 44 ms: hold 20"); break;
     case 12: check(near(r.hold_end, 30) && r.fps_end > 28 && r.changes_last60 <= 2, "G x1.44: hold 30 at a lower factor"); break;
@@ -142,6 +160,8 @@ int main(int argc, char **argv) {
     case 14: check(near(r.hold_end, 30) && r.fps_end > 28 && r.changes_last60 <= 2 && r.hold_changes <= 4 && r.hold_t < 154,
                    "G x1.8 then back: 20, then 30 within a few seconds"); break;
     case 15: check(near(r.hold_end, 20) && r.fps_end > 19 && r.hold_changes <= 3, "G x2.2 +-15%: 20, no hunting"); break;
+    case 16: check(r.changes_settled <= 4 && r.fps_end > 58, "edge at 1.00 wandering: a few changes in 6 min"); break;
+    case 17: check(r.changes_settled <= 8 && r.fps_end > 58, "edge at 0.80 wandering: a few changes in 6 min"); break;
     }
     // a hold is real: the frames come at least at the rate it says
     if (r.hold_end > 0) check(r.fps_end >= 0.95 * r.hold_end, "the held frame rate is met");
