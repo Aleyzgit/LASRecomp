@@ -16,6 +16,7 @@ enum { AA_OFF = 0, AA_SMAA = 1 };
 enum { PROMPTS_AUTO = 0, PROMPTS_NINTENDO = 1, PROMPTS_XBOX = 2, PROMPTS_PLAYSTATION = 3 };
 // Which face button confirms in our own menus (runtime/ui/pad_nav.mm); the game's input is never affected
 enum { MENU_CONFIRM_GAME = 0, MENU_CONFIRM_CONTROLLER = 1 };
+enum { TIMER_POS_LEFT = 0, TIMER_POS_RIGHT = 1 };  // the run timer's corner (bottom left / right)
 enum { CHAOS_LETTERS_OFF = 0, CHAOS_LETTERS_EXPLORED = 1, CHAOS_LETTERS_MAP = 2 /* explored, all with the Map */ };
 // System language served to the game (runtime/services/am.c GetDesiredLanguage, services/hid_set.c GetLanguageCode):
 // the game picks its text language from it, as it would from the Switch's own system setting. LANG_AUTO follows the
@@ -50,6 +51,7 @@ typedef struct {
     int menu_confirm;    // MENU_CONFIRM_*: game layout (right confirms, bottom goes back) or the controller's convention
     bool inv_keys;       // randomizer: show every dungeon's keys on the pause menu's Items page
     bool tracker;        // randomizer: check tracker on the pause menu's Map page
+    int tracker_filters; // its filter bar (runtime/ui/tracker_overlay.mm bits), -1 = the defaults; no menu row
     int chaos_letters;   // CHAOS_LETTERS_*: room-shuffle doorway letters on the dungeon map
     bool aspect_asked;   // the start screen's one-time "authentic 16:9 or unlocked?" question was answered
     bool menu_tip_seen;  // the start screen's one-time "how to open the menu" note was shown (first PLAY ever)
@@ -74,6 +76,11 @@ typedef struct {
     CosColour sand;           // the beaches, the desert, the sandy south (recolour_seasons.c)
     int enemy_colours;        // 0 Off, 1 Random per seed, 2 Random every load (runtime/nvn/recolour_enemies.c)
     int screen_filter;        // 0 Off, 1 Game Boy, 2 Game Boy Color, 3 Grayscale (runtime/nvn/screen_filter.h)
+    // speedrun (Gameplay tab; runtime/hle/run_timer.c, runtime/livesplit.c)
+    bool timer;            // the in-game run timer in the corner (game time: level loads don't count)
+    int timer_pos;         // TIMER_POS_*: which bottom corner it sits in
+    bool livesplit;        // drive LiveSplit (its Server component) over TCP: start, splits, game time
+    char livesplit_host[64];  // host:port of the LiveSplit Server ("localhost:16834")
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 

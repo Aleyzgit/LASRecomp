@@ -823,6 +823,10 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     static double fps_iv = -1, prev_present, max_gap;
     if (fps_iv < 0) fps_iv = getenv("LARECOMP_FPS_INTERVAL") ? atof(getenv("LARECOMP_FPS_INTERVAL")) : 2.0;
     if (prev_present > 0 && now - prev_present > max_gap) max_gap = now - prev_present;
+    static double hitch_ms = -1;  // LARECOMP_LOG_HITCH_MS=<ms>: every present gap over that (tests: hitches per run)
+    if (hitch_ms < 0) hitch_ms = getenv("LARECOMP_LOG_HITCH_MS") ? atof(getenv("LARECOMP_LOG_HITCH_MS")) : 0;
+    if (hitch_ms > 0 && prev_present > 0 && (now - prev_present) * 1000 > hitch_ms)
+        LOG("[hitch] t=%.2f frame %llu gap %.0f ms\n", now, (unsigned long long)frame, (now - prev_present) * 1000);
     prev_present = now;
     if (now - last_fps_time >= fps_iv) {
         extern const char *game_level_name(void);

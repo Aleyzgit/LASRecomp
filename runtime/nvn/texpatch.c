@@ -1173,21 +1173,24 @@ NvnTexture *texpatch_hint_icon(void) {
     return state > 0 ? &t : NULL;
 }
 
-// One of the game's own UI textures, by name (e.g. "MapMark_05^w"), decoded to RGBA8 (w x h, the texture's own colour
-// encoding) from the user's UI archives; NULL if it isn't there or its format isn't one of ours. The caller frees it.
-// (Runtime-made icons for our overlays: runtime/ui/triforce_icons.mm - nothing of the game ships.)
-uint8_t *texpatch_ui_rgba(const char *want, int *w_out, int *h_out) {
+// The game's own UI textures, by name (e.g. "MapMark_05^w"), decoded to RGBA8 (w x h, the texture's own colour
+// encoding) from the user's UI archives: out[i] NULL if it isn't there or its format isn't one of ours. Each archive is
+// read once for the whole list. The caller frees them; returns how many were found.
+// (Runtime-made icons for our overlays: runtime/ui/triforce_icons.mm, race_overlay.mm - nothing of the game ships.)
+int texpatch_ui_rgba_list(const char *const *want, int nwant, uint8_t **out, int *w_out, int *h_out) {
     static const char *const arcs[] = {"region_common/ui/Game.arc", "regionUS/common/ui/GameRegionCommon.arc",
                                        "regionEU/common/ui/GameRegionCommon.arc", "region_common/ui/StartUp.arc"};
-    for (int a = 0; a < 4; a++) {
+    int found = 0;
+    for (int i = 0; i < nwant; i++) out[i] = NULL;
+    for (int a = 0; a < 4 && found < nwant; a++) {
         size_t len;
-        uint8_t *d = read_all(arcs[a], &len), *out = NULL;
+        uint8_t *d = read_all(arcs[a], &len);
         if (!d) continue;
         if (len > 0x20 && !memcmp(d, "SARC", 4)) {
             uint32_t data_off = rd32(d + 0xC);
             uint16_t n = rd16(d + 0x1A);
             const uint8_t *ent = d + 0x20, *names = d + 0x20 + 16 * n + 8;
-            for (uint16_t i = 0; i < n && !out && ent + 16 * (i + 1) <= d + len; i++) {
+            for (uint16_t i = 0; i < n && found < nwant && ent + 16 * (i + 1) <= d + len; i++) {
                 uint32_t attr = rd32(ent + 16 * i + 4), s = rd32(ent + 16 * i + 8), e = rd32(ent + 16 * i + 12);
                 const char *nm = (attr >> 24) ? (const char *)names + (attr & 0xffffff) * 4 : "";
                 if ((const uint8_t *)nm >= d + len || strcmp(nm, "timg/__Combined.bntx") || data_off + e > len) continue;
@@ -1196,14 +1199,17 @@ uint8_t *texpatch_ui_rgba(const char *want, int *w_out, int *h_out) {
                 if (blen < 0x40 || memcmp(b, "BNTX", 4)) continue;
                 uint32_t count = rd32(b + 0x24);
                 uint64_t infos = rd64(b + 0x28);
-                for (uint32_t k = 0; k < count && !out && infos + 8 * k + 8 <= blen; k++) {
+                for (uint32_t k = 0; k < count && found < nwant && infos + 8 * k + 8 <= blen; k++) {
                     uint64_t brti = rd64(b + infos + 8 * k);
                     if (brti + 0x90 > blen || memcmp(b + brti, "BRTI", 4)) continue;
                     const uint8_t *t = b + brti + 16;
                     uint64_t name_at = rd64(t + 80), ptrs = rd64(t + 96);
                     if (name_at + 2 >= blen) continue;
                     uint16_t nl = rd16(b + name_at);
-                    if (nl != strlen(want) || memcmp(b + name_at + 2, want, nl) || ptrs + 8 > blen) continue;
+                    int wi = -1;
+                    for (int q = 0; q < nwant && wi < 0; q++)
+                        if (!out[q] && nl == strlen(want[q]) && !memcmp(b + name_at + 2, want[q], nl)) wi = q;
+                    if (wi < 0 || ptrs + 8 > blen) continue;
                     uint32_t fmt = rd32(t + 12), w = rd32(t + 20), h = rd32(t + 24), size = rd32(t + 64);
                     uint64_t data = rd64(b + ptrs);
                     int kind = (fmt >> 8) == 0x1c ? K_BC3 : (fmt >> 8) == 0x2d ? K_ASTC4 : -1;
@@ -1212,15 +1218,21 @@ uint8_t *texpatch_ui_rgba(const char *want, int *w_out, int *h_out) {
                     uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
                     uint8_t *lin = calloc((size_t)bw * bh, 16);
                     tegra_deswizzle(b + data, lin, bw, bh, 1, 16, rd32(t + 36) & 7, 0);
-                    out = malloc((size_t)w * h * 4);
-                    decode_image(&r, lin, bw * 16, out);
+                    out[wi] = malloc((size_t)w * h * 4);
+                    decode_image(&r, lin, bw * 16, out[wi]);
                     free(lin);
-                    *w_out = (int)w, *h_out = (int)h;
+                    w_out[wi] = (int)w, h_out[wi] = (int)h;
+                    found++;
                 }
             }
         }
         free(d);
-        if (out) return out;
     }
-    return NULL;
+    return found;
+}
+
+// One of them (NULL: not there)
+uint8_t *texpatch_ui_rgba(const char *want, int *w_out, int *h_out) {
+    uint8_t *out;
+    return texpatch_ui_rgba_list(&want, 1, &out, w_out, h_out) ? out : NULL;
 }
