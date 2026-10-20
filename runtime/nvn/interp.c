@@ -77,7 +77,10 @@ typedef struct {
     uint32_t oocc;  // occurrence of (obj, key) in the frame
     int32_t pair;   // the draw's partner in the frame before (-1 none; -2 UI, not blended); frame_end
 } DrawRec;
+typedef struct { uint64_t addr, size, off; } StoRec;  // a storage range read through gmem: its bytes at the time, in `bytes`
 typedef struct {
+    StoRec *sto; uint32_t nsto, cap_sto;
+    struct { uint64_t addr, size; } *dout; uint32_t ndout, cap_dout;  // the frame's dispatch outputs
     DrawRec *draws; uint32_t ndraws, cap_draws;
     CbRec *cbs; uint32_t ncbs, cap_cbs;
     uint8_t *bytes; uint64_t nbytes, cap_bytes;
@@ -241,7 +244,7 @@ static int pair_cmp(const void *a, const void *b) {
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
 static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI; -3: just appeared - not blended)
-static uint64_t st_id_pairs, st_content_pairs, st_new_objects, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled, s_integral, s_wraps;  // (stats)
+static uint64_t st_id_pairs, st_content_pairs, st_new_objects, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled, s_integral, s_wraps, s_discont;  // (stats)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -343,7 +346,7 @@ static void match_all(void) {
 }
 
 static void frame_reset(Frame *f) {
-    f->ndraws = f->ncbs = f->nhandles = 0;
+    f->ndraws = f->ncbs = f->nhandles = f->nsto = f->ndout = 0;
     f->nbytes = 0;
     f->overflow = f->destroyed = false;
 }
@@ -439,6 +442,26 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
     return src;
 }
 
+// Storage read through gmem (the light lists, a per-frame table): its bytes at execution time, once per range per
+// frame (64 KB at most each), and the frame's dispatch outputs. Replays: interp_replays_allowed compares.
+void interp_storage(uint64_t addr, uint64_t size) {
+    if (g_interp_replaying || !frame_open || !addr || !size) return;
+    if (size > 0x10000) size = 0x10000;
+    for (uint32_t i = 0; i < cur->nsto; i++) if (cur->sto[i].addr == addr) return;
+    if (cur->nbytes + size > (256u << 20)) { cur->overflow = true; return; }
+    while (cur->nbytes + size > cur->cap_bytes) { cur->cap_bytes = cur->cap_bytes ? cur->cap_bytes * 2 : (8u << 20); cur->bytes = realloc(cur->bytes, cur->cap_bytes); }
+    GROW(cur->sto, cur->nsto, cur->cap_sto, 64);
+    cur->sto[cur->nsto++] = (StoRec){addr, size, cur->nbytes};
+    memcpy(cur->bytes + cur->nbytes, (const void *)(uintptr_t)addr, size);
+    cur->nbytes += (size + 15) & ~15ull;
+}
+void interp_dispatch_output(uint64_t addr, uint64_t size) {
+    if (g_interp_replaying || !frame_open || !addr) return;
+    GROW(cur->dout, cur->ndout, cur->cap_dout, 64);
+    cur->dout[cur->ndout++].addr = addr, cur->dout[cur->ndout - 1].size = size;
+}
+static uint64_t s_sto_checks, s_sto_bytes;  // (stats)
+
 // Texture-pool entries: logged like uniform blocks (stage 2 + the stage, slot i, no bytes compared: used = 0) and
 // read back from the log by a replay, in the draw's bind order after its uniform blocks.
 const void *interp_texentry(int stage, int i, const void *entry, uint32_t size) {
@@ -464,12 +487,12 @@ static int blend_stages(void) {
 }
 
 // ---- stats (per log period)
-static uint64_t s_frames, s_draws, s_matched, s_changed, s_cut_cbs, s_blended_cbs, s_cuts[8], s_frame_no;
+static uint64_t s_frames, s_draws, s_matched, s_changed, s_cut_cbs, s_blended_cbs, s_cuts[9], s_frame_no;
 static uint64_t s_shots, s_mids, s_late, s_skipped;
 static double s_replay_cpu, s_replay_cpu_max, s_prep, s_L, s_replay_gpu, s_compose_gpu;
 static _Atomic uint64_t s_gpu_n, s_compose_n;
 static uint64_t s_replays;
-static const char *const cut_name[8] = {"level/forced", "no previous frame", "few matches", "jumps", "object freed", "loading/hitch", "camera jump", "game ahead"};
+static const char *const cut_name[9] = {"level/forced", "no previous frame", "few matches", "jumps", "object freed", "loading/hitch", "camera jump", "game ahead", "storage rewritten"};
 
 void interp_replay_gpu(double ms) {  // (completion handlers)
     atomic_fetch_add(&s_gpu_n, 1);
@@ -500,6 +523,21 @@ bool interp_replays_allowed(uint64_t frame, uint64_t game_frame, uint64_t now) {
     if (game_frame >= frame + 2) { log_cut(7, NULL); return false; }
     uint64_t c = atomic_load(&called[frame & 255]);
     if (c && now > c && now - c > 100000000ull) { log_cut(5, " (present reached late)"); return false; }
+    // Storage the frame's gmem draws read, rewritten by the game since (its CPU-written tables; a dispatch's output
+    // is left to GPU order): the replays would read the newer data - the village's lighting one image different.
+    for (uint32_t i = 0; i < cur->nsto; i++) {
+        StoRec *r = &cur->sto[i];
+        bool gpu = false;
+        for (uint32_t k = 0; k < cur->ndout && !gpu; k++) gpu = r->addr < cur->dout[k].addr + cur->dout[k].size && cur->dout[k].addr < r->addr + r->size;
+        if (gpu) continue;
+        s_sto_checks++, s_sto_bytes += r->size;
+        if (memcmp(cur->bytes + r->off, (const void *)(uintptr_t)r->addr, r->size) != 0) {
+            char why[80];
+            snprintf(why, sizeof why, " (%llx, %llu bytes)", (unsigned long long)r->addr, (unsigned long long)r->size);
+            log_cut(8, why);
+            return false;
+        }
+    }
     return true;
 }
 
@@ -719,16 +757,36 @@ bool interp_prepare(float t) {
             // (a texture's frame, a mode): this frame's - unless the value took the same step the frame before (a
             // frame counter, 1127 -> 1128 every frame: time, blended). Dusklight never blends a texture-swap
             // animation (src/dusk/interp/material.cpp: a texNo track that changed is left at the sim frame's value).
-            if (av == rintf(av) && bv == rintf(bv) && fabsf(d) >= 1.0f && (!a2 || (a2[q] == rintf(a2[q]) && av - a2[q] != d))) { out[q] = bv; s_integral++; continue; }
+            static long log_rules = -1;  // LARECOMP_INTERP_LOG_RULES=<frame> (research): the rules' decisions for 5 frames from there
+            if (log_rules < 0) { const char *e = getenv("LARECOMP_INTERP_LOG_RULES"); log_rules = e ? atol(e) : 0; }
+            bool lr = log_rules && (long)s_frame_no >= log_rules && (long)s_frame_no < log_rules + 5;
+            if (av == rintf(av) && bv == rintf(bv) && fabsf(d) >= 1.0f && (!a2 || (a2[q] == rintf(a2[q]) && av - a2[q] != d))) {
+                if (lr) LOG("[interp-rule] f%llu whole-number cb %u stage %d slot %d elem %u: %g, %g -> %g\n", (unsigned long long)s_frame_no, i, cc->stage, cc->slot, q, a2 ? a2[q] : NAN, av, bv);
+                out[q] = bv; s_integral++; continue;
+            }
             // A texture translation that scrolls a little every frame and wraps (0.98 -> 0.01) changed by nearly a
             // whole tile: blended, the wrap's midpoint is on screen for an image (the water's ripples jumping back).
             // When the change less a whole number of tiles is the step the value took the frame before, it is a
             // wrap: blend along the short way, which texture addressing wraps back (Dusklight's
             // sample_texture_translation, src/dusk/interp/material.cpp: a whole-tile jump between adjacent keys
             // continues the translation linearly).
-            if (a2 && fabsf(d) >= 0.9f) {
+            // (only values that look like texture coordinates: inside (-1, 1) and not a whole number at either end -
+            // a lighting weight that faded 0.1, 0.05 and then jumped to 1 is no wrap, though its wrapped step matches)
+            if (a2 && fabsf(d) >= 0.9f && fabsf(av) < 1 && fabsf(bv) < 1 && av != rintf(av) && bv != rintf(bv)) {
                 float k = rintf(d), dw = d - k, s = av - a2[q];
-                if (k != 0 && dw != 0 && fabsf(dw) < 0.5f && fabsf(s - dw) <= 0.1f * fabsf(dw) + 1e-5f) { out[q] = av + dw * t; s_wraps++; continue; }
+                if (k != 0 && dw != 0 && fabsf(dw) < 0.5f && fabsf(s - dw) <= 0.1f * fabsf(dw) + 1e-5f) {
+                    if (lr) LOG("[interp-rule] f%llu wrap cb %u stage %d slot %d elem %u: %g, %g -> %g\n", (unsigned long long)s_frame_no, i, cc->stage, cc->slot, q, a2[q], av, bv);
+                    out[q] = av + dw * t; s_wraps++; continue;
+                }
+            }
+            // A discontinuity: a change over half the value's size and over eight times the step it took the frame
+            // before (a lighting weight jumping 0.05 -> 1, Link's facing turning in one frame) is a switch, not motion:
+            // this frame's value, as Dusklight shows an animation that was not continuous this tick at its current
+            // value (src/dusk/interp/material.cpp, Update::~Update's `continuous`). Blended, the in-between showed a
+            // state neither frame has (the village 5% darker for one image).
+            if (a2 && fabsf(d) > 0.5f * fmaxf(fabsf(av), fabsf(bv)) && fabsf(d) > 8.0f * fabsf(av - a2[q]) + 1e-4f) {
+                if (lr) LOG("[interp-rule] f%llu discontinuity cb %u stage %d slot %d elem %u: %g, %g -> %g\n", (unsigned long long)s_frame_no, i, cc->stage, cc->slot, q, a2[q], av, bv);
+                out[q] = bv; s_discont++; continue;
             }
             out[q] = av + d * t;
         }
@@ -915,19 +973,19 @@ void interp_log_stats(void) {
     uint64_t gn = atomic_exchange(&s_gpu_n, 0), cn = atomic_exchange(&s_compose_n, 0);
     char cuts[200] = "";
     int o = 0;
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 9; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
-    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image, whole-number %.0f, wraps %.1f | images "
+    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image, whole-number %.0f, wraps %.1f, discontinuities %.1f | images "
         "%.1f/s planned (in-between %.1f/s), late %llu, skipped %llu | replay cpu %.2f ms avg %.2f max, gpu %.2f ms; "
         "present pass gpu %.2f ms; prep %.2f ms/f | latency %.1f ms | cuts:%s\n",
-        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0, s_replays ? (double)s_integral / s_replays : 0, s_replays ? (double)s_wraps / s_replays : 0,
+        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0, s_replays ? (double)s_integral / s_replays : 0, s_replays ? (double)s_wraps / s_replays : 0, s_replays ? (double)s_discont / s_replays : 0,
         s_shots / dt, s_mids / dt, (unsigned long long)s_late, (unsigned long long)s_skipped,
         s_replays ? s_replay_cpu / s_replays : 0, s_replay_cpu_max, gn ? s_replay_gpu / gn : 0, cn ? s_compose_gpu / cn : 0,
         s_prep / n, s_frames ? s_L / n : 0, o ? cuts : " none");
     if (st_replay_misses || st_replay_cb_miss)
         LOG("[interp] replay draw misses %llu/%llu, uniform misses %llu\n", (unsigned long long)st_replay_misses,
             (unsigned long long)st_replay_draws, (unsigned long long)st_replay_cb_miss);
-    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_new_objects = s_class_snaps = s_toggled = s_integral = s_wraps = 0;
+    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_new_objects = s_class_snaps = s_toggled = s_integral = s_wraps = s_discont = 0;
     memset(s_cuts, 0, sizeof s_cuts);
     s_shots = s_mids = s_late = s_skipped = s_replays = 0;
     s_replay_cpu = s_replay_cpu_max = s_prep = s_L = s_replay_gpu = s_compose_gpu = 0;
