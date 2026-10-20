@@ -2578,6 +2578,10 @@ static bool gmem_placed;  // ... by the driver (vkMapMemory2KHR, placed): unmapp
 // The driver maps `mem` (HEAP_MAX, one allocation) at HEAP_BASE. NULL, or why not; HEAP_BASE is ordinary guest
 // memory again after a failure.
 static const char *heap_map_placed(VkDeviceMemory mem) {
+#ifndef VK_EXT_map_memory_placed
+    (void)mem;
+    return "built without VK_EXT_map_memory_placed";  // (g_vk.map_placed is never set then)
+#else
     PFN_vkMapMemory2KHR map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkMapMemory2KHR");
     PFN_vkUnmapMemory2KHR unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkUnmapMemory2KHR");
     if (!map2 || !unmap2) return "no vkMapMemory2KHR";
@@ -2598,6 +2602,7 @@ static const char *heap_map_placed(VkDeviceMemory mem) {
     // (the old mapping may be gone: plain zeroed memory again, registered for write tracking like a reboot's)
     if (!plat_reset_guest(HEAP_BASE, HEAP_BASE + HEAP_MAX)) FATAL("cannot restore the guest heap mapping\n");
     return "the driver's placed mapping failed";
+#endif
 }
 
 // The driver memory heap at a reboot (vk_exec_reset, GPU idle, guest threads stopped): the driver's mapping is left
@@ -2607,7 +2612,10 @@ static void heap_unmap_placed(void) {
     if (!gmem_placed) return;
     PFN_vkUnmapMemory2KHR unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkUnmapMemory2KHR");
     VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .memory = gmem_mem,
-                               .flags = g_vk.unmap_reserve ? VK_MEMORY_UNMAP_RESERVE_BIT_EXT : 0};
+                               .flags = 0};
+#ifdef VK_EXT_map_memory_placed
+    if (g_vk.unmap_reserve) ui.flags = VK_MEMORY_UNMAP_RESERVE_BIT_EXT;
+#endif
     if (unmap2) unmap2(g_vk.dev, &ui);
     gmem_placed = false;
 }
