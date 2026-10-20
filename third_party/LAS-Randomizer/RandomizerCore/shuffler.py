@@ -410,6 +410,73 @@ class ItemShuffler(QtCore.QThread):
         return False
     
 
+    # LAS Recomp item pacing. Seeds with many early checks (bushes, pots, digs, Shellsanity) used to hand out most
+    # major items in the first spheres: Mabe Village opened up the whole game. A major item now tries the locations in
+    # a weighted random order (Efraimidis-Spirakis), the earliest spheres down-weighted so that each holds about as
+    # much of the chance as PACE_TARGET locations would - near what they hold in a seed without those -sanities, so
+    # seeds without them barely change. Only the order changes: the reachability checks, the undo logic and every
+    # dungeon / keysanity rule stay as they were, so nothing that was placeable becomes unplaceable.
+    # A location's sphere is taken from the items placed so far (reachable with the starting items = 0, with what
+    # those hold = 1, ...): later placements can only make it earlier, never later.
+    PACE_TARGET = (8, 16, 24)  # spheres 0, 1, 2: the locations' share of the chance, as a count of locations
+
+    def _paces(self, item):
+        return self.item_defs[item]['type'] == 'important' and not re.search(r'D[0-8]$', item)
+
+    def _pace_spheres(self, placements, starting_access):
+        """-> {item location: sphere} for the locations reachable with the items placed so far, up to the last
+        sphere PACE_TARGET weights (cached until the item changes in a location whose item counts for those)."""
+        cache = getattr(self, '_pace_cache', None)
+        if cache and all(placements.get(l) == i for l, i in cache[1].items()):
+            return cache[0]
+        sphere = {}
+        access = starting_access.copy()
+        s = 0
+        while self.thread_active:
+            found = []
+            grew = True
+            while grew:  # within a sphere: logic states settle, items wait for the next sphere
+                grew = False
+                for key, node in self.logic_defs.items():
+                    if key in access:
+                        continue
+                    if self.checkAccess(key, access, self.logic):
+                        access = self.addAccess(access, key)
+                        grew = True
+                        if node['type'] in ('item', 'follower'):
+                            sphere[key] = s
+                            if placements.get(key) is not None:
+                                found.append(placements[key])
+                        if node['type'] == 'enemy':
+                            access = self.addAccess(access, key + '[pit]')
+                            access = self.addAccess(access, key + '[heavy]')
+                    elif node['type'] == 'enemy':
+                        for v in ('pit', 'heavy'):
+                            if 'condition-' + v in node and not self.hasAccess(access, key + f'[{v}]') and \
+                                    self.checkAccess(key + f'[{v}]', access, self.logic):
+                                access = self.addAccess(access, key + f'[{v}]')
+                                grew = True
+            if s == len(self.PACE_TARGET) - 1:  # (what this sphere holds would only open a later one)
+                break
+            s += 1
+            if not found:
+                break
+            for i in found:
+                access = self.addAccess(access, i)
+        self._pace_cache = (sphere, {l: placements.get(l) for l, t in sphere.items() if t < s})
+        return sphere
+
+    def _paced_order(self, locations, placements, starting_access):
+        sphere = self._pace_spheres(placements, starting_access)
+        late = len(self.PACE_TARGET)
+        tier = [min(sphere.get(l, late), late) for l in locations]
+        count = [0] * (late + 1)
+        for t in tier:
+            count[t] += 1
+        weight = [min(1.0, self.PACE_TARGET[t] / max(1, count[t])) if t < late else 1.0 for t in range(late + 1)]
+        keys = [random.random() ** (1.0 / weight[t]) for t in tier]
+        return [l for _, l in sorted(zip(keys, locations), key=lambda kl: -kl[0])]
+
     def verifyFreeLocations(self, placements, starting_access, logic, goal):
         """LAS Recomp Triforce hunt: are at least [goal] empty item locations reachable with what's placed so far?"""
         locations = 0
@@ -827,9 +894,18 @@ class ItemShuffler(QtCore.QThread):
                 extra -= 1
 
         # Do a very similar process for all other items
+        paced = False
         while items and self.thread_active:
             item = items[0]
             if verbose: print(item+' -> ', end='')
+            # LAS Recomp item pacing: a major item tries the locations in an order weighted away from the earliest
+            # spheres (_paced_order); the other items keep an unweighted order
+            if self._paces(item):
+                locations[:] = self._paced_order(locations, placements, settings_access)
+                paced = True
+            elif paced:
+                random.shuffle(locations)
+                paced = False
             first_location_tried = locations[0]
             
             # Until we make a valid placement for this item
