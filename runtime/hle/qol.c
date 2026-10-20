@@ -215,7 +215,7 @@ static bool apply_tilt(int removed) {  // false: not set up yet (or not the name
 
 // LARECOMP_SETTING_AT="frame:key=value,..." (test): flip an in-game menu toggle at that presented frame, as the menu
 // would (move_360, blur_removal, dpad_move: 0 / 1; Cosmetics colour rows: a palette name or #RRGGBB - tunic, hearts,
-// hair, shield, skin).
+// hair, shield, skin, leaves, grass).
 static void setting_at_tick(void) {
     static const char *spec;
     static int init;
@@ -225,7 +225,7 @@ static void setting_at_tick(void) {
     extern uint64_t renderer_present_count(void);
     uint64_t now = renderer_present_count();
     if (now == last) return;
-    char buf[512];
+    char buf[4096];  // (a long test script: many rows switched in one run)
     snprintf(buf, sizeof buf, "%s", spec);
     for (char *save = NULL, *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
         unsigned long f;
@@ -237,7 +237,8 @@ static void setting_at_tick(void) {
         if (b) { *b = v != 0; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
         CosColour *c = !strcmp(key, "tunic") ? &g_settings.tunic : !strcmp(key, "hearts") ? &g_settings.hearts :
                        !strcmp(key, "hair") ? &g_settings.hair : !strcmp(key, "shield") ? &g_settings.shield :
-                       !strcmp(key, "skin") ? &g_settings.skin : NULL;
+                       !strcmp(key, "skin") ? &g_settings.skin : !strcmp(key, "leaves") ? &g_settings.leaves :
+                       !strcmp(key, "grass") ? &g_settings.grass : NULL;
         if (c) { col_parse(c, val); LOG("[qol] test: f%llu %s = %s\n", (unsigned long long)now, key, val); }
     }
     last = now;

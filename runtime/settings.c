@@ -201,6 +201,8 @@ void settings_load(void) {
         else if (!strcmp(key, "hair")) col_parse(&g_settings.hair, val);
         else if (!strcmp(key, "shield")) col_parse(&g_settings.shield, val);
         else if (!strcmp(key, "skin")) col_parse(&g_settings.skin, val);
+        else if (!strcmp(key, "leaves")) col_parse(&g_settings.leaves, val);
+        else if (!strcmp(key, "grass")) col_parse(&g_settings.grass, val);
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
@@ -255,7 +257,8 @@ void settings_save(void) {
     fprintf(f, "walk_speed_dungeons = %d\n", g_settings.walk_speed_dungeons);
     static const struct { const char *key; const CosColour *c; } cols[] = {
         {"tunic", &g_settings.tunic}, {"hearts", &g_settings.hearts}, {"hair", &g_settings.hair},
-        {"shield", &g_settings.shield}, {"skin", &g_settings.skin}};
+        {"shield", &g_settings.shield}, {"skin", &g_settings.skin},
+        {"leaves", &g_settings.leaves}, {"grass", &g_settings.grass}};
     for (size_t i = 0; i < sizeof cols / sizeof *cols; i++) {
         char v[16];
         col_format(cols[i].c, v, sizeof v);

@@ -16,8 +16,10 @@
 
 // Each recolouring option (one per Cosmetics row; dropping one = removing its line and its file)
 extern const RecolourOption g_recolour_link;  // hair / shield colours (recolour_link.c)
+extern const RecolourOption g_recolour_seasons;  // leaves / grass colours (recolour_seasons.c)
 static const RecolourOption *const g_options[] = {
     &g_recolour_link,
+    &g_recolour_seasons,
     NULL,
 };
 

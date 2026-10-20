@@ -70,6 +70,7 @@ typedef struct {
     CosColour tunic, hearts;  // runtime/nvn/texpatch.c (tunic map, heart tints)
     CosColour hair, shield;   // runtime/nvn/recolour_link.c
     CosColour skin;           // runtime/nvn/texpatch.c skin_apply
+    CosColour leaves, grass;  // the overworld's foliage, runtime/nvn/recolour_seasons.c
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 
