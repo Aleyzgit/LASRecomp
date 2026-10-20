@@ -3,15 +3,15 @@
 // bar are hidden (map_page_takeover) and our layer drives the page:
 //   bullets  one small numbered bullet beside each of the game's place names ("Mabe Village"...): the area's open
 //            checks under the filters, coloured by the best of them - green in logic now, purple trick logic only,
-//            amber needs an item. A Field screen counts for the nearest place name; interiors count at their door.
+//            amber needs an item. Each check's place comes from the Field level's zone grid (tools/rando/tracker.py
+//            field_areas); interiors count at their door. Names read as a player would ("Bush, Mabe Village (north)").
 //            One icon per dungeon (found / total) at the overworld door that leads into it (dungeon entrance shuffle),
 //            labelled by the dungeon reached there; room shuffle: a moved room's checks count for the dungeon it sits
 //            in now (tools/rando/tracker.py)
 //   list     A on a bullet: the area's checks in one list by status (open in logic, needs an item with the cheapest
 //            missing items, trick logic, collected struck out); A on a row shows that check's spot, B goes back
 //   filters  "In logic now" (on by default), "Hide checked" and one toggle per kind of check in the seed. Filters only
-//            change the bullets, never a list. Game-styled, two layouts to compare: a line in the game's button row
-//            with a filter panel on Y (default), or a slim panel beside the parchment (LARECOMP_TRACKER_LAYOUT=side)
+//            change the bullets, never a list. Game-styled: a line in the game's button row, a filter panel on Y
 //   input    while it drives, the left stick / d-pad, A and Y never reach the game, B neither while a list, a shown
 //            spot or the filters are up (runtime/hle/input.c -> tracker_map_input); the right stick still zooms /
 //            scrolls the game's map; ZR hands the page back to the game's own map (warp points, pins). The mouse
@@ -105,6 +105,8 @@ struct Check {
     float x, y;
     int group, flag, node, kind;
     std::string dungeon, dcell;  // the dungeon (D0..D8) and cell it sits in now (the dungeon view, phase 2)
+    int place;                   // the game's place name it's in (T_MapName_NN), -1 = unknown / a dungeon's
+    std::string title, spot;     // readable name ("Bush, Mabe Village (north)"), spot inside the place ("north-west")
 };
 struct Group { std::string label; float x, y; };
 struct Room { std::string level, cell, room; float sx, sy; };  // shuffled dungeon cells (the dungeon view, phase 2)
@@ -217,6 +219,10 @@ static void load(void) {
                 if (strcmp(c[8], "-")) k.dungeon = c[8];
                 if (strcmp(c[9], "-")) k.dcell = c[9];
             }
+            k.place = c.size() >= 11 ? atoi(c[10]) : -1;
+            if (k.place > 20) k.place = -1;
+            if (c.size() >= 12 && strcmp(c[11], "-")) k.title = c[11];
+            if (c.size() >= 13 && strcmp(c[12], "-")) k.spot = c[12];
             g_kind_present[k.kind] = true;
             g_checks.push_back(std::move(k));
         } else if (c[0][0] == 'R' && c.size() >= 6)
@@ -975,13 +981,6 @@ static float draw_prompt(ImDrawList *dl, ImFont *font, float fs, ImVec2 p, const
     shadow_text(dl, font, fs, ImVec2(p.x + g + 6 * u, p.y), label, u);
     return g + 6 * u + text_size(font, fs, label).x;
 }
-// LARECOMP_TRACKER_LAYOUT=side (hidden, for comparing): the filters and counts in a panel beside the parchment;
-// default: one line in the game's button row with a filter panel on Y
-static bool tracker_layout_side(void) {
-    static int v = -1;
-    if (v < 0) { const char *e = getenv("LARECOMP_TRACKER_LAYOUT"); v = e && !strcmp(e, "side"); }
-    return v == 1;
-}
 
 extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     uint64_t now = renderer_present_count();
@@ -1054,7 +1053,12 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         }
     std::vector<std::vector<int>> &area_checks = g_area_checks;
     area_checks.assign(21, {});
-    if (nlabels)
+    bool by_place = false;  // (tracker.tsv names each check's place; older ones: the nearest name)
+    for (auto &c : g_checks) by_place |= c.place >= 0;
+    if (by_place) {
+        for (auto &e : g_screen_checks)
+            for (int k : e.second) if (g_checks[k].place >= 0) area_checks[g_checks[k].place].push_back(k);
+    } else if (nlabels)
         for (auto &e : g_screen_checks) {
             ImVec2 c = ui_pt((e.first % 16) + 0.5f, (e.first / 16) + 0.5f);
             int best = -1;
@@ -1269,7 +1273,7 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         if (list) for (int i : *list) n_sel[g_status[i]]++, n_sel_all++;
         sel_name = title_of(targets[cur].type, targets[cur].id);
     }
-    if (ui.spot >= 0) sel_name = pretty(g_checks[ui.spot].name), n_sel_all = 0;
+    if (ui.spot >= 0) sel_name = g_checks[ui.spot].title.empty() ? pretty(g_checks[ui.spot].name) : g_checks[ui.spot].title, n_sel_all = 0;
     int run_logic = 0, run_done = 0, run_all = 0;
     for (size_t i = 0; i < g_checks.size(); i++) {
         if (!(f >> g_checks[i].kind & 1)) continue;
@@ -1279,7 +1283,6 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     }
     int tri_have = 0, tri_need = 0;
     bool tri = triforce_counts(&tri_have, &tri_need);
-    bool side = tracker_layout_side();
     float pfs = 19 * u;  // (the game's button prompts' size)
 
     // one filter row: a check box and its label (game-styled, on parchment); mouse toggles
@@ -1308,105 +1311,48 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     };
     const char *filter_word = (f & F_IN_LOGIC) ? "In logic now" : (f & F_HIDE_DONE) ? "Hide checked" : "Everything";
 
-    if (!side) {
-        // ---- variant "bottom": one line where the game's own button prompts were (L_Operation_00, hidden): the
-        // cursor's screen and the run's totals on the left, the prompts on the right; Y opens a filter panel
-        float y = oy + 668 * u;
-        std::vector<std::pair<const char *, std::string>> pr;
-        if (ui.panel) pr = {};
-        else if (ui.spot >= 0) pr = {{"B", "Back to the list"}};
-        else if (ui.filter_focus) pr = {{"A", "Toggle"}, {"Y", "Close"}};
-        else pr = {{"Y", std::string("Filter: ") + filter_word}, {"A", "Open"}, {"ZR", "Game map"}};
-        float pw = 0;
-        for (auto &p : pr) pw += prompt_width(font, pfs, p.first, p.second.c_str()) + 22 * u;
-        float px = ox + 1226 * u - pw;
-        for (auto &p : pr) px += draw_prompt(dl, font, pfs, ImVec2(px, y), p.first, p.second.c_str(), u) + 22 * u;
-        char info[200];
-        int k = 0;
-        if (ui.spot >= 0) {
-            int st = g_status[ui.spot];
-            std::string t = st == ST_LOGIC ? "in logic" : st == ST_TRICK ? "trick logic" : st == ST_NEEDS ? needs_text(ui.spot) : "collected";
-            k = snprintf(info, sizeof info, "%s   %s     ", sel_name.c_str(), t.c_str());
-        } else if (!sel_name.empty() && !ui.panel) {
-            k = snprintf(info, sizeof info, "%s   %d in logic", sel_name.c_str(), n_sel[ST_LOGIC]);
-            if (n_sel[ST_TRICK] && k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d trick", n_sel[ST_TRICK]);
-            if (n_sel[ST_NEEDS] && k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d need an item", n_sel[ST_NEEDS]);
-            if (k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d/%d     ", n_sel[ST_DONE], n_sel_all);
-        }
-        if (k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, "All: %d in logic, %d/%d", run_logic, run_done, run_all);
-        if (tri && k < (int)sizeof info) snprintf(info + k, sizeof info - k, ", Triforce %d/%d", tri_have, tri_need);
-        float x0 = ox + 64 * u, room = px - pw - x0 - 24 * u;
-        (void)room;
-        dl->PushClipRect(ImVec2(x0, y - 4 * u), ImVec2(ox + 1226 * u - pw - 16 * u, y + 40 * u), true);
-        shadow_text(dl, font, pfs * 0.92f, ImVec2(x0, y + pfs * 0.04f), info, u);
-        dl->PopClipRect();
-        if (ui.filter_focus) {  // the filter panel, over the map
-            float w = 300 * u, rh = 30 * u, h = 56 * u + rh * chips.size() + 14 * u;
-            ImVec2 a(ox + 640 * u - w * 0.5f, oy + 380 * u - h * 0.5f), z(a.x + w, a.y + h);
-            parchment(dl, a, z, u);
-            if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) mouse_on_ui = true;
-            dl->AddText(font, 24 * u, ImVec2(a.x + 20 * u, a.y + 14 * u), P_INK, "Filters");
-            for (size_t i = 0; i < chips.size(); i++) {
-                if (i == 2) dl->AddLine(ImVec2(a.x + 18 * u, a.y + 52 * u + rh * 2 + 0.5f), ImVec2(z.x - 18 * u, a.y + 52 * u + rh * 2 + 0.5f), P_LINE, 1.2f * u);
-                filter_row(i, ImVec2(a.x + 12 * u, a.y + 52 * u + rh * i + (i >= 2 ? 6 * u : 0)), w - 24 * u, rh - 2 * u, 18 * u);
-            }
-            if (click && !mouse_on_ui) ui.filter_focus = false;
-        }
-    } else {
-        // ---- variant "side": a slim panel beside the parchment (left of it; outside the 16:9 box when the window is
-        // wider): the filters, the cursor's screen, the run's totals. Prompts in the game's row
-        bool wide = ox > 236 * u;
-        ImVec2 a = wide ? ImVec2(ox - 226 * u, oy + 122 * u) : ImVec2(ox + 8 * u, oy + 122 * u);
-        ImVec2 z = wide ? ImVec2(ox - 12 * u, oy + 632 * u) : ImVec2(ox + 180 * u, oy + 632 * u);
-        float w = z.x - a.x, fs = (wide ? 16.0f : 14.0f) * u, rh = (wide ? 24.0f : 21.0f) * u;
+    // ---- one line where the game's own button prompts were (L_Operation_00, hidden): the cursor's area and the run's
+    // totals on the left, the prompts on the right; Y opens a filter panel
+    float y = oy + 668 * u;
+    std::vector<std::pair<const char *, std::string>> pr;
+    if (ui.panel) pr = {};
+    else if (ui.spot >= 0) pr = {{"B", "Back to the list"}};
+    else if (ui.filter_focus) pr = {{"A", "Toggle"}, {"Y", "Close"}};
+    else pr = {{"Y", std::string("Filter: ") + filter_word}, {"A", "Open"}, {"ZR", "Game map"}};
+    float pw = 0;
+    for (auto &p : pr) pw += prompt_width(font, pfs, p.first, p.second.c_str()) + 22 * u;
+    float px = ox + 1226 * u - pw;
+    for (auto &p : pr) px += draw_prompt(dl, font, pfs, ImVec2(px, y), p.first, p.second.c_str(), u) + 22 * u;
+    char info[200];
+    int k = 0;
+    if (ui.spot >= 0) {
+        int st = g_status[ui.spot];
+        std::string t = st == ST_LOGIC ? "in logic" : st == ST_TRICK ? "trick logic" : st == ST_NEEDS ? needs_text(ui.spot) : "collected";
+        k = snprintf(info, sizeof info, "%s   %s     ", sel_name.c_str(), t.c_str());
+    } else if (!sel_name.empty() && !ui.panel) {
+        k = snprintf(info, sizeof info, "%s   %d in logic", sel_name.c_str(), n_sel[ST_LOGIC]);
+        if (n_sel[ST_TRICK] && k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d trick", n_sel[ST_TRICK]);
+        if (n_sel[ST_NEEDS] && k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d need an item", n_sel[ST_NEEDS]);
+        if (k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d/%d     ", n_sel[ST_DONE], n_sel_all);
+    }
+    if (k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, "All: %d in logic, %d/%d", run_logic, run_done, run_all);
+    if (tri && k < (int)sizeof info) snprintf(info + k, sizeof info - k, ", Triforce %d/%d", tri_have, tri_need);
+    float x0 = ox + 64 * u, room = px - pw - x0 - 24 * u;
+    (void)room;
+    dl->PushClipRect(ImVec2(x0, y - 4 * u), ImVec2(ox + 1226 * u - pw - 16 * u, y + 40 * u), true);
+    shadow_text(dl, font, pfs * 0.92f, ImVec2(x0, y + pfs * 0.04f), info, u);
+    dl->PopClipRect();
+    if (ui.filter_focus) {  // the filter panel, over the map
+        float w = 300 * u, rh = 30 * u, h = 56 * u + rh * chips.size() + 14 * u;
+        ImVec2 a(ox + 640 * u - w * 0.5f, oy + 380 * u - h * 0.5f), z(a.x + w, a.y + h);
         parchment(dl, a, z, u);
         if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) mouse_on_ui = true;
-        float x = a.x + 12 * u, y = a.y + 10 * u;
-        dl->AddText(font, fs * 1.2f, ImVec2(x, y), P_INK, "Filters");
-        y += fs * 1.2f + 8 * u;
+        dl->AddText(font, 24 * u, ImVec2(a.x + 20 * u, a.y + 14 * u), P_INK, "Filters");
         for (size_t i = 0; i < chips.size(); i++) {
-            if (i == 2) { dl->AddLine(ImVec2(x, y + 3 * u), ImVec2(z.x - 12 * u, y + 3 * u), P_LINE, 1.2f * u); y += 7 * u; }
-            filter_row(i, ImVec2(a.x + 4 * u, y), w - 8 * u, rh - 1 * u, fs);
-            y += rh;
+            if (i == 2) dl->AddLine(ImVec2(a.x + 18 * u, a.y + 52 * u + rh * 2 + 0.5f), ImVec2(z.x - 18 * u, a.y + 52 * u + rh * 2 + 0.5f), P_LINE, 1.2f * u);
+            filter_row(i, ImVec2(a.x + 12 * u, a.y + 52 * u + rh * i + (i >= 2 ? 6 * u : 0)), w - 24 * u, rh - 2 * u, 18 * u);
         }
-        y += 6 * u;
-        dl->AddLine(ImVec2(x, y), ImVec2(z.x - 12 * u, y), P_LINE, 1.2f * u);
-        y += 8 * u;
-        auto line = [&](const char *t, ImU32 col, float s) {
-            dl->PushClipRect(ImVec2(a.x, a.y), ImVec2(z.x - 8 * u, z.y), true);
-            dl->AddText(font, s, ImVec2(x, y), col, t);
-            dl->PopClipRect();
-            y += s + 4 * u;
-        };
-        char b[96];
-        if (!sel_name.empty()) {
-            line(sel_name.c_str(), P_INK, fs * 1.1f);
-            snprintf(b, sizeof b, "%d in logic", n_sel[ST_LOGIC]);
-            line(b, P_GREEN, fs);
-            if (n_sel[ST_TRICK]) { snprintf(b, sizeof b, "%d trick logic", n_sel[ST_TRICK]); line(b, P_PURPLE, fs); }
-            if (n_sel[ST_NEEDS]) { snprintf(b, sizeof b, "%d need an item", n_sel[ST_NEEDS]); line(b, P_AMBER, fs); }
-            snprintf(b, sizeof b, "%d/%d collected", n_sel[ST_DONE], n_sel_all);
-            line(b, P_INK_DIM, fs);
-            y += 4 * u;
-            dl->AddLine(ImVec2(x, y), ImVec2(z.x - 12 * u, y), P_LINE, 1.2f * u);
-            y += 8 * u;
-        }
-        line("All checks", P_INK, fs * 1.1f);
-        snprintf(b, sizeof b, "%d in logic", run_logic);
-        line(b, P_GREEN, fs);
-        snprintf(b, sizeof b, "%d/%d collected", run_done, run_all);
-        line(b, P_INK_DIM, fs);
-        if (tri) { snprintf(b, sizeof b, "Triforce %d/%d", tri_have, tri_need); line(b, P_INK_DIM, fs); }
-        float py = oy + 668 * u;
-        std::vector<std::pair<const char *, const char *>> pr;
-        if (ui.panel) pr = {};
-        else if (ui.spot >= 0) pr = {{"B", "Back to the list"}};
-        else if (ui.filter_focus) pr = {{"A", "Toggle"}, {"Y", "Done"}};
-        else pr = {{"A", "Open"}, {"Y", "Filters"}, {"ZR", "Game map"}, {"B", "Back"}};
-        float pw = 0;
-        for (auto &p : pr) pw += prompt_width(font, pfs, p.first, p.second) + 22 * u;
-        float px = ox + 1226 * u - pw;
-        for (auto &p : pr) px += draw_prompt(dl, font, pfs, ImVec2(px, py), p.first, p.second, u) + 22 * u;
+        if (click && !mouse_on_ui) ui.filter_focus = false;
     }
 
     // ---- the area panel (one list by status): parchment, gold border, brown ink, centred over the dimmed map
@@ -1462,9 +1408,9 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
                 }
                 float cy = (ra.y + rz.y) * 0.5f;
                 dl->AddCircleFilled(ImVec2(ra.x + 20 * u, cy), 7 * u, dot[r.st]);
-                std::string nm = pretty(c.name);
+                std::string nm = c.title.empty() ? pretty(c.name) : c.title;
                 ImU32 ncol = r.st == ST_DONE ? IM_COL32(0x8C, 0x7B, 0x62, 255) : ink;
-                std::string where = !c.dcell.empty() ? "Room " + c.dcell : c.area.empty() ? "" : area_name(c.area);
+                std::string where = !c.dcell.empty() ? "room " + c.dcell : !c.spot.empty() ? c.spot : c.area.empty() ? "" : area_name(c.area);
                 std::string tag = r.st == ST_TRICK ? "trick logic" : r.st == ST_NEEDS ? needs_text(r.check) : "";
                 ImVec2 tg = tag.empty() ? ImVec2(0, 0) : text_size(font, fs_k, tag.c_str());
                 float tag_w = tag.empty() ? 0 : std::min(tg.x + 20 * u, 230 * u);

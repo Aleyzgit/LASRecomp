@@ -100,6 +100,120 @@ def dungeon_entrances(seed_dir, settings):
     return {k: (ent or {}).get(k, k) for k in ENTRANCE_KEYS}
 
 
+# the game's place names on the overworld map (datasheet UiFieldMapLocationName: mId = pane T_MapName_NN)
+PLACE = ['Kanalet Castle', 'Rapids Ride', 'Southern Face Shrine', 'Animal Village', 'Yarna Desert', '', "Martha's Bay",
+         'Pothole Field', '', '', 'Mabe Village', 'Mysterious Forest', 'Goponga Swamp', 'Koholint Prairie',
+         'Tabahl Wasteland', 'Tal Tal Mountain Range', 'Mt. Tamaranch', 'Tal Tal Heights', 'Toronbo Shores',
+         'Ukuku Prairie', 'Cemetery']
+
+
+def field_areas(romfs):
+    """The overworld split into the game's place names: (area_at(x, z) -> place id, screen_area {(row, col): id},
+    boxes {id: (x0, z0, x1, z1)}). The Field level's grid (160 x 128 cells of 1.5 units, 8 bytes each: room CRC, ?,
+    zone index) gives each spot its zone; datasheet LocationName names the zone, UiFieldMapLocationName the map label.
+    Zones without a label of their own (south of the village, the east bay...) take their screen's, else the nearest."""
+    import struct
+    import fixedhash
+    from RandomizerCore.Tools import oead_tools
+    base = os.path.join(romfs, 'region_common')
+    fh = fixedhash.FixedHash(open(os.path.join(base, 'level', 'Field', 'Field.lvb'), 'rb').read())
+    zones = [struct.unpack_from('<I', z.data, 0)[0] for z in fh.get(b'zone').data.entries]
+    grid = fh.get(b'grid').data
+    gh, gw = struct.unpack_from('<HH', fh.get(b'gridConfig').data, 0)  # (rows, columns)
+    sheets = os.path.join(base, 'datasheets')
+    locs = [r for r in oead_tools.readSheet(os.path.join(sheets, 'LocationName.gsheet'))['values'] if r['mType'] == 0]
+    label = {str(r['mNameLabel'])[:-4]: int(r['mId'])
+             for r in oead_tools.readSheet(os.path.join(sheets, 'UiFieldMapLocationName.gsheet'))['values']
+             if str(r['mNameLabel']).endswith('_map')}
+
+    def zone_place(zid):
+        for r in locs:
+            if r['mMinZoneID'] <= zid <= r['mMaxZoneID']:
+                return label.get(str(r['mNameLabel']), -1)
+        return -1
+    zp = [zone_place(z) for z in zones]
+    cells = [[-1] * gw for _ in range(gh)]
+    for r in range(gh):
+        for c in range(gw):
+            zi = grid[(r * gw + c) * 8 + 5]
+            cells[r][c] = zp[zi] if zi < len(zp) else -1
+    screen = {}
+    for row in range(16):
+        for col in range(16):
+            n = {}
+            for r in range(row * 8, row * 8 + 8):
+                for c in range(col * 10, col * 10 + 10):
+                    if r < gh and c < gw and cells[r][c] >= 0:
+                        n[cells[r][c]] = n.get(cells[r][c], 0) + 1
+            screen[(row, col)] = max(n, key=n.get) if n else -1
+    for (row, col), a in list(screen.items()):  # (no labelled ground: the nearest labelled screen)
+        if a < 0:
+            best = min(((abs(r - row) + abs(c - col), b) for (r, c), b in screen.items() if b >= 0), default=(0, -1))
+            screen[(row, col)] = best[1]
+    boxes = {}
+    for r in range(gh):
+        for c in range(gw):
+            a = cells[r][c] if cells[r][c] >= 0 else screen.get((r // 8, c // 10), -1)
+            if a < 0:
+                continue
+            x0, z0, x1, z1 = boxes.get(a, (1e9, 1e9, -1e9, -1e9))
+            boxes[a] = (min(x0, c * 1.5), min(z0, r * 1.5), max(x1, c * 1.5 + 1.5), max(z1, r * 1.5 + 1.5))
+
+    def area_at(x, z):
+        c, r = int(x / 1.5), int(z / 1.5)
+        if 0 <= r < gh and 0 <= c < gw and cells[r][c] >= 0:
+            return cells[r][c]
+        return screen.get((min(15, max(0, int(z // 12))), min(15, max(0, int(x // 15)))), -1)
+    return area_at, screen, boxes
+
+
+def name_checks(checks, romfs):
+    """Each overworld check's place ('ar': place id), readable name ('dn') and spot inside the place ('sp')."""
+    from check_names import display_name, direction, house
+    try:
+        area_at, screen, boxes = field_areas(romfs)
+    except Exception as e:  # (no level data: the runtime falls back to the nearest place name)
+        print('tracker: no place names:', e)
+        return
+    seen = {}
+    for c in checks:
+        if c['g'] >= 0:  # (dungeon checks: their dungeon's list)
+            m = re.match(r'D\d-pot-(\d\d[A-P])-', c['n'])
+            c['dn'] = f"Pot, room {c.get('dc') or m.group(1)}" if m else display_name(c['n'], c['k'])
+            n = seen[c['dn']] = seen.get(c['dn'], 0) + 1
+            if n > 1:
+                c['dn'] += f' {n}'
+            continue
+        if 'wx' in c:
+            x, z = c['wx'], c['wz']
+            a = area_at(x, z)
+        else:
+            x, z = c['x'] * 15.0, c['y'] * 12.0  # (the screen's centre)
+            a = screen.get((min(15, int(c['y'])), min(15, int(c['x']))), -1)
+        c['ar'] = a
+        place = PLACE[a] if 0 <= a < len(PLACE) else ''
+        b = boxes.get(a)
+        where = direction((x - b[0]) / max(1.0, b[2] - b[0]), (z - b[1]) / max(1.0, b[3] - b[1])) if b else ''
+        numbered = c['k'] in ('bush', 'dig', 'pot') and re.match(r'(bush|dig|pot)-', c['n'])
+        if numbered and c['k'] == 'pot' and c.get('lv') not in (None, 'Field'):
+            name = f"Pot in {house(c['lv'])}"
+        elif numbered:
+            name = display_name(c['n'], c['k'], place, where)
+        else:
+            name = display_name(c['n'], c['k'])
+        n = seen[name] = seen.get(name, 0) + 1
+        c['dn'] = name if n == 1 else f'{name} {n}'
+        c['sp'] = ('inside, ' if c.get('in') else '') + (where if where != 'centre' else 'middle')
+    for c in checks:  # (the first of a numbered run gets its 1 too)
+        if c.get('dn') and seen.get(c['dn'], 0) > 1:
+            c['dn'] += ' 1'
+
+
+def spell_level(lv):
+    """A level id as words: 'MarinTarinHouse' -> 'Marin Tarin House'."""
+    return re.sub(r'(?<=[a-z])(?=[A-Z0-9])', ' ', lv)
+
+
 def condition(node, levels):
     parts = [node.get('condition-' + lv) for lv in levels if node.get('condition-' + lv)]
     return ' | '.join(f'({p})' for p in parts) if parts else ''
@@ -213,11 +327,13 @@ def build(seed_dir, romfs):
 
     region_cells = {}
     pos = {}
-    shell_rooms, shell_flags = {}, {}
+    shell_rooms, shell_flags, shell_pos = {}, {}, {}
     sp = os.path.join(seed_dir, 'shell_spots.tsv')
     if os.path.exists(sp):
         rows = [c for c in (ln.rstrip('\n').split('\t') for ln in open(sp)) if len(c) > 4 and not c[0].startswith('#')]
         shell_rooms = {c[0]: (c[3], c[4]) for c in rows}
+        shell_pos = {c[0]: (float(c[5]), float(c[7])) for c in rows
+                     if c[3] == 'Field' and len(c) > 7 and re.match(r'-?[\d.]+$', c[5]) and re.match(r'-?[\d.]+$', c[7])}
         shell_flags = {c[0]: int(c[12]) for c in rows if len(c) > 12 and c[12].lstrip('-').isdigit()}
     absent = set(settings.get('absent-locations', ()))  # (rooms the dungeon shuffle left out: not in the game)
     for name, v in logic.items():
@@ -237,6 +353,7 @@ def build(seed_dir, romfs):
             row, col, tile = int(m.group(1)), ord(m.group(2)) - 65, int(m.group(3))
             cell = cell_of_field(f'Field_{m.group(1)}{m.group(2)}')
             checks.append({'n': name, 'x': cell[0], 'y': cell[1], 'g': -1, 'k': 'dig', 'a': v.get('region') or '',
+                           'wx': col * 15.0 + tile % 10 * 1.5 + 0.75, 'wz': (row - 1) * 12.0 + tile // 10 * 1.5 + 0.75,
                            'flag': 24576 + ((row - 1) * 16 + col) * 80 + tile})
             continue
         if level in DUNGEONS or name in dungeon_of or (re.match(r'D(\d)-', name) and not room):
@@ -282,7 +399,9 @@ def build(seed_dir, romfs):
             pass
         checks.append({'n': name, 'x': cell[0], 'y': cell[1], 'g': g, 'flag': flag,
                        'k': kind_of(name, logic[name], shell_rooms), 'a': logic[name].get('region') or '',
-                       'd': dg[0], 'dc': dg[1]})
+                       'd': dg[0], 'dc': dg[1], 'in': name in loc_door_cell})
+        if name in shell_pos:
+            checks[-1]['wx'], checks[-1]['wz'] = shell_pos[name]
     # item pots (pots.tsv: level x y z flag) -> logic node name via the same naming as pots.py
     tsv = os.path.join(seed_dir, 'pots.tsv')
     if os.path.exists(tsv):
@@ -313,7 +432,9 @@ def build(seed_dir, romfs):
             if not cell:
                 continue
             checks.append({'n': n, 'x': cell[0], 'y': cell[1], 'g': g, 'flag': int(fl), 'k': 'pot',
-                           'a': logic[n].get('region') or '', 'd': dg[0], 'dc': dg[1]})
+                           'a': logic[n].get('region') or '', 'd': dg[0], 'dc': dg[1], 'lv': lv})
+            if lv == 'Field':
+                checks[-1]['wx'], checks[-1]['wz'] = float(x), float(z)
     # bushsanity (bushes.tsv: level x y z flag): on the bush's Field screen (bush-<screen>-<n>)
     tsv = os.path.join(seed_dir, 'bushes.tsv')
     if os.path.exists(tsv):
@@ -330,10 +451,11 @@ def build(seed_dir, romfs):
             cell = n and cell_of_field('Field_' + n.split('-')[1])
             if n in logic and cell:
                 checks.append({'n': n, 'x': cell[0], 'y': cell[1], 'g': -1, 'flag': int(fl), 'k': 'bush',
-                               'a': logic[n].get('region') or ''})
+                               'a': logic[n].get('region') or '', 'wx': float(x), 'wz': float(z)})
     for dk in sorted(set(DUNGEONS.values())):
         if any(c.get('d') == dk for c in checks):
             group(dk)
+    name_checks(checks, romfs)
     rooms = [{'level': lv, 'cell': c, 'room': r, 'shift': shifts.get((lv, c), (0, 0))} for (lv, c), r in sorted(layout.items())]
     out = {'settings': {k: 1 for k, v in settings.items() if v is True}, 'nodes': nodes, 'checks': checks,
            'groups': groups, 'rooms': rooms, 'logic': settings.get('logic', 'basic'),
@@ -354,7 +476,7 @@ def build(seed_dir, romfs):
             f.write(f"G\t{g['label']}\t{g['x']:.3f}\t{g['y']:.3f}\n")
         for c in checks:
             f.write(f"C\t{c['n']}\t{c['x']:.3f}\t{c['y']:.3f}\t{c['g']}\t{c['flag']}\t{c['k']}\t{c['a'] or '-'}"
-                    f"\t{c.get('d') or '-'}\t{c.get('dc') or '-'}\n")
+                    f"\t{c.get('d') or '-'}\t{c.get('dc') or '-'}\t{c.get('ar', -1)}\t{c.get('dn') or '-'}\t{c.get('sp') or '-'}\n")
         for r in rooms:
             f.write(f"R\t{r['level']}\t{r['cell']}\t{r['room']}\t{r['shift'][0]:g}\t{r['shift'][1]:g}\n")
     return len(checks), len(groups)
