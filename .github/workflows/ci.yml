@@ -86,6 +86,8 @@ jobs:
           build/test-simd-rounding
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
+      - name: Randomizer Field region table
+        run: python3 tools/test_field_regions.py
       - name: Vulkan synchronization failure regression
         run: python3 tools/test_vulkan_sync_errors.py
       - name: Shader translator instruction semantics
