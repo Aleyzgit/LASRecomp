@@ -44,7 +44,7 @@ const char *souls_at(int i, int *kind, bool *owned);  // runtime/hle/souls.c
 bool triforce_counts(int *have, int *needed);         // runtime/hle/triforce.c
 }
 
-#define SAVE (MAIN_BASE + 0x1CBB220)
+#define SAVE GA_LIVE_SAVE
 #define EVENT_FLAGS (SAVE + 0x5DC0)
 
 static volatile uint64_t g_map_frame, g_map_opened;
