@@ -483,12 +483,17 @@ static void host_test_frame(uint64_t frame) {
     static const char *hspec, *bspec;
     static int init;
     if (!init) { init = 1; hspec = getenv("LARECOMP_HOST_INPUT"); bspec = getenv("LARECOMP_BIND_TEST"); host_test = hspec; }
-    char buf[2048];
+    static char *buf;  // (a copy to cut up; as long as the longest spec: a long scripted run is thousands of steps)
+    static size_t cap;
+    size_t need = 2048;
+    if (hspec && strlen(hspec) + 1 > need) need = strlen(hspec) + 1;
+    if (bspec && strlen(bspec) + 1 > need) need = strlen(bspec) + 1;
+    if (need > cap) { free(buf); buf = malloc(need); cap = need; }
     if (hspec) {
         uint8_t keys[SDL_SCANCODE_COUNT] = {0};
         uint32_t padm = 0;
         int32_t sx = 0, sy = 0;
-        snprintf(buf, sizeof buf, "%s", hspec);
+        snprintf(buf, cap, "%s", hspec);
         char *save = NULL;
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             unsigned long start = 0, len = 10;
@@ -512,7 +517,7 @@ static void host_test_frame(uint64_t frame) {
         if (pch) recompute_pad();
     }
     if (bspec) {
-        snprintf(buf, sizeof buf, "%s", bspec);
+        snprintf(buf, cap, "%s", bspec);
         char *save = NULL;
         for (char *tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
             unsigned long start = 0;
