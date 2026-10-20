@@ -1810,7 +1810,7 @@ extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font) {
         float fs = 14 * u, lh = fs + 6 * u, w = 168 * u;
         bool letters = g_settings.chaos_letters != CHAOS_LETTERS_OFF && g_room_shuffle != "off" && !g_room_shuffle.empty() &&
                        g_room_shuffle != "coherent";
-        float h = 16 * u + lh * pills.size() + (letters ? lh * 3 + 10 * u : 0);
+        float h = 16 * u + lh * pills.size() + (letters ? lh * (g_room_shuffle == "madness" ? 2 : 1) + 12 * u : 0);
         ImVec2 a(ox + 62 * u, oy + 200 * u), z(ox + 62 * u + w, oy + 200 * u + h);  // (left of the paper, under the title)
         parchment(dl, a, z, u);
         float y = a.y + 9 * u;
