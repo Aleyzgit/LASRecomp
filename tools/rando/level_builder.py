@@ -230,14 +230,45 @@ def build(base, rooms, starts=None, static=True, keep_tree=False):
 #                    'Field_12B_Effect_00' (Mabe Village chimney smoke, BdUlrira_Smoke_00)
 #   'cloud'          MapFixture (0x1F8) drawing the island-vanishing cloud bank (DisappearIsland, copied at
 #                    generation time from the player's actor/ObjDisappearIsland.bfres into the seed's map/)
+#   'shade'          the game's own room-edge darkness, deepened on the passage's side: MapFixtures drawing Tail
+#                    Cave's one-sided fade strip (DungeonFade1_05D, a 15 x 0.75 band at roof height, black at its outer
+#                    edge, clear at its inner one; the seed gets a copy of the player's map/DungeonRoofLv1.bfres under
+#                    that name), turned to face the doorway and stretched along the cell's whole side (strips only as
+#                    wide as the doorway left hard-edged dark boxes: the strip fades in depth only), 3 layers of
+#                    falling depth for a soft falloff (_shade_layers). 'shade:<depth>': the deepest layer's depth into
+#                    the room (units, default 4.5), less where a fire stands near that side (_shade_room_depth). One
+#                    set per side, however many passages it has
+#   '<a>+<b>'        both, e.g. 'shade+tailor:Field_12B_Effect_00:5' (dark edge + smoke)
 TAILOR, WOODS_FOG, MAPFIXTURE = 0x1C1, 0x26F, 0x1F8
-FOG_KEY_TAG = 0x7F  # actor keys: tag << 56 | row << 24 | col << 16 | side << 8 | n (unique per level)
+FOG_KEY_TAG = 0x7F  # actor keys: tag << 56 | part << 40 | slot << 32 | row << 24 | col << 16 | side << 8 | n
 _FOG_STEP = {'N': (0, -1), 'S': (0, 1), 'W': (-1, 0), 'E': (1, 0)}
 _FOG_OPP = {'N': 'S', 'S': 'N', 'W': 'E', 'E': 'W'}
 _FOG_IN = {'N': (0, 1), 'S': (0, -1), 'W': (1, 0), 'E': (-1, 0)}  # into the room
 CLOUD_MODEL, CLOUD_SRC = 'DisappearIsland', 'actor/ObjDisappearIsland.bfres'
-# the cloud bank: 3 vertical cards facing +z, x -6.7..6.7, y 0.5..6.7, standing 15.5 north of the model origin
-_CLOUD_W, _CLOUD_Z = 13.4, -15.5
+SHADE_MODEL, SHADE_SRC = 'DungeonFade1_05D', 'map/DungeonRoofLv1.bfres'
+# the strip: x -7.5..7.5, z -6..-5.25 (dark at -6) at the roof actors' height (y 3); rotY turns its dark edge (-z) to
+# the doorway's side
+_SHADE_ROT = {'N': 0.0, 'S': 180.0, 'W': 90.0, 'E': -90.0}
+
+
+def _shade_layers(depth=4.5):
+    """Depths (units into the room) of the layers; each is black at the cell's edge."""
+    return [depth, depth * 0.6, depth * 0.3]
+
+
+def _shade_room_depth(cell, side, fires, depth):
+    """The shade's depth on `side` of `cell`, stopping 0.5 short of the room's fires (sconces / lamps: TagTailorPlayer
+    '*_Fire' entries) along that side: the strips sit at roof height in front of them and a flame under one isn't
+    drawn (Face Shrine 08D's stand lamps 2.25 in from the edge went out). None: too shallow to bother (< 0.75)."""
+    rc = cell.rsplit('_', 1)[1]
+    x0, z0 = (ord(rc[2]) - ord('A')) * 15.0, (int(rc[:2]) - 1) * 12.0
+    for a in fires:
+        lx, lz = a.posX - x0, a.posZ - z0
+        if not (-0.5 <= lx <= 15.5 and -0.5 <= lz <= 12.5):
+            continue
+        dist = {'N': lz, 'S': 12.0 - lz, 'W': lx, 'E': 15.0 - lx}[side]
+        depth = min(depth, dist - 0.5)
+    return depth if depth >= 0.75 else None
 
 
 def _slot_span(slot):
@@ -307,7 +338,8 @@ def fog_template(romfs, kind):
     """A vanilla actor to copy the fog actors from: Tail Cave 05A's Black_Plane tailor tag / the Wind Fish's Egg's
     BlackWall MapFixture."""
     from RandomizerCore.Tools import leb
-    room, t = ('Lv09WindFishsEgg_07C', MAPFIXTURE) if kind == 'cloud' else ('Lv01TailCave_05A', TAILOR)
+    room, t = ('Lv09WindFishsEgg_07C', MAPFIXTURE) if kind.split(':')[0] in ('cloud', 'shade') else \
+        ('Lv01TailCave_05A', TAILOR)
     p = os.path.join(romfs, 'region_common', 'level', room.split('_')[0], room + '.leb')
     for a in leb.Room(open(p, 'rb').read()).actors:
         if a.type == t:
@@ -315,7 +347,7 @@ def fog_template(romfs, kind):
     raise RuntimeError('no actor to copy the passage fog from')
 
 
-def fog_actors(template, kind, cell, side, slot, how, room_id):
+def fog_actors(template, kind, cell, side, slot, how, room_id, part=0):
     """The fog actors for one passage of grid cell `cell` (full name, e.g. 'Lv01TailCave_04B'): emitters every ~3
     units along the opening, 0.75 inside this room's edge (a join gets a veil from each side: a band Link walks
     through), or one cloud card per opening."""
@@ -328,6 +360,8 @@ def fog_actors(template, kind, cell, side, slot, how, room_id):
               'E': (x0 + 15.0, z0 + along)}[side]
     if kind == 'cloud':
         offs = [0.0]
+    elif kind.split(':')[0] == 'shade':
+        offs = _shade_layers(float(kind.split(':')[1])) if ':' in kind else _shade_layers()
     else:
         n = max(1, int(round(width / 3.0)))
         offs = [(i - (n - 1) / 2.0) * width / n for i in range(n)]
@@ -340,9 +374,20 @@ def fog_actors(template, kind, cell, side, slot, how, room_id):
     out = []
     for i, o in enumerate(offs):
         a = copy.deepcopy(template)
-        px, pz = (ex + o, ez) if side in 'NS' else (ex, ez + o)
+        shade = kind.split(':')[0] == 'shade'
+        oo = 0.0 if shade else o  # (along the edge)
+        px, pz = (ex + oo, ez) if side in 'NS' else (ex, ez + oo)
         a.rotX = a.rotY = a.rotZ = 0.0
-        if kind == 'cloud':  # a card facing the camera (+z), as wide as the opening, standing in the doorway (a
+        if shade:  # one layer: the cell's whole side, o units deep
+            side_len = 15.0 if side in 'NS' else 12.0
+            mid, sz = side_len / 2.0 - along, o / 0.75
+            px, pz = (px + mid, pz) if side in 'NS' else (px, pz + mid)
+            a.scaleX, a.scaleY, a.scaleZ = side_len / 15.0, 1.0, sz
+            a.posX, a.posY, a.posZ = px + 6.0 * sz * ix, 3.0, pz + 6.0 * sz * iz  # (dark edge on the cell's edge)
+            a.rotY = _SHADE_ROT[side]
+            a.type = MAPFIXTURE
+            a.parameters = [SHADE_MODEL.encode(), 0, b'', b'', b'', b'', b'', b'']
+        elif kind == 'cloud':  # a card facing the camera (+z), as wide as the opening, standing in the doorway (a
             # west / east doorway: at its front end, across the wall - it hides the doorway behind it)
             if side in 'WE':
                 pz += width / 2.0
@@ -363,7 +408,8 @@ def fog_actors(template, kind, cell, side, slot, how, room_id):
                 a.type = TAILOR
                 a.parameters = [kind.split(':')[1].encode(), 0, b'', b'', b'', b'', b'', b'']
         a.roomID = room_id
-        a.key = (FOG_KEY_TAG << 56) | (row << 24) | (col << 16) | (ord(side) << 8) | ((_slot_id(slot) << 3 | i) & 0xFF)
+        sid = 0 if shade else _slot_id(slot)  # (shade: one set per side)
+        a.key = (FOG_KEY_TAG << 56) | (part << 40) | (sid << 32) | (row << 24) | (col << 16) | (ord(side) << 8) | i
         prefix = {MAPFIXTURE: b'MapFixture', TAILOR: b'TagTailorPla', WOODS_FOG: b'TagMysteriou'}[a.type]
         a.name = prefix + b'-%016X' % a.key
         a.switches = [(4, 0), (4, 0), (4, 0), (4, 0)]
@@ -379,19 +425,20 @@ def _slot_id(slot):
 
 
 def add_passage_fog(romfs, out, cat, level, layout, rows, kind):
-    """Setting 'passage-fog' ('woods' / 'tailor:<entry>' / 'cloud'): fog in `level`'s passages (fog_spots). Room
-    files are the seed's (out); the cloud model's file is copied from the player's game files. Returns the number
-    of passages."""
+    """Setting 'passage-fog' ('woods' / 'tailor:<entry>[:<n>]' / 'cloud' / 'shade[:<depth>]', or two joined with
+    '+'): fog in `level`'s passages (fog_spots). Room files are the seed's (out); the cloud / shade models' files are
+    copied from the player's game files. Returns the number of passages."""
     from RandomizerCore.Tools import leb
-    if not (kind in ('woods', 'cloud') or kind.startswith('tailor:')):  # (tailor:<entry>[:<emitters>])
+    parts = kind.split('+')
+    if not all(k in ('woods', 'cloud', 'shade') or k.startswith(('tailor:', 'shade:')) for k in parts):
         return 0
-    if kind == 'cloud':
-        dst = os.path.join(out, 'region_common', 'map', CLOUD_MODEL + '.bfres')
-        if not os.path.exists(dst):
+    for k, model, src in (('cloud', CLOUD_MODEL, CLOUD_SRC), ('shade', SHADE_MODEL, SHADE_SRC)):
+        dst = os.path.join(out, 'region_common', 'map', model + '.bfres')
+        if k in [x.split(':')[0] for x in parts] and not os.path.exists(dst):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            with open(os.path.join(romfs, 'region_common', CLOUD_SRC), 'rb') as f, open(dst, 'wb') as g:
+            with open(os.path.join(romfs, 'region_common', src), 'rb') as f, open(dst, 'wb') as g:
                 g.write(f.read())
-    tpl = fog_template(romfs, kind)
+    tpls = [fog_template(romfs, k) for k in parts]
     by_cell = {}
     for sp in fog_spots(cat, level, layout, rows):
         by_cell.setdefault(sp[0], []).append(sp)
@@ -408,11 +455,18 @@ def add_passage_fog(romfs, out, cat, level, layout, rows, kind):
         r = leb.Room(data)
         room_id = next((a.roomID for a in r.actors if a.type == 0x1B6), r.actors[0].roomID if r.actors else 0)
         keys = {a.key for a in r.actors}
+        fires = [a for a in r.actors if a.type == TAILOR and b'Fire' in (a.parameters[0] or b'')]
         for _, side, slot, how in spots:
-            for a in fog_actors(tpl, kind, cell, side, slot, how, room_id):
-                if a.key not in keys:
-                    r.actors.append(a)  # (appended last: no actor index shifts)
-                    keys.add(a.key)
+            for part, (k, tpl) in enumerate(zip(parts, tpls)):
+                if k.split(':')[0] == 'shade':
+                    d = _shade_room_depth(cell, side, fires, float(k.split(':')[1]) if ':' in k else 4.5)
+                    if d is None:
+                        continue
+                    k = 'shade:%g' % d
+                for a in fog_actors(tpl, k, cell, side, slot, how, room_id, part):
+                    if a.key not in keys:
+                        r.actors.append(a)  # (appended last: no actor index shifts)
+                        keys.add(a.key)
             n += 1
             print('passage fog: %s %s %s (%s)' % (cell, side, slot, how), flush=True)
         os.makedirs(os.path.dirname(p), exist_ok=True)

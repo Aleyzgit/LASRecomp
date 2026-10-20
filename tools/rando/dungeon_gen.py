@@ -1171,7 +1171,8 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
 
 def write_all(romfs, out, layouts, jumps=None, fog='off'):
     """Writes every generated dungeon; global flags numbered across all of them, one door_jumps.tsv. fog: the hidden
-    'passage-fog' setting (prototype, level_builder.add_passage_fog): 'off' / 'woods' / 'tailor:<entry>' / 'cloud'."""
+    'passage-fog' setting (prototype, level_builder.add_passage_fog): 'off' / 'woods' / 'tailor:<entry>[:<n>]' /
+    'cloud' / 'shade', or two joined with '+'."""
     jumps_path = os.path.join(os.path.dirname(os.path.abspath(out)), 'door_jumps.tsv')
     open(jumps_path, 'w').close()
     if jumps is not None:  # Chaos: discovered doorway pairs are event flags 3800+ (runtime/hle/flags_ext.c)

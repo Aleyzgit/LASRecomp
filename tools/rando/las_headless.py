@@ -104,7 +104,7 @@ def default_settings(seed):
         'shellsanity': False,  # every Secret Seashell spot is a check (tools/rando/seashell_spots.py); off: vanilla
         'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
         'dungeon-room-shuffle': 'off',  # off / coupled / decoupled (tools/rando/dungeon_gen.py; ROOM_MODES)
-        'passage-fog': 'off',  # (prototype, no UI) off / woods / tailor:<entry>[:<emitters>] / cloud (level_builder.py)
+        'passage-fog': 'off',  # (prototype, no UI) off / woods / tailor:<entry>[:<n>] / cloud / shade / a+b (level_builder)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
         'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
         'triforce-hunt': 0, 'triforce-extra': 0,  # pieces needed (0 = off), extra % (tools/rando/triforce.py)
