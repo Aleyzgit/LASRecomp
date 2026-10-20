@@ -2,9 +2,7 @@
 // hair's colour map (Playerlink.bfres MI_hair_alb: hair only) or a shield's (MI_shieldA_alb, the first shield: only
 // its blue face moves, the red emblem and the metal stay; MI_shieldB_alb, the Mirror Shield: its frame - the
 // face is a mirror) get the chosen colour's hue, saturation and value, keeping the shading (recolour.c).
-#include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "../settings.h"
 #include "recolour.h"
@@ -21,45 +19,26 @@ static int classify(int source, const char *t) {
 
 static const RecolourSource k_sources[] = {{"region_common/actor/Playerlink.bfres", classify}};
 
-// hue (degrees; < 0: keep), saturation and value factors - by g_hair_colours / g_shield_colours (Default, ..., Random)
-static const float k_hair[N_HAIR_COLOURS][3] = {
-    {0}, {45, 0.65f, 1.35f} /* Blond */, {25, 0.85f, 0.6f} /* Brown */, {-1, 0.3f, 0.3f} /* Black */,
-    {-1, 0.06f, 1.45f} /* White */, {2, 1, 1} /* Red */, {215, 0.9f, 1} /* Blue */, {120, 0.85f, 0.95f} /* Green */,
-    {330, 0.55f, 1.3f} /* Pink */, {275, 0.75f, 1} /* Purple */};
-static const float k_shield[N_SHIELD_COLOURS][3] = {
-    {0}, {0, 1, 0.95f} /* Red */, {125, 0.9f, 0.85f} /* Green */, {275, 0.85f, 0.9f} /* Purple */,
-    {45, 1, 1.05f} /* Gold */, {-1, 0.25f, 0.3f} /* Black */, {-1, 0.08f, 1.15f} /* White */};
-
-// "Random" (the last entry): one of the colours, picked again whenever the row is set to Random
-static int resolve(int v, int n, int *pick) {
-    if (v != n - 1) { *pick = 0; return v; }
-    static unsigned seed;
-    if (!seed) seed = (unsigned)time(NULL) ^ (unsigned)(uintptr_t)&seed;
-    if (!*pick) { seed = seed * 1103515245u + 12345u; *pick = 1 + (int)((seed >> 16) % (unsigned)(n - 2)); }
-    return *pick;
-}
-
+// Each row's chosen colour (shared palette, runtime/cosmetic_colour.h) is a target for the thing's typical colour as
+// drawn (hue in degrees, saturation, value): the hair (30, 0.94, 0.74), the first shield's lit blue face (195, 0.7,
+// 0.8; its map's blue is 211), the Mirror Shield's beige frame (40, 0.25, 0.8; its face is a mirror and stays one).
 static bool tint(int cls, float t[8]) {
-    static int hair_pick, shield_pick;
-    int h = resolve(g_settings.hair, N_HAIR_COLOURS, &hair_pick);
-    int s = resolve(g_settings.shield, N_SHIELD_COLOURS, &shield_pick);
-    const float *c;
-    float src, width, min_sat;
+    uint32_t rgb;
+    float sh, sf, vf;
     if (cls == C_HAIR) {
-        if (h <= 0 || h >= N_HAIR_COLOURS) return false;
-        c = k_hair[h], src = 30, width = 0.5f, min_sat = 0;  // (the whole map is hair)
-    } else {
-        if (s <= 0 || s >= N_SHIELD_COLOURS) return false;
-        c = k_shield[s];
-        // (hues as drawn: the lit blue face reads teal, ~195 degrees; its map's blue is 211)
-        if (cls == C_SHIELD_A) src = 195, width = 0.15f, min_sat = 0.25f;  // the blue face
-        else {  // the Mirror Shield: its frame (beige, pale: more saturation); the face is a mirror and stays one
-            recolour_pack(t, c[0] < 0 ? 0 : recolour_deg(c[0] - 40), c[0] < 0 ? c[1] : c[1] * 3, c[2], recolour_deg(40), 0.5f, 0,
-                         0);
-            return true;
-        }
+        if (!col_target(&g_settings.hair, COL_SLOT_HAIR, &rgb)) return false;
+        col_mapping(30 / 360.0f, 0.94f, 0.74f, rgb, &sh, &sf, &vf);
+        recolour_pack(t, sh, sf, vf, recolour_deg(30), 0.5f, 0, 0.5f);  // (the whole map is hair)
+        return true;
     }
-    recolour_pack(t, c[0] < 0 ? 0 : recolour_deg(c[0] - src), c[1], c[2], recolour_deg(src), width, min_sat, 1);
+    if (!col_target(&g_settings.shield, COL_SLOT_SHIELD, &rgb)) return false;
+    if (cls == C_SHIELD_A) {
+        col_mapping(195 / 360.0f, 0.7f, 0.8f, rgb, &sh, &sf, &vf);
+        recolour_pack(t, sh, sf, vf, recolour_deg(195), 0.15f, 0.25f, 0.6f);  // (the blue face only)
+    } else {
+        col_mapping(40 / 360.0f, 0.25f, 0.8f, rgb, &sh, &sf, &vf);
+        recolour_pack(t, sh, sf, vf, recolour_deg(40), 0.5f, 0, 0);
+    }
     return true;
 }
 

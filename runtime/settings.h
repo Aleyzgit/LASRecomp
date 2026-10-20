@@ -1,5 +1,6 @@
 // User settings (larecomp.ini next to the executable's working directory), edited from the in-game menu.
 #pragma once
+#include "cosmetic_colour.h"
 #include <stdbool.h>
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
@@ -64,22 +65,14 @@ typedef struct {
     bool walk_speed_dungeons;  // walk speed also indoors: houses, caves, dungeons (Gameplay tab, under Walk speed)
     bool diff_ohko;      // any hit kills
     bool diff_hero;      // Hero Mode flag forced on in the loaded save (2x damage, no recovery hearts)
-    // cosmetics (runtime/ui/cosmetics.mm; applied live by runtime/nvn/texpatch.c), never part of a seed
-    int tunic;           // index into g_tunic_colours (0 = Default: the game's / the seed's own)
-    int hearts;          // index into g_heart_colours (0 = Default red)
-    int hair, shield;    // g_hair_colours / g_shield_colours (0 = Default; last = Random), runtime/nvn/recolour_link.c
-    int skin;            // g_skin_colours (0 = Default; last = Random), runtime/nvn/texpatch.c skin_apply
+    // cosmetics (Cosmetics tab, runtime/ui/menu.mm), live, never part of a seed: colour rows of the shared palette
+    // (runtime/cosmetic_colour.h; Default = the game's own, for the tunic also the seed's)
+    CosColour tunic, hearts;  // runtime/nvn/texpatch.c (tunic map, heart tints)
+    CosColour hair, shield;   // runtime/nvn/recolour_link.c
+    CosColour skin;           // runtime/nvn/texpatch.c skin_apply
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 
-enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };
-extern const char *const g_tunic_colours[N_TUNIC_COLOURS];
-extern const char *const g_heart_colours[N_HEART_COLOURS];
-enum { N_HAIR_COLOURS = 11, N_SHIELD_COLOURS = 8 };
-extern const char *const g_hair_colours[N_HAIR_COLOURS];
-extern const char *const g_shield_colours[N_SHIELD_COLOURS];
-enum { N_SKIN_COLOURS = 11 };
-extern const char *const g_skin_colours[N_SKIN_COLOURS];
 
 extern Settings g_settings;
 

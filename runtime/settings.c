@@ -16,19 +16,6 @@ static const char *settings_file(void) {
     return e && *e ? e : "larecomp.ini";
 }
 
-const char *const g_hair_colours[N_HAIR_COLOURS] = {"Default", "Blond", "Brown", "Black", "White", "Red", "Blue",
-                                                  "Green", "Pink", "Purple", "Random"};
-const char *const g_shield_colours[N_SHIELD_COLOURS] = {"Default", "Red", "Green", "Purple", "Gold", "Black", "White",
-                                                      "Random"};
-
-const char *const g_skin_colours[N_SKIN_COLOURS] = {"Default", "Blue", "Green", "Purple", "Red", "Gold", "Silver",
-                                                  "Pink", "Teal", "Grey", "Random"};
-
-// index of `val` in names (unchanged when it isn't one)
-static void name_index(int *out, const char *const *names, int n, const char *val) {
-    for (int i = 0; i < n; i++) if (!strcmp(val, names[i])) *out = i;
-}
-
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
     .fullscreen = false,
@@ -209,11 +196,11 @@ void settings_load(void) {
         else if (!strcmp(key, "walk_speed_dungeons")) g_settings.walk_speed_dungeons = atoi(val) != 0;
         else if (!strcmp(key, "diff_ohko")) g_settings.diff_ohko = atoi(val) != 0;
         else if (!strcmp(key, "diff_hero")) g_settings.diff_hero = atoi(val) != 0;
-        else if (!strcmp(key, "tunic")) { for (int i = 0; i < N_TUNIC_COLOURS; i++) if (!strcmp(val, g_tunic_colours[i])) g_settings.tunic = i; }
-        else if (!strcmp(key, "hearts")) { for (int i = 0; i < N_HEART_COLOURS; i++) if (!strcmp(val, g_heart_colours[i])) g_settings.hearts = i; }
-        else if (!strcmp(key, "hair")) name_index(&g_settings.hair, g_hair_colours, N_HAIR_COLOURS, val);
-        else if (!strcmp(key, "shield")) name_index(&g_settings.shield, g_shield_colours, N_SHIELD_COLOURS, val);
-        else if (!strcmp(key, "skin")) name_index(&g_settings.skin, g_skin_colours, N_SKIN_COLOURS, val);
+        else if (!strcmp(key, "tunic")) col_parse(&g_settings.tunic, val);  // (colour rows: runtime/cosmetic_colour.c)
+        else if (!strcmp(key, "hearts")) col_parse(&g_settings.hearts, val);
+        else if (!strcmp(key, "hair")) col_parse(&g_settings.hair, val);
+        else if (!strcmp(key, "shield")) col_parse(&g_settings.shield, val);
+        else if (!strcmp(key, "skin")) col_parse(&g_settings.skin, val);
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
@@ -266,9 +253,14 @@ void settings_save(void) {
             g_settings.diff_hero);
     fprintf(f, "walk_speed = %.2f\n", g_settings.walk_speed);
     fprintf(f, "walk_speed_dungeons = %d\n", g_settings.walk_speed_dungeons);
-    fprintf(f, "tunic = %s\nhearts = %s\n", g_tunic_colours[g_settings.tunic], g_heart_colours[g_settings.hearts]);
-    fprintf(f, "hair = %s\nshield = %s\n", g_hair_colours[g_settings.hair], g_shield_colours[g_settings.shield]);
-    fprintf(f, "skin = %s\n", g_skin_colours[g_settings.skin]);
+    static const struct { const char *key; const CosColour *c; } cols[] = {
+        {"tunic", &g_settings.tunic}, {"hearts", &g_settings.hearts}, {"hair", &g_settings.hair},
+        {"shield", &g_settings.shield}, {"skin", &g_settings.skin}};
+    for (size_t i = 0; i < sizeof cols / sizeof *cols; i++) {
+        char v[16];
+        col_format(cols[i].c, v, sizeof v);
+        fprintf(f, "%s = %s\n", cols[i].key, v);
+    }
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);

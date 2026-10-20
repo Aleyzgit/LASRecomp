@@ -23,7 +23,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 
 #include "../hle.h"
 #include "../input_bind.h"
@@ -354,12 +353,13 @@ static uint32_t labels_hash(void) {
 static bool restyled(int role, int style) { return style != STYLE_NINTENDO || prompt_label(role) != role; }
 
 static void cosmetics_test(void);
-static int skin_colour(void);
+static uint32_t skin_rgb(void);
+static uint32_t tunic_rgb(void);
 
 uint32_t texpatch_generation(void) {  // (a rebind re-uploads the glyphs, like a style change; so does a tunic colour)
     cosmetics_test();
-    return (1 + (uint32_t)prompt_style() + (hide_hero() ? 4 : 0) + (labels_hash() << 3)) ^ (uint32_t)g_settings.tunic * 0x9E3779B1u ^
-           (uint32_t)skin_colour() * 0x85EBCA6Bu;
+    return (1 + (uint32_t)prompt_style() + (hide_hero() ? 4 : 0) + (labels_hash() << 3)) ^ tunic_rgb() * 0x9E3779B1u ^
+           skin_rgb() * 0x85EBCA6Bu;
 }
 
 // ------------------------------------------------------------------ block codecs (BC4/BC5, BC1/BC3, ASTC 4x4)
@@ -847,24 +847,20 @@ done:
 }
 
 // ------------------------------------------------------------------ cosmetics (Cosmetics tab): tunic and heart colours
-// Tunic: the colours tools/rando/cosmetics.py had as a seed option (same recolour, now live): where the green and
-// red tunic maps differ (cloth, cap, collar ring) the green pixels get a hue / saturation / value change (PIL HSV,
-// 0-255), keeping the shading. Every mip level is recoloured from the game's own green map, so a seed's own colour
-// is replaced too; "Default" uploads whatever the files hold (green, or an older seed's colour).
-const char *const g_tunic_colours[N_TUNIC_COLOURS] = {"Default", "Purple", "Orange", "Yellow", "Pink", "Teal", "Sky",
-                                                      "Brown", "Black", "White", "Grey", "Lime", "Magenta"};
-static const float k_tunic_hsv[N_TUNIC_COLOURS][3] = {  // hue (-1 = keep), saturation factor, value factor
-    {0}, {195, 1.0f, 1.1f}, {20, 1.2f, 1.75f}, {40, 1.05f, 2.15f}, {232, 0.75f, 1.5f}, {125, 1.0f, 1.0f},
-    {140, 0.8f, 1.45f}, {16, 0.75f, 0.8f}, {-1, 0.15f, 0.45f}, {-1, 0.06f, 2.1f}, {-1, 0.0f, 1.1f}, {70, 1.0f, 1.4f},
-    {215, 1.0f, 1.15f}};
-// Hearts: the colour a full heart gets (sRGB); empty hearts and the frame keep their shade of it (darker)
-const char *const g_heart_colours[N_HEART_COLOURS] = {"Default", "Blue", "Green", "Purple", "Gold", "Orange", "Pink",
-                                                      "Teal", "White"};
-static const uint8_t k_heart_rgb[N_HEART_COLOURS][3] = {{0}, {40, 110, 255}, {40, 205, 60}, {170, 70, 255},
-                                                        {255, 200, 30}, {255, 125, 20}, {255, 105, 185},
-                                                        {20, 205, 195}, {240, 240, 240}};
+// The colour rows share one palette (runtime/cosmetic_colour.h): the chosen colour is a target for the thing's typical
+// colour, reached by a hue / saturation / value change that keeps the shading.
+// Tunic: tools/rando/cosmetics.py's recolour (a seed option once, now live): where the green and red tunic maps differ
+// (cloth, cap, collar ring) the green pixels change (PIL HSV, 0-255) from the green tunic's typical colour (hue 145,
+// saturation 0.75, value 0.55 - its map reads 0.89 / 0.38, lit it looks paler and brighter) to the chosen one. Every
+// mip level is recoloured from the game's own green map, so a seed's own colour is replaced too; "Default" uploads
+// whatever the files hold (green, or an older seed's colour).
+// Hearts: the chosen colour is what a full heart gets; empty hearts and the frame keep their shade of it (darker).
+static uint32_t tunic_rgb(void) {  // (+1: 0 = Default)
+    uint32_t rgb;
+    return col_target(&g_settings.tunic, COL_SLOT_TUNIC, &rgb) ? rgb + 1 : 0;
+}
 
-// LARECOMP_COSMETICS=<frame>:<tunic>:<hearts>,...  test hook: set the colours (by name) at those frames
+// LARECOMP_COSMETICS=<frame>:<tunic>:<hearts>,...  test hook: set the colours (palette names / #RRGGBB) at those frames
 static void cosmetics_test(void) {
     static const char *next;
     static int init;
@@ -874,9 +870,9 @@ static void cosmetics_test(void) {
     if (!next || !*next || sscanf(next, "%ld:%31[^:]:%31[^,]", &at, tu, he) != 3) return;
     extern uint64_t renderer_present_count(void);
     if ((long)renderer_present_count() < at) return;
-    for (int i = 0; i < N_TUNIC_COLOURS; i++) if (!strcmp(tu, g_tunic_colours[i])) g_settings.tunic = i;
-    for (int i = 0; i < N_HEART_COLOURS; i++) if (!strcmp(he, g_heart_colours[i])) g_settings.hearts = i;
-    LOG("[cosmetics] test: tunic %s, hearts %s\n", g_tunic_colours[g_settings.tunic], g_heart_colours[g_settings.hearts]);
+    col_parse(&g_settings.tunic, tu);
+    col_parse(&g_settings.hearts, he);
+    LOG("[cosmetics] test: tunic %s, hearts %s\n", tu, he);
     next = strchr(next, ',');
     if (next) next++;
 }
@@ -888,9 +884,9 @@ static float srgb_lin(int c) { float v = c / 255.0f; return v <= 0.04045f ? v / 
 // (92, 15, 15) and the frame's darker red keep their brightness relative to it.
 void texpatch_heart_tint(int kind, float tint[8]) {
     cosmetics_test();
-    int c = g_settings.hearts;
-    if (c <= 0 || c >= N_HEART_COLOURS || !kind) return;
-    for (int k = 0; k < 3; k++) tint[k] = srgb_lin(k_heart_rgb[c][k]) / 0.319f;
+    uint32_t rgb;
+    if (!kind || !col_target(&g_settings.hearts, COL_SLOT_HEARTS, &rgb)) return;
+    for (int k = 0; k < 3; k++) tint[k] = srgb_lin((int)(rgb >> (16 - 8 * k) & 255)) / 0.319f;
     tint[3] = 1;
     tint[4] = tint[5] = tint[6] = 0;
     tint[7] = 1;
@@ -946,8 +942,8 @@ static void hsv_shift(uint8_t *p, const float *m) {  // PIL's RGB <-> HSV (all 0
 
 // One mip level of the recoloured tunic (linear BC1 blocks), made on first use and kept for that colour
 static uint8_t *g_tunic_lv[16];
-static int g_tunic_lv_colour;
-static const uint8_t *tunic_level(int colour, uint32_t lv) {
+static uint32_t g_tunic_lv_colour;
+static const uint8_t *tunic_level(uint32_t colour, uint32_t lv) {  // (colour: tunic_rgb())
     if (colour != g_tunic_lv_colour) {
         for (int i = 0; i < 16; i++) { free(g_tunic_lv[i]); g_tunic_lv[i] = NULL; }
         g_tunic_lv_colour = colour;
@@ -988,6 +984,9 @@ static const uint8_t *tunic_level(int colour, uint32_t lv) {
                 dst[y * W + x] = acc / ks;
             }
     }
+    float sh, sf, vf;
+    col_mapping(145 / 360.0f, 0.75f, 0.55f, colour - 1, &sh, &sf, &vf);
+    float m3[3] = {sh == 0 ? -1 : 100 + (sh - floorf(sh)) * 255, sf, vf};  // (hsv_shift: PIL hue, moved from the green's 100)
     uint8_t *out = malloc((size_t)nb * 8);
     memcpy(out, green, (size_t)nb * 8);
     for (uint32_t by = 0; by < l.hb; by++)
@@ -1003,7 +1002,7 @@ static const uint8_t *tunic_level(int colour, uint32_t lv) {
                 uint8_t c[3] = {gimg[at * 3], gimg[at * 3 + 1], gimg[at * 3 + 2]};
                 if (m > 0.002f) {
                     any = true;
-                    hsv_shift(c, k_tunic_hsv[colour]);
+                    hsv_shift(c, m3);
                     for (int k = 0; k < 3; k++) c[k] = clamp8(gimg[at * 3 + k] + (c[k] - gimg[at * 3 + k]) * m + 0.5f);
                 }
                 memcpy(px[i], c, 3);
@@ -1016,40 +1015,33 @@ static const uint8_t *tunic_level(int colour, uint32_t lv) {
 }
 
 static void tunic_apply(uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row) {
-    int c = g_settings.tunic;
-    if (c <= 0 || c >= N_TUNIC_COLOURS || !g_tunic_layout_ok) return;
+    uint32_t c = tunic_rgb();
+    if (!c || !g_tunic_layout_ok) return;
     const uint8_t *src = tunic_level(c, lv);
     uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
     if (!src || row < bw * 8) return;
     for (uint32_t y = 0; y < bh; y++) memcpy(blocks + y * row, src + y * bw * 8, bw * 8);
 }
 
-// Link's skin colour (Cosmetics tab "Skin color"): fantasy colours over his skin, keeping the shading. The skin is
+// Link's skin colour (Cosmetics tab "Skin color"): any colour over his skin, keeping the shading. The skin is
 // told by its colour in the maps (BC1): a peach hue (-8..30 degrees), not grey, bright - so the brows and eyes (dark),
 // the mouth's dark lines, the hair, the tunic and the leather stay. The body map (tunic, belt, boots, arms) has
 // browns close to skin: there it must also be brighter than the leather.
-// Per colour: hue (degrees; < 0 keep), saturation and value factors.
-static const float k_skin[N_SKIN_COLOURS][3] = {
-    {0}, {215, 1.5f, 0.92f} /* Blue */, {115, 1.35f, 0.85f} /* Green */, {275, 1.4f, 0.88f} /* Purple */,
-    {356, 1.6f, 0.92f} /* Red */, {46, 1.7f, 1.0f} /* Gold */, {-1, 0.08f, 1.02f} /* Silver */, {322, 1.3f, 1.0f} /* Pink */,
-    {176, 1.5f, 0.85f} /* Teal */, {-1, 0.04f, 0.68f} /* Grey */};
-
-static int skin_colour(void) {  // (the last entry, Random: one of the colours, picked whenever the row is set to it)
-    static int pick;
-    static unsigned seed;
-    int v = g_settings.skin;
-    if (v != N_SKIN_COLOURS - 1) { pick = 0; return v > 0 && v < N_SKIN_COLOURS ? v : 0; }
-    if (!seed) seed = (unsigned)time(NULL) ^ (unsigned)(uintptr_t)&seed;
-    if (!pick) { seed = seed * 1103515245u + 12345u; pick = 1 + (int)((seed >> 16) % (N_SKIN_COLOURS - 2)); }
-    return pick;
+// The colour row's target is reached from the skin's typical colour (hue 21, saturation 0.47, value 0.96).
+static uint32_t skin_rgb(void) {  // (+1: 0 = Default)
+    uint32_t rgb;
+    return col_target(&g_settings.skin, COL_SLOT_SKIN, &rgb) ? rgb + 1 : 0;
 }
 
 static float smooth(float e0, float e1, float x) { float t = sat((x - e0) / (e1 - e0)); return t * t * (3 - 2 * t); }
 
 static void skin_apply(uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row, bool body) {
-    int c = skin_colour();
+    uint32_t c = skin_rgb();
     if (!c) return;
-    const float *k = k_skin[c];
+    float sh, sf, vf, th, ts, tv;
+    col_mapping(21 / 360.0f, 0.47f, 0.96f, c - 1, &sh, &sf, &vf);
+    col_hsv(c - 1, &th, &ts, &tv);
+    bool grey = sh == 0 && ts < 0.08f;
     uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
     if (row < bw * 8) return;
     for (uint32_t by = 0; by < bh; by++)
@@ -1069,7 +1061,7 @@ static void skin_apply(uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row, bo
                           (1 - smooth(0.9f, 0.97f, s)) * (body ? smooth(0.55f, 0.68f, v) : smooth(0.42f, 0.58f, v));
                 if (m < 0.004f) continue;
                 any = true;
-                float nh = k[0] < 0 ? hue : k[0] + (hue - 18) * 0.5f, ns = fminf(s * k[1], 1), nv = fminf(v * k[2], 1);
+                float nh = grey ? hue : th * 360 + (hue - 21) * 0.5f, ns = fminf(s * sf, 1), nv = fminf(v * vf, 1);
                 nh = fmodf(nh + 720, 360) / 60;
                 int sector = (int)nh % 6;
                 float f = nh - floorf(nh), p = nv * (1 - ns), q = nv * (1 - ns * f), t = nv * (1 - ns * (1 - f));
