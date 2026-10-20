@@ -16,7 +16,7 @@ yet owned. So:
     any other it drops nothing) and its ItemDrop Seashell<n> is retagged the same way, its sensor beacon switched off
     by the runtime. The runtime (runtime/hle/shell_spots.c) turns the tagged drop into the seed's item: a SinkingSword
     item actor (the actor LAS uses for standing items) with the item's model, where the shell would appear (out of a
-    tree's crown / a bomb hole: on a free tile beside it). Picking it up runs its entry in SinkingSword.bfevfl - LAS's
+    tree's crown / a bomb hole: it flies out on the shell's arc and comes down on a free tile beside it). Picking it up runs its entry in SinkingSword.bfevfl - LAS's
     item-get, the game's message box - and sets the spot's own flag.
 A spot holding a shell gets its found flag from the runtime once that shell is owned (the tracker); so does a
 digsanity tile holding one (digs.py makes it a buried shell: the shells argument).
@@ -68,9 +68,10 @@ def _rooms(romfs, leb, levels=None):
 
 
 def _landing(romfs, leb, room, host, tree):
-    """Where the item of a tree (ObjTree / ObjPalmTree: the shell falls out of its crown) or a bomb hole (the shell pops
-    out of it) lands - the item doesn't fall or jump: the nearest free tile around (a tree stands on the corner of 2 x 2
-    tiles, a hole is one), in front - toward the camera - first, at most 2 units above / below the host. None: none."""
+    """Where the item of a tree (ObjTree / ObjPalmTree: the shell flies out of its crown) or a bomb hole (the shell pops
+    out of it) lands - the runtime flies it there on the shell's arc, not where the shell itself would come down (a wall,
+    water or the tree): the nearest free tile around (a tree stands on the corner of 2 x 2 tiles, a hole is one), in
+    front - toward the camera - first, at most 2 units above / below the host. None: none."""
     with open(os.path.join(romfs, 'region_common', 'level', 'Field', room + '.leb'), 'rb') as fh:
         r = leb.Room(fh.read(), edit_grid=True)
     m = re.match(r'Field_(\d\d)([A-P])$', room)

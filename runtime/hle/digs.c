@@ -327,6 +327,8 @@ static bool spawn_hole(Cpu *c, int g) {
     return loaded;
 }
 
+uint64_t digs_last_actor;  // the last item actor digs_spawn_item made (0: none; valid while its ref is alive)
+
 // the tile's item as a SinkingSword item actor, the way a level spawns one (spawn info: +0 key, +8 type, +0xc zone,
 // +0x10 eight {u32 value, u8 type} parameters, +0x180 position / rotation (quaternion) / scale; the rest zero).
 // false: the tile's screen isn't loaded
@@ -336,6 +338,7 @@ bool digs_spawn_item(Cpu *c, const char *room, uint64_t key, uint32_t zone, cons
                      const char *const strs[5], uint64_t *slot, bool *spawned) {
     int idx[8];
     *spawned = false;
+    digs_last_actor = 0;
     for (int k = 0; k < 8; k++)
         if ((idx[k] = pool_index(c, k < 5 ? strs[k] : "")) < 0) { LOG("[digs] string pool full\n"); return true; }
     uint64_t s = scratch(), info = s + 0x40, sctrl;
@@ -355,6 +358,7 @@ bool digs_spawn_item(Cpu *c, const char *room, uint64_t key, uint32_t zone, cons
         guest_call(c, GA_CREATE_ACTOR);
         uint64_t ictrl = LD64(s + 8);
         *spawned = LD64(s) != 0;
+        digs_last_actor = LD64(s);
         if (LD64(s) && ictrl) {
             hold_weak(slot, ictrl);
             c->x[0] = ictrl;
