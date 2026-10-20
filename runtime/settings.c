@@ -18,6 +18,8 @@ static const char *settings_file(void) {
 
 const char *const g_enemy_colour_modes[N_ENEMY_COLOUR_MODES] = {"Off", "Random per seed", "Random every load"};
 static const char *const k_enemy_colour_keys[N_ENEMY_COLOUR_MODES] = {"off", "seed", "load"};  // (larecomp.ini)
+const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game Boy Color", "Sepia"};
+static const char *const k_screen_filter_keys[N_SCREEN_FILTERS] = {"off", "gameboy", "gameboy_color", "sepia"};
 
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
@@ -206,6 +208,9 @@ void settings_load(void) {
         else if (!strcmp(key, "skin")) col_parse(&g_settings.skin, val);
         else if (!strcmp(key, "leaves")) col_parse(&g_settings.leaves, val);
         else if (!strcmp(key, "grass")) col_parse(&g_settings.grass, val);
+        else if (!strcmp(key, "screen_filter")) {
+            for (int i = 0; i < N_SCREEN_FILTERS; i++) if (!strcmp(val, k_screen_filter_keys[i])) g_settings.screen_filter = i;
+        }
         else if (!strcmp(key, "enemy_colours")) {
             for (int i = 0; i < N_ENEMY_COLOUR_MODES; i++) if (!strcmp(val, k_enemy_colour_keys[i])) g_settings.enemy_colours = i;
         }
@@ -271,6 +276,7 @@ void settings_save(void) {
         fprintf(f, "%s = %s\n", cols[i].key, v);
     }
     fprintf(f, "enemy_colours = %s\n", k_enemy_colour_keys[g_settings.enemy_colours]);
+    fprintf(f, "screen_filter = %s\n", k_screen_filter_keys[g_settings.screen_filter]);
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);

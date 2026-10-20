@@ -215,7 +215,7 @@ static bool apply_tilt(int removed) {  // false: not set up yet (or not the name
 
 // LARECOMP_SETTING_AT="frame:key=value,..." (test): flip an in-game menu toggle at that presented frame, as the menu
 // would (move_360, blur_removal, dpad_move: 0 / 1; Cosmetics colour rows: a palette name or #RRGGBB - tunic, hearts,
-// hair, shield, skin, leaves, grass; enemy_colours: 0 / 1 / 2).
+// hair, shield, skin, leaves, grass; enemy_colours: 0 / 1 / 2; screen_filter: 0-3).
 static void setting_at_tick(void) {
     static const char *spec;
     static int init;
@@ -232,6 +232,7 @@ static void setting_at_tick(void) {
         char key[32], val[32];
         if (sscanf(tok, "%lu:%31[a-z_0-9]=%31s", &f, key, val) != 3 || f <= last || f > now) continue;
         int v = atoi(val);
+        if (!strcmp(key, "screen_filter")) { g_settings.screen_filter = v; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
         if (!strcmp(key, "enemy_colours")) { g_settings.enemy_colours = v; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
         bool *b = !strcmp(key, "move_360") ? &g_settings.move_360 : !strcmp(key, "blur_removal") ? &g_settings.blur_removal :
                   !strcmp(key, "dpad_move") ? &g_settings.dpad_move : NULL;

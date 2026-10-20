@@ -471,6 +471,9 @@ static void tab_cosmetics(void) {
     opt_section("Enemies");
     opt_choice("Enemy colors", &g_settings.enemy_colours, g_enemy_colour_modes, N_ENEMY_COLOUR_MODES, 0,
                "Each kind of enemy in another color. Enemies whose color shows their strength or type keep theirs.");
+    opt_section("Screen");
+    opt_choice("Screen filter", &g_settings.screen_filter, g_screen_filters, N_SCREEN_FILTERS, 0,
+               "A filter over the whole picture, the HUD included.");
     opt_end();
 }
 
