@@ -2898,7 +2898,7 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
     LOG(" | fubo0:");
     for (int i = 0; i < 6; i++)
         if (st.ubuf[1][i].addr) { const float *f = (const float *)(uintptr_t)st.ubuf[1][i].addr; LOG(" f%d=[%g %g %g %g]", i, f[0], f[1], f[2], f[3]); }
-    LOG(" | ssbo:");
+    LOG(" | gmem v%d f%d ssbo_read v%#x f%#x ssbo:", pr->vi->uses_gmem, pr->fi->uses_gmem, pr->vi->ssbo_read, pr->fi->ssbo_read);
     for (int sg = 0; sg < 2; sg++)
         for (int i = 0; i < 16; i++)
             if (st.sbuf[sg][i].addr) LOG(" %c%d(%llx,%llu)", sg ? 'f' : 'v', i, st.sbuf[sg][i].addr, st.sbuf[sg][i].size);
@@ -3408,6 +3408,12 @@ static void draw(CmdRec *r, bool indexed) {
             }
         }
     }
+    if (g_interp_log && !g_interp_replaying && (pr->vi->uses_gmem || pr->fi->uses_gmem))  // (frame interpolation: the storage read live)
+        for (int s_ = 0; s_ < 2; s_++) {
+            ShaderInfo *si = s_ ? pr->fi : pr->vi;
+            if (!si->uses_gmem) continue;
+            for (int i = 0; i < 16; i++) if ((si->ssbo_read & (1u << i)) && st.sbuf[s_][i].addr) interp_storage(st.sbuf[s_][i].addr, st.sbuf[s_][i].size);
+        }
     if (pr->vi->uses_gmem) [enc setVertexBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     static id<MTLBuffer> dbgvs;
     bool dbg_this = maxwell_dbg_vs && (const uint8_t *)(uintptr_t)st.program->stages[0].code_addr == maxwell_dbg_vs;
@@ -4161,6 +4167,7 @@ static void exec_list(uint64_t handle, int depth) {
             break;
         case CMD_DISPATCH:
             if (g_interp_replaying) break;  // (a replayed frame: the frame's compute results are already there)
+            if (g_interp_log) for (int i = 0; i < 16; i++) if (st.sbuf[5][i].addr) interp_dispatch_output(st.sbuf[5][i].addr, st.sbuf[5][i].size);
             dispatch_compute((uint32_t)r->x[0], (uint32_t)r->x[1], (uint32_t)r->x[2]);
             if (st.program) {
                 static uint64_t seen[16];

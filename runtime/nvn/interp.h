@@ -19,6 +19,11 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
 // pool is the game's memory and it rewrites entries while the replays run; an area's lighting texture swapped under
 // an in-between showed it with the next area's ambient light for one image).
 const void *interp_texentry(int stage, int i, const void *entry, uint32_t size);
+// Storage a draw's shader reads straight from guest memory (gmem): logged with the frame so a replay can tell when the
+// game has rewritten it since (a replay reads it live; Dusklight's presented frame reads only its own recording), and
+// a dispatch's output ranges, which the GPU rewrites in order and need no check.
+void interp_storage(uint64_t addr, uint64_t size);
+void interp_dispatch_output(uint64_t addr, uint64_t size);
 void interp_texture_destroyed(void);  // (render thread, in queue order) a texture went away during the frame
 
 // Objects freed at once by the game's threads (programs, memory pools, samplers): a replay must not run while one goes,
