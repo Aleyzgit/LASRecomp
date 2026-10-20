@@ -97,7 +97,7 @@ static bool lazy_heap_predicted(bool budget_ext, bool *probe) {
     *probe = false;  // (RADV: as before - the dma-buf heap or lazy chunks, no probe)
 #ifdef __linux__
     const char *d = getenv("LARECOMP_VK_HEAP_DMABUF");
-    if ((d ? atoi(d) != 0 : true) && g_vk.dmabuf) {
+    if ((d ? atoi(d) != 0 : true) && (g_vk.dmabuf || g_vk.map_placed)) {
         VkPhysicalDeviceMemoryProperties mp;
         vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
         const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
@@ -305,7 +305,7 @@ static void create_device(void) {
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
     VkExtensionProperties *ep = calloc(ne, sizeof *ep);
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, ep);
-    const char *ext[12];
+    const char *ext[16];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
@@ -327,13 +327,28 @@ static void create_device(void) {
         ext[n_ext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
         ext[n_ext++] = VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME;
     }
+    // ... mapped there by the driver itself (its own DRM file, as every vkMapMemory), not through the dma-buf (issue #92)
+    bool placed_ext = has_ext(ep, ne, VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_MAP_MEMORY_2_EXTENSION_NAME);
 #endif
     free(ep);
 
     // features the backend relies on (all present on current desktop drivers)
     VkPhysicalDeviceVulkan12Features have12 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES};
     VkPhysicalDeviceFeatures2 have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &have12};
+#ifdef __linux__
+    VkPhysicalDeviceMapMemoryPlacedFeaturesEXT have_placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
+    if (placed_ext) have12.pNext = &have_placed;
+#endif
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+#ifdef __linux__
+    have12.pNext = NULL;
+    g_vk.map_placed = placed_ext && have_placed.memoryMapPlaced;
+    g_vk.unmap_reserve = g_vk.map_placed && have_placed.memoryUnmapReserve;
+    if (g_vk.map_placed) {
+        ext[n_ext++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
+        ext[n_ext++] = VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME;
+    }
+#endif
     bool probe;
     g_vk.lazy_heap = lazy_heap_predicted(budget, &probe);
     g_vk.heap_probe = !g_vk.lazy_heap && probe && g_vk.host_import && have12.bufferDeviceAddress;
@@ -358,6 +373,12 @@ static void create_device(void) {
     VkPhysicalDeviceFaultFeaturesEXT ff = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT, .deviceFault = VK_TRUE,
                                            .pNext = &f11};
     VkPhysicalDeviceFeatures2 f = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = fault ? (void *)&ff : (void *)&f11};
+#ifdef __linux__
+    VkPhysicalDeviceMapMemoryPlacedFeaturesEXT placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT,
+                                                         .memoryMapPlaced = VK_TRUE, .memoryUnmapReserve = g_vk.unmap_reserve,
+                                                         .pNext = f.pNext};
+    if (g_vk.map_placed) f.pNext = &placed;
+#endif
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
