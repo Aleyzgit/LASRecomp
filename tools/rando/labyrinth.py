@@ -31,6 +31,11 @@ not a mode of its own - it interconnects the dungeons, each room shuffle mode ke
              (labyrinth_boss_ok: only the boss and instrument behind each boss door) and the fill check
              (labyrinth_fill_ok) all follow the cross-wing links.
 
+  game      (stage 2) starts(): a start point 'LabIn_<cell><side><centre>' just inside every doorway a level load
+  files     arrives at (rows into another level, overworld doors); write_doors(): the overworld doors' and Eagle's
+            Tower's way out's AreaLevelOpen retargeted, labyrinth_doors.tsv. Runtime: runtime/hle/doorjump.c (rows into
+            another level load it), runtime/hle/labyrinth.c (shared keys, the door Link came in by).
+
     plan(cat, seed, romfs, mode, settings, et_locks) -> (layouts, rows, info)
 """
 import json

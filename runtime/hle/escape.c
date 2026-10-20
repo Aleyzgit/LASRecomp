@@ -4,6 +4,7 @@
 // (tools/rando/escape_bottle.py). Equipped on X / Y and used: inside a dungeon Link warps to that dungeon's entrance
 // (the entrance room stays at its own cell in shuffled layouts: tools/rando/dungeon_gen.py ENTRANCES), anywhere else
 // to Mabe Village, walking out of Marin & Tarin's front door (Field_11C; user 2026-10-11 - was just inside it).
+// Labyrinth seeds (runtime/hle/labyrinth.c): out of the overworld door Link last came in by, once one is known.
 //
 // Why the third bottle: it is a real inventory item, so it gets an item-page slot, X / Y assignment and the game's own
 // "may Link use an item now?" rules for free: the use is caught in the game's predicate for that slot
