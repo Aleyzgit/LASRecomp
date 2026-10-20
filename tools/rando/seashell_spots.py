@@ -50,9 +50,10 @@ LAWN = 0xb5  # ObjLawn: tall grass (an item may land in it)
 TREES = (0xbb, 0xbc)  # ObjTree, ObjPalmTree: the shell falls out when Link dashes into one (Pegasus Boots)
 HOLE_INDEX = 60  # a bomb hole holding something else drops by seashell index HOLE_INDEX + n, which no shell has
 TAG = 200  # a retagged drop: a Heart Piece (or a bomb hole's shell) with index TAG + the spot's vanilla seashell index
-# where a bomb hole's item lands when the tile grid can't tell: the Tal Tal hole (02J) is the pit on top of a pillar,
-# bombed from the ledge north of it - the shell flies up there (the grid's free tiles beside it are the sand below)
-HOLE_LANDING = {'Field_02J': (147.75, 24.63, 12.75)}
+# where a bomb hole's item lands when the tile grid can't tell: the Tal Tal hole (02J) is the pit on top of a pillar
+# below the plateau east of the rope bridge (Cucco House); the shell flies up and toward that plateau's south-west
+# corner, the reachable ledge over the pit (the grid's free tiles beside the pit are the sand below the pillar)
+HOLE_LANDING = {'Field_02J': (151.25, 25.5, 12.25)}
 DROP_KEY = re.compile(rb'Seashell(\d+)$')  # a bush's / rock's / tree's / pot's ItemDrop key
 
 
