@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Our own message texts in every language the game has (the Escape Bottle, the Hint Sheet): the sentences are
-ours, written here per language; names of items and places come from the game's own message
+"""Our own message texts in every language the game has (the Escape Bottle, the Hint Sheet, the Labyrinth's wing
+names): the sentences are ours, written here per language; names of items and places come from the game's own message
 files of that language at generation time (UI.msbt ItemName_*, Glossary.msbt, Place.msbt), never stored here.
 
     lang_of(rel)                       'regionEU/EUde/message/System.msbt' -> 'de' (LANGS)
@@ -234,6 +234,11 @@ T = {
     },
     # a hint: '<item>: <where>' (the item red); where = the place, its detail in brackets
     'colon': {'ja': '：', 'zh_cn': '：', 'zh_tw': '：'},
+    'wing': {  # the Labyrinth: a wing's name (keysanity_text, the hints)
+        'en': 'Wing {n} of the labyrinth', 'de': 'Flügel {n} des Labyrinths', 'fr': 'Aile {n} du labyrinthe',
+        'fr_us': 'Aile {n} du labyrinthe', 'es': 'Ala {n} del laberinto', 'es_us': 'Ala {n} del laberinto',
+        'it': 'Ala {n} del labirinto', 'nl': 'Vleugel {n} van het labyrint', 'ru': 'Крыло {n} лабиринта',
+        'ja': '迷宮の 第{n}区画', 'ko': '미궁의 제{n}구역', 'zh_cn': '迷宫第{n}区', 'zh_tw': '迷宮第{n}區'},
 }
 # hint details (where an item lies inside a place)
 DETAIL = {
@@ -313,3 +318,7 @@ def fill(template, **parts):
 def tr(table, lang):
     """table[lang], American French / Spanish falling back to the European text, anything else to None."""
     return table.get(lang) or table.get(lang[:2]) or None
+
+
+def wing_name(n, lang):
+    return (tr(T['wing'], lang) or T['wing']['en']).format(n=n)

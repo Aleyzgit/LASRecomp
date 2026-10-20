@@ -761,7 +761,7 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
         else:
             short = [d for d in sorted({f'D{LEVELS[lv][0]}' for lv in layouts} | {'D7'})
                      if per_wing.get(d, 0) < dungeon_items(settings)]
-            if short or len(ks) < total + dungeon_items(settings) * (len(layouts) + 1):
+            if short or len(ks) < total + SPARE_KEYS + dungeon_items(settings) * (len(layouts) + 1):
                 settings['room-logic-unfillable'] = f'labyrinth: too few checks for the dungeon items ({short})'
     elif settings.get('keysanity', 'off') == 'off':
         need_k = {}  # 'Dn' -> [keys each check of the dungeon needs]
@@ -919,6 +919,10 @@ def fill_ok(cat, romfs, level, layout, rows, settings=None):
 # are all key-D{SHARED_KEY_N}, the worst-case key rule runs over the whole graph), Eagle's Tower is one node (kept whole:
 # its own vanilla logic inside, its locks counted as ET_LOCK atoms anyone may spend keys on).
 SHARED_KEY_N = 1
+# Spare small keys in the pool on top of one per lock (user 2026-10-19: 5). The logic keeps the worst-case rule - a
+# lock needs one key more than every other lock Link could open first - since a spare key can't stand in for a key the
+# player may have spent elsewhere; the spares make the counts reachable sooner (more keys to find), never lower them.
+SPARE_KEYS = int(os.environ.get('LARECOMP_LAB_SPARE_KEYS', 5))
 ET_LEVEL = 'Lv07EagleTower'
 ET_NODE = (ET_LEVEL, 'ET')
 
@@ -1093,7 +1097,7 @@ def labyrinth_fill_ok(cat, romfs, edges, starts, flags, layouts, settings, et_lo
         return False
     need = dungeon_items(settings or {})
     return all(per_wing.get(LEVELS[lv][0], 0) >= need for lv in list(layouts) + [ET_LEVEL]) and \
-        len(ks) >= total + need * (len(layouts) + 1)
+        len(ks) >= total + SPARE_KEYS + need * (len(layouts) + 1)
 
 
 def _apply_labyrinth(cat, romfs, layouts, jump_rows, logic_defs, item_defs, lab, cell_expr, cell_keys, kcs,
@@ -1158,11 +1162,11 @@ def _apply_labyrinth(cat, romfs, layouts, jump_rows, logic_defs, item_defs, lab,
         alts = set(sorted(alts, key=lambda t: (len(t), sorted(t)))[:MAX_TERMS])
         logic_defs[f'labyrinth-wing-{n}'] = {'type': 'region', 'condition-basic': dnf_str(alts) or never}
         own.add(f'labyrinth-wing-{n}')
-    # small keys: one kind (any key opens any lock), one per lock of the whole Labyrinth
+    # small keys: one kind (any key opens any lock), one per lock of the whole Labyrinth + the spares
     old = sum(item_defs[f'key-D{i}']['quantity'] for i in range(9) if f'key-D{i}' in item_defs)
     for i in range(9):
         if f'key-D{i}' in item_defs:
             item_defs[f'key-D{i}']['quantity'] = 0
-    item_defs[f'key-D{SHARED_KEY_N}']['quantity'] = total
-    junk_delta[0] += total - old
+    item_defs[f'key-D{SHARED_KEY_N}']['quantity'] = total + SPARE_KEYS
+    junk_delta[0] += total + SPARE_KEYS - old
     return {'total': total, 'et_locks': et_locks, 'et_keys': cell_keys.get(ET_NODE, total), 'kfix': kfix, 'own': own}

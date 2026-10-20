@@ -407,7 +407,8 @@ def main():
         room_plan = (layouts, jumps)
         if lab_info:  # (the doors' arrivals, the cross-wing links, statistics: read by stage 2 and seed_sweep.py)
             lab_info['planning-attempts'] = attempt + 1
-            lab_info.update({'small-keys': item_defs['key-D1']['quantity'], 'keysanity': settings.get('keysanity', 'off'),
+            lab_info.update({'small-keys': item_defs['key-D1']['quantity'], 'spare-keys': room_logic.SPARE_KEYS,
+                             'keysanity': settings.get('keysanity', 'off'),
                              'dungeon-items': settings.get('dungeon-items', 'none'),
                              'dungeon-of': dict(sorted(settings.get('dungeon-of', {}).items()))})
             with open(os.path.join(out_dir, 'labyrinth.json'), 'w') as f:

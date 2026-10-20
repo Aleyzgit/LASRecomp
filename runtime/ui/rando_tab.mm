@@ -352,7 +352,8 @@ static void start_generation(void) {
     fprintf(f, "{\"seed\": \"%s\", \"logic\": \"basic\", \"dungeon-items\": \"%s\", \"traps\": \"%s\",\n", id,
             ditems[g_opts.dungeon_items], traps[g_opts.traps]);
     fprintf(f, " \"shuffle-instruments\": %s, \"shuffle-dungeons\": %s, \"randomize-enemies\": %s, \"randomize-music\": %s,\n",
-            g_opts.shuffle_instruments ? "true" : "false", g_opts.shuffle_dungeons ? "true" : "false",
+            g_opts.shuffle_instruments ? "true" : "false",
+            g_opts.shuffle_dungeons && !(g_opts.room_shuffle && g_opts.labyrinth) ? "true" : "false",
             g_opts.randomize_enemies ? "true" : "false", g_opts.randomize_music ? "true" : "false");
     fprintf(f, " \"open-mabe\": %s, \"fast-songs\": %s, \"OHKO\": %s, \"boss-cutscenes\": %s, \"create-spoiler\": %s,\n",
             g_opts.open_mabe ? "true" : "false", g_opts.fast_songs ? "true" : "false", g_opts.ohko ? "true" : "false",
@@ -782,13 +783,18 @@ extern "C" void rando_tab_draw(float scale) {
        // interiors + connector caves, tools/rando/las_headless.py), decoupled with them. (Tier 1, the old "dungeons only"
        // level, reads as the dungeon lever.)
         if (g_opts.entrances == 1) g_opts.shuffle_dungeons = true, g_opts.entrances = 0;
-        bool dungeons = g_opts.shuffle_dungeons, houses = g_opts.entrances >= 2, on = dungeons || houses;
-        if (opt_toggle("Entrance randomizer", &on, false, "Shuffles where entrances lead, with logic."))
-            g_opts.shuffle_dungeons = on, g_opts.entrances = 0;  // (on: dungeon entrances, the usual choice)
+        // (the Labyrinth decides where each dungeon door leads: dungeon entrances are off with it, greyed out)
+        bool lab = g_opts.room_shuffle && g_opts.labyrinth;
+        bool dungeons = g_opts.shuffle_dungeons && !lab, houses = g_opts.entrances >= 2, on = dungeons || houses;
+        if (opt_toggle("Entrance randomizer", &on, false, "Shuffles where entrances lead, with logic.")) {
+            if (lab) g_opts.entrances = on ? 2 : 0;  // (on: houses & caves, the dungeons' kind being taken)
+            else g_opts.shuffle_dungeons = on, g_opts.entrances = 0;  // (on: dungeon entrances, the usual choice)
+        }
         bool last = false;  // (an attempt to turn off the last kind)
         opt_indent(1);
-        if (!on) opt_disable_next();
-        if (opt_toggle("Dungeon entrances", &dungeons, false, "Dungeon entrances lead into other dungeons.")) {
+        if (!on || lab) opt_disable_next();
+        if (opt_toggle("Dungeon entrances", &dungeons, false, lab ? "Off with Labyrinth: it decides where dungeon doors lead."
+                                                                  : "Dungeon entrances lead into other dungeons.")) {
             if (!dungeons && !houses) last = true;
             else g_opts.shuffle_dungeons = dungeons;
         }

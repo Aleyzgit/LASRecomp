@@ -116,7 +116,8 @@ def request(sid, o, logic='basic'):
     return {
         'seed': sid, 'logic': logic, 'dungeon-items': ['none', 'stone-beak', 'mc', 'mcb'][o['dungeon_items']],
         'traps': ['none', 'few', 'several', 'many', 'trapsanity'][o['traps']],
-        'shuffle-instruments': o['shuffle_instruments'], 'shuffle-dungeons': o['shuffle_dungeons'],
+        'shuffle-instruments': o['shuffle_instruments'],
+        'shuffle-dungeons': o['shuffle_dungeons'] and not (o.get('labyrinth') and o['room_shuffle']),
         'randomize-enemies': o['randomize_enemies'], 'randomize-music': o['randomize_music'],
         'open-mabe': o['open_mabe'], 'fast-songs': o['fast_songs'], 'OHKO': False,
         'boss-cutscenes': o['boss_cutscenes'], 'create-spoiler': o['spoiler'], 'starting-rupees': o['start_rupees'],
@@ -282,9 +283,10 @@ def labyrinth_census(full_dir, romfs):
                 elif a.type == 0x102:
                     locks.add((lv, cell, 'block', flag))
     probs = []
-    et = info.get('small-keys', 0) - len(locks)
-    if et != 3:  # (Eagle's Tower: kept whole, its 3 vanilla keys)
-        probs.append(f'{len(locks)} locks in the wings + 3 in Eagle\'s Tower, {info.get("small-keys")} small keys')
+    et = info.get('small-keys', 0) - info.get('spare-keys', 0) - len(locks)
+    if et != 3:  # (Eagle's Tower: kept whole, its 3 vanilla keys; + the spares)
+        probs.append(f'{len(locks)} locks in the wings + 3 in Eagle\'s Tower + {info.get("spare-keys", 0)} spare, '
+                     f'{info.get("small-keys")} small keys')
     lp = os.path.join(full_dir, 'labyrinth_links.tsv')
     for ln in open(lp) if os.path.exists(lp) else ():
         if ln.startswith('#'):

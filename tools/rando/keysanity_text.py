@@ -14,8 +14,8 @@ built from that file's own get-item text and Place.msbt's dungeon name (nothing 
 English: the item sentence + " for <dungeon>!"; other languages keep their text and add a page with the dungeon name.
 Items in their own dungeon (index -1) keep the vanilla message.
 Labyrinth (tools/rando/labyrinth.py): the dungeons are its wings 0-8 (Color Dungeon 0) - a map / compass / Nightmare
-Key / stone beak names its wing ("You got the Map for Wing 2 of the labyrinth!"), always; small keys are shared and keep
-the vanilla text.
+Key / stone beak names its wing ("You got the Map for Wing 2 of the labyrinth!", every language: loc_text.py), always;
+small keys are shared and keep the vanilla text.
 
     apply(out_dir, romfs, placements) -> number of messages added (0: no dungeon item outside its dungeon)
 """
@@ -109,12 +109,14 @@ def _read(out_dir, romfs, rel):
     return None
 
 
-def wing_name(idx):
-    """Labyrinth: the wing a dungeon index stands for, as the get text names it (UTF-8; every language for now)."""
-    return f'Wing {0 if idx == 9 else idx + 1} of the labyrinth'.encode()
+def wing_name(idx, lang='en'):
+    """Labyrinth: the wing a dungeon index stands for, as the get text names it, in that language (loc_text.py)."""
+    import loc_text
+    return loc_text.wing_name(0 if idx == 9 else idx + 1, lang).encode()
 
 
 def write_messages(out_dir, romfs, combos, labyrinth=False):
+    import loc_text
     n = 0
     for sysp in sorted(glob.glob(os.path.join(romfs, 'region*', '*', 'message', 'System.msbt'))):
         rel = os.path.relpath(sysp, romfs)
@@ -122,7 +124,8 @@ def write_messages(out_dir, romfs, combos, labyrinth=False):
         sysm = Msbt(_read(out_dir, romfs, rel))
         place = Msbt(_read(out_dir, romfs, rel.replace('System.msbt', 'Place.msbt'))).texts
         for key, idx in sorted(combos):
-            get, name = sysm.texts.get(GET_MSG[key]), wing_name(idx) if labyrinth else place.get(place_label(idx))
+            get = sysm.texts.get(GET_MSG[key])
+            name = wing_name(idx, loc_text.lang_of(rel)) if labyrinth else place.get(place_label(idx))
             if get is None or name is None:
                 continue
             sysm.set(entry(key, idx), compose(get, name, lang.endswith('en')))
