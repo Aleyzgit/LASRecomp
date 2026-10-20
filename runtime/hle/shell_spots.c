@@ -50,6 +50,9 @@ bool digs_spawn_item(Cpu *c, const char *room, uint64_t key, uint32_t zone, cons
                      const char *const strs[5], uint64_t *slot, bool *spawned);
 bool digs_actor_alive(uint64_t ctrl);
 void digs_drop_ref(Cpu *c, uint64_t *slot);
+bool digs_spawn_item_into(Cpu *c, uint64_t room, uint64_t rctrl, uint64_t key, uint32_t zone, const float pos[3],
+                          float scale, float turn, const char *const strs[5], uint64_t *slot, bool *spawned);
+void digs_hold_weak(uint64_t *slot, uint64_t ctrl);
 int digs_pool_index(Cpu *c, const char *str);
 
 typedef struct {
@@ -57,7 +60,8 @@ typedef struct {
     int index, flag_idx, dig, land, hole, owned, shell;  // owned: a 'shell' row
     float x, y, z, scale, turn;
     uint64_t key;         // a bomb hole's actor (its level key)
-    int drop_idx;         // ... the seashell index its drop goes by once it is up (ItemDrop Seashell<it>: hole_index)
+    float hx, hz;         // ... where it stands (its spawn), 0: not seen
+    int hole_k;           // ... the seashell index it is up with (hole_beacons), -1: not up
     int pool[5];          // the strings' string pool indices (-1: not yet)
     uint64_t item;        // dug-up item actor (control block, weak ref held)
     bool dug;             // dug this visit (the hole lasts until the scene goes)
@@ -71,6 +75,8 @@ typedef struct {
     float fp[3], fv[3];   // its position, velocity (units/tick)
     uint64_t fly_actor;  // the item actor (while s->item is alive)
     uint64_t motion;      // its physics motion (fly_motion)
+    uint64_t droom, room_ref;  // the room the drop was made in (weak ref held): the item goes there
+    uint32_t zone;
 } Spot;
 static Spot g_spots[MAXSPOTS];
 static int g_n = -1;
@@ -109,9 +115,9 @@ static int load_locked(void) {
     if (!f) return __atomic_store_n(&g_n, 0, __ATOMIC_RELEASE), 0;
     while (fgets(line, sizeof line, f) && n < MAXSPOTS) {
         if (line[0] == '#') continue;
-        char *col[18], *save = NULL;
+        char *col[17], *save = NULL;
         int nc = 0;
-        for (char *t = strtok_r(line, "\t\n", &save); t && nc < 18; t = strtok_r(NULL, "\t\n", &save)) col[nc++] = t;
+        for (char *t = strtok_r(line, "\t\n", &save); t && nc < 17; t = strtok_r(NULL, "\t\n", &save)) col[nc++] = t;
         if (nc < 16) continue;
         Spot *s = &g_spots[n++];
         strlcpy(s->name, col[0], sizeof s->name);
@@ -131,7 +137,7 @@ static int load_locked(void) {
         s->shell = atoi(col[13]);
         s->scale = (float)atof(col[14]), s->turn = (float)atof(col[15]);
         s->key = nc > 16 ? strtoull(col[16], NULL, 16) : 0;
-        s->drop_idx = nc > 17 ? atoi(col[17]) : -1;
+        s->hole_k = -1;
         for (int k = 0; k < 5; k++) s->pool[k] = -1;
         s->fly_t = -1;
     }
@@ -159,9 +165,12 @@ static Spot *spot_of(uint64_t info) {
     return NULL;
 }
 
+static Spot *hole_of(uint64_t info);
+
 // before the factory reads the type (enemy_random.c rt_enemy_spawn): a dropped Secret Seashell becomes the item
 void rt_shell_swap(uint64_t info) {
     Spot *s = info ? spot_of(info) : NULL;
+    if (!s && info) s = hole_of(info);
     if (!s) return;
     if (flags_ext_get(s->flag_idx) || !g_pool_ready || s->dropped) {
         LOG("[shells] %s: %s\n", s->name, !g_pool_ready ? "not ready (nothing)" : s->dropped ? "already dropped here (nothing)"
@@ -174,6 +183,12 @@ void rt_shell_swap(uint64_t info) {
         memcpy(s->from, tp, sizeof s->from);
         for (int k = 0; k < 3; k++)  // (the drop's parameters 2..4: its launch velocity, floats)
             s->v0[k] = LD8(info + 0x24 + 8 * k) == 2 ? *(const float *)(uintptr_t)(info + 0x20 + 8 * k) : 0;
+        s->zone = LD32(info + 0xc);
+        // the room the drop is made in (the factory's x1: room, control block) - the item goes there (fly_start)
+        Cpu *c = kernel_current_cpu();
+        uint64_t pair = c ? c->x[1] : 0;
+        s->droom = pair ? LD64(pair) : 0;
+        if (s->droom && pair) digs_hold_weak(&s->room_ref, LD64(pair + 8));
         s->fly_queued = true;
         LOG("[shells] %s: the tree / hole launches its item (%s) from (%.2f, %.2f, %.2f) at (%.2f, %.2f, %.2f)/s\n",
             s->name, s->mname, s->from[0], s->from[1], s->from[2], s->v0[0], s->v0[1], s->v0[2]);
@@ -191,29 +206,52 @@ void rt_shell_swap(uint64_t info) {
         s->mname, tp[0], tp[1], tp[2]);
 }
 
-// A bomb hole (AreaShellDropper, main+0x849f0) is gone at once while the Secret Seashell its parameter 0 names is owned
-// (PlayerStatus +0x88) or that index is 50 or more; up, it keeps the index at +0x2c8, its drop is ItemDrop
-// Seashell<+0x2c8>, and it goes as soon as that shell is owned (main+0x85510). A hole holding something else keeps its
-// vanilla index - whose seashell LAS placed somewhere in the seed, and finding it first left the hole's item
-// unobtainable. So its spawn gets an index of a shell not owned (its own while that one isn't), and once it is up its
-// +0x2c8 becomes drop_idx (60 + n: no shell has it, ItemDrop Seashell<drop_idx> drops the tagged Heart Piece -
-// seashell_spots.py), which nothing ever owns.
+// A bomb hole (AreaShellDropper) only stays while the Secret Seashell its index names isn't owned (PlayerStatus
+// +0x88): main+0x849f0, its set-up, removes it while that shell is owned or the index is 50 or more (the index is kept
+// at +0x2c8 and read again whenever it is set up again - the Field streams screens out and back), main+0x85510 as
+// soon as it is owned; bombed, it drops ItemDrop Seashell<+0x2c8>. A hole holding something else keeps its vanilla
+// index, whose seashell LAS placed somewhere in the seed - found first, the hole was gone for good. So it spawns with
+// an index whose shell isn't owned (its own while that one isn't: hole_spawn), is kept on one (hole_beacons), and its
+// shell drop is taken for the item (hole_of: Seashell<that index> from where the hole stands).
+static uint64_t owned_shells(void) {
+    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    return ps ? LD64(ps + 0x88) : 0;
+}
+
+static int free_shell(uint64_t owned, int want) {  // want while not owned, else the first not owned (-1: all are)
+    if (want >= 0 && want < 50 && !(owned >> want & 1)) return want;
+    for (int k = 0; k < 50; k++)
+        if (!(owned >> k & 1)) return k;
+    return -1;
+}
+
 static void hole_spawn(uint64_t info) {
     if (load() <= 0 || LD8(info + 0x14) != 3) return;
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR), owned = ps ? LD64(ps + 0x88) : 0;
     for (int i = 0; i < g_n; i++) {
         Spot *s = &g_spots[i];
-        if (!s->hole || s->drop_idx < 0 || s->key != LD64(info)) continue;
-        uint32_t idx = LD32(info + 0x10);
-        if (idx >= 50 || !(owned >> idx & 1)) return;
-        for (int k = 0; k < 50; k++)
-            if (!(owned >> k & 1)) {
-                ST32(info + 0x10, (uint32_t)k);
-                LOG("[shells] %s: seashell %u owned - the hole comes up as %d\n", s->name, idx, k);
-                return;
-            }
+        if (!s->hole || !s->key || s->key != LD64(info)) continue;
+        const float *tp = (const float *)(uintptr_t)(info + 0x180);
+        s->hx = tp[0], s->hz = tp[2];
+        int idx = (int)LD32(info + 0x10), k = free_shell(owned_shells(), idx);
+        if (k >= 0 && k != idx) {
+            ST32(info + 0x10, (uint32_t)k);
+            LOG("[shells] %s: seashell %d owned - the hole comes up as %d\n", s->name, idx, k);
+        }
         return;
     }
+}
+
+// a bomb hole's shell drop: a Secret Seashell (no level key) with the index the hole is up with, from where it stands
+static Spot *hole_of(uint64_t info) {
+    if (LD16(info + 8) != T_SHELL || LD64(info) || LD8(info + 0x14) != 3 || load() <= 0) return NULL;
+    const float *tp = (const float *)(uintptr_t)(info + 0x180);
+    for (int i = 0; i < g_n; i++) {
+        Spot *s = &g_spots[i];
+        if (s->hole && s->hole_k >= 0 && (int)LD32(info + 0x10) == s->hole_k &&
+            (!s->hx || (fabsf(tp[0] - s->hx) < 1.0f && fabsf(tp[2] - s->hz) < 1.0f)))
+            return s;
+    }
+    return NULL;
 }
 
 // the factory's create-function hook (souls.c): nothing for a retagged drop already found (or before the strings are in)
@@ -221,6 +259,7 @@ bool rt_shell_skip(uint32_t type, uint64_t info) {
     if (type == T_SHELL_DROP_AREA) hole_spawn(info);
     if (type != T_HEART_PIECE && type != T_SHELL) return false;
     Spot *s = spot_of(info);
+    if (!s) s = hole_of(info);
     return s && (flags_ext_get(s->flag_idx) || !g_pool_ready || s->dropped);
 }
 
@@ -294,28 +333,33 @@ static void fly_start(Cpu *c, Spot *s, uint64_t frame) {
     bool up;
     s->fly_queued = false;
     if (s->item) digs_drop_ref(c, &s->item);
-    // the room it is spawned into: the landing tile's screen (it lies there - a screen's actors go with its room;
-    // the Tal Tal hole's item lands on the plateau of the next screen), else the hole's own, else Link's
+    // into the room the drop was made in (where the shell would have gone: loaded, drawn - a screen's room picked
+    // by name may be one the game keeps but doesn't show); else the landing tile's screen, the hole's, Link's
+    bool loaded = s->droom && digs_spawn_item_into(c, s->droom, s->room_ref, 0x7d00000000000000ull | (uint64_t)s->index,
+                                                  s->zone ? s->zone : g_zone, s->from, s->scale, s->turn, strs,
+                                                  &s->item, &up);
+    if (s->room_ref) digs_drop_ref(c, &s->room_ref);
+    s->droom = 0;
     char rooms[3][16] = {"", "", ""};
-    int nr = 0;
-    if (!strcmp(s->level, "Field")) {
-        snprintf(rooms[nr++], 16, "Field_%02d%c", (int)floorf(s->z / 12.0f) + 1, 'A' + (int)floorf(s->x / 15.0f));
-        uint64_t pc0 = doorjump_player(frame);
-        const float *p = pc0 ? (const float *)(uintptr_t)(pc0 + 0x80) : NULL;
-        if (p) snprintf(rooms[2], 16, "Field_%02d%c", (int)floorf(p[2] / 12.0f) + 1, 'A' + (int)floorf(p[0] / 15.0f));
+    int nr = 0, r = 0;
+    if (!loaded) {
+        if (!strcmp(s->level, "Field")) {
+            snprintf(rooms[nr++], 16, "Field_%02d%c", (int)floorf(s->z / 12.0f) + 1, 'A' + (int)floorf(s->x / 15.0f));
+            uint64_t pc0 = doorjump_player(frame);
+            const float *p = pc0 ? (const float *)(uintptr_t)(pc0 + 0x80) : NULL;
+            if (p) snprintf(rooms[2], 16, "Field_%02d%c", (int)floorf(p[2] / 12.0f) + 1, 'A' + (int)floorf(p[0] / 15.0f));
+        }
+        snprintf(rooms[nr++], 16, "%s", s->room);
+        if (rooms[2][0]) memcpy(rooms[nr++], rooms[2], 16);
+        for (r = 0; r < nr && !loaded; r++)
+            loaded = digs_spawn_item(c, rooms[r], 0x7d00000000000000ull | (uint64_t)s->index, g_zone, s->from,
+                                     s->scale, s->turn, strs, &s->item, &up);
     }
-    snprintf(rooms[nr++], 16, "%s", s->room);
-    if (rooms[2][0]) memcpy(rooms[nr++], rooms[2], 16);
-    bool loaded = false;
-    int r;
-    for (r = 0; r < nr && !loaded; r++)
-        loaded = digs_spawn_item(c, rooms[r], 0x7d00000000000000ull | (uint64_t)s->index, g_zone, s->from, s->scale,
-                                 s->turn, strs, &s->item, &up);
     if (!loaded || !up || !digs_last_actor) {
         LOG("[shells] %s: item %s not up (%s)\n", s->name, s->mname, loaded ? "spawn failed" : "no screen loaded");
         return;  // (s->dropped stays: Link leaving the screen lets it drop again)
     }
-    if (r > 1) LOG("[shells] %s: (spawned into %s)\n", s->name, rooms[r - 1]);
+    if (r) LOG("[shells] %s: (spawned into %s)\n", s->name, rooms[r - 1]);
     // the shell's upward speed (at least enough to come down on the landing tile), sideways aimed at the tile
     float dx = s->x - s->from[0], dz = s->z - s->from[2], d = sqrtf(dx * dx + dz * dz);
     float vy = (s->v0[1] > 0.5f ? s->v0[1] : 2.24133f) / 60.0f, sum = 0;
@@ -384,9 +428,13 @@ static void hole_beacons(const char *lv) {
             if (LD64(node + 0x10) != s->key) continue;
             uint64_t a = LD64(node + 0x18), b = a ? LD64(a + 0x2b8) : 0;
             int32_t idx = a ? (int32_t)LD32(a + 0x2c8) : -1;
-            if (s->drop_idx >= 0 && idx >= 0 && idx < 50) {  // (up: its index set - hole_spawn)
-                ST32(a + 0x2c8, (uint32_t)s->drop_idx);
-                LOG("[shells] %s: the hole's drop goes by seashell index %d\n", s->name, s->drop_idx);
+            if (idx >= 0 && idx < 50 && !flags_ext_get(s->flag_idx)) {  // (up: kept on a shell not owned)
+                int k = free_shell(owned_shells(), idx);
+                if (k >= 0 && k != idx) {
+                    ST32(a + 0x2c8, (uint32_t)k);
+                    LOG("[shells] %s: seashell %d owned - the hole goes by %d\n", s->name, idx, k);
+                }
+                s->hole_k = k >= 0 ? k : idx;
             }
             if (b && LD8(b + 0x14c)) {
                 ST8(b + 0x14c, 0);
@@ -425,6 +473,9 @@ void shell_spots_tick(Cpu *c, uint64_t frame) {
             g_spots[i].dropped = false;
             g_spots[i].fly_queued = false;
             g_spots[i].fly_t = -1;
+            g_spots[i].hole_k = -1;
+            g_spots[i].droom = 0;
+            if (g_spots[i].room_ref) digs_drop_ref(c, &g_spots[i].room_ref);
             if (g_spots[i].item && !digs_actor_alive(g_spots[i].item)) digs_drop_ref(c, &g_spots[i].item);
         }
     }

@@ -12,10 +12,9 @@ yet owned. So:
   - a Secret Seashell placed at a spot stays the game's own shell there, with the seashell index LAS gave it (buried
     shell / bomb hole: that index; a host: its own ItemDrop entry LARShell<index>): the sensor rings until it is found
   - any other item: the buried shell is taken out (the runtime brings the item up when the spot is dug); a host drops
-    ItemDrop LARShellSpot<n> - a Heart Piece tagged TAG + the spot's vanilla index; a bomb hole keeps its index (the
-    hole only comes up with an index under 50 whose shell isn't owned) and, once up, gets a drop index HOLE_INDEX + n
-    from the runtime, whose ItemDrop Seashell<HOLE_INDEX + n> drops that tagged Heart Piece; the runtime switches its
-    sensor beacon off. The runtime (runtime/hle/shell_spots.c) turns the tagged drop into the seed's item: a
+    ItemDrop LARShellSpot<n> - a Heart Piece tagged TAG + the spot's vanilla index; a bomb hole is left as it is (it
+    only stays while the shell its index names isn't owned: the runtime keeps it on one that isn't, and takes its
+    shell drop for the item), its sensor beacon switched off by the runtime. The runtime (runtime/hle/shell_spots.c) turns the tagged drop into the seed's item: a
     SinkingSword item actor (the actor LAS uses for standing items) with the item's model, where the shell would
     appear (out of a tree's crown / a bomb hole: it flies out on the shell's arc and comes down on a free tile beside
     it). Picking it up runs its entry in SinkingSword.bfevfl - LAS's item-get, the game's message box - and sets the
@@ -25,8 +24,8 @@ digsanity tile holding one (digs.py makes it a buried shell: the shells argument
 
 rando/<seed>/shell_spots.tsv: location, seashell index (shell: the placed shell's), kind (dig / drop / land: lands at
 x y z - trees / hole: a bomb hole, lands at x y z / shell: a Secret Seashell there), level, room, x, y, z, model path,
-model name, flow entry, flag symbol, flag index, seashell (1/0), scale, turn (, a bomb hole's actor key and drop
-index: the runtime switches its Seashell Sensor beacon off and gives it that index).
+model name, flow entry, flag symbol, flag index, seashell (1/0), scale, turn (, a bomb hole's actor key: the runtime
+switches its Seashell Sensor beacon off and keeps its index on a shell not owned).
 
 Who owns a spot (one check per spot, never two): bushsanity the bushes hiding a shell, potsanity the Ghost House
 pot, digsanity the shells buried on the Field - each such spot is that -sanity's own check (gold bush / pot, dig
@@ -48,7 +47,6 @@ T_SHELL_DROP_AREA = 0x233  # AreaShellDrop: the bomb holes (parameter 0 = the se
 BURIED_LEVELS = ('Field', 'DogHouse')  # (levels whose rooms place a buried Secret Seashell)
 LAWN = 0xb5  # ObjLawn: tall grass (an item may land in it)
 TREES = (0xbb, 0xbc)  # ObjTree, ObjPalmTree: the shell falls out when Link dashes into one (Pegasus Boots)
-HOLE_INDEX = 60  # a bomb hole holding something else drops by seashell index HOLE_INDEX + n, which no shell has
 TAG = 200  # a retagged drop: a Heart Piece (or a bomb hole's shell) with index TAG + the spot's vanilla seashell index
 # where a bomb hole's item lands when the tile grid can't tell: the Tal Tal hole (02J) is the pit on top of a pillar
 # below the plateau east of the rope bridge (Cucco House); the shell flies up and toward that plateau's south-west
@@ -229,11 +227,9 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
     rows = ['# location\tindex\tkind\tlevel\troom\tx\ty\tz\tmodel\tname\tentry\tflag\tflag index\tshell\tscale\tturn'
             '  (tools/rando/seashell_spots.py)\n']
     checks, spoiler = [], []
-    # a bomb hole holding something else keeps its vanilla index (the hole only comes up with an index under 50 whose
-    # shell isn't owned - the runtime swaps in one that isn't when it is: LAS placed that shell somewhere), and once
-    # it is up the runtime gives it index HOLE_INDEX + n, which no shell has: its drop is ItemDrop Seashell<that>, a
-    # tagged Heart Piece here, and no shell found ever makes the hole go (runtime/hle/shell_spots.c hole_spawn)
-    hole_n = 0
+    # a bomb hole holding something else keeps its vanilla index and ItemDrop entries: the hole only stays while the
+    # shell its index names isn't owned (LAS placed that shell somewhere), so the runtime keeps it on an index whose
+    # shell isn't owned and takes the hole's own shell drop for the item (runtime/hle/shell_spots.c hole_of)
     for name, index in sorted(locs.items(), key=lambda kv: kv[1]):
         if not vanilla and name not in mods.placements:
             continue
@@ -268,11 +264,8 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
             r = room_of(level, room)  # (with the room's links renumbered: actors refer to each other by index)
             from RandomizerCore.Randomizers import enemies
             enemies.remove_actors(r, [r.actors.index(host)])
-        elif hole:  # (the runtime keeps its sensor beacon off and gives it its drop index)
+        elif hole:  # (the runtime keeps its sensor beacon off and its index on a shell not owned)
             host.parameters[k] = index
-            drop_idx = HOLE_INDEX + hole_n
-            _tag_drop(oead_tools, drops, f'Seashell{drop_idx}', index)
-            hole_n += 1
         else:
             host.parameters[k] = b'LARShellSpot%d' % index
             _tag_drop(oead_tools, drops, f'LARShellSpot{index}', index)
@@ -289,7 +282,7 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
         rows.append('\t'.join(str(v) for v in (
             name, index, kind, level, room, f'{x:g}', f'{y:g}', f'{z:g}', model_path, model_name, name, flag,
             names[flag], 1 if item_key == 'Seashell' else 0, f'{data.MODEL_SIZES.get(model_name, 1.0):g}',
-            f'{data.MODEL_ROTATIONS.get(model_name, 0):g}')) + (f'\t{key:x}\t{drop_idx}' if hole else '') + '\n')
+            f'{data.MODEL_ROTATIONS.get(model_name, 0):g}')) + (f'\t{key:x}' if hole else '') + '\n')
     for name, index, flag_index in shells:
         rows.append(f'{name}\t{index}\tshell\t-\t-\t-\t-\t-\t-\t-\t-\t-\t{flag_index}\t1\t1\t0\n')
     for (level, room), r in rooms.items():
