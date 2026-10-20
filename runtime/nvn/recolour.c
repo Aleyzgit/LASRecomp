@@ -11,15 +11,18 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../hle.h"
 
 // Each recolouring option (one per Cosmetics row; dropping one = removing its line and its file)
 extern const RecolourOption g_recolour_link;  // hair / shield colours (recolour_link.c)
 extern const RecolourOption g_recolour_seasons;  // leaves / grass colours (recolour_seasons.c)
+extern const RecolourOption g_recolour_enemies;  // random enemy colours (recolour_enemies.c)
 static const RecolourOption *const g_options[] = {
     &g_recolour_link,
     &g_recolour_seasons,
+    &g_recolour_enemies,
     NULL,
 };
 
@@ -134,12 +137,16 @@ static int scan_file(const RecolourOption *o, int src) {
 }
 
 static void load(void) {
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int k = 0; g_options[k]; k++) {
         const RecolourOption *o = g_options[k];
         int n = 0;
         for (int s = 0; s < o->nsources; s++) n += scan_file(o, s);
         LOG("[recolour] %s: %d textures from %d files\n", o->name, n, o->nsources);
     }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    LOG("[recolour] game files read in %.0f ms\n", (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
 }
 
 int recolour_identify(const NvnTexture *t, uint64_t total) {

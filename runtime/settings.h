@@ -71,9 +71,13 @@ typedef struct {
     CosColour hair, shield;   // runtime/nvn/recolour_link.c
     CosColour skin;           // runtime/nvn/texpatch.c skin_apply
     CosColour leaves, grass;  // the overworld's foliage, runtime/nvn/recolour_seasons.c
+    int enemy_colours;        // 0 Off, 1 Random per seed, 2 Random every load (runtime/nvn/recolour_enemies.c)
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 
+
+enum { N_ENEMY_COLOUR_MODES = 3 };
+extern const char *const g_enemy_colour_modes[N_ENEMY_COLOUR_MODES];  // (the menu's names)
 
 extern Settings g_settings;
 

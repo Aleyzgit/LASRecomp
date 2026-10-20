@@ -16,6 +16,9 @@ static const char *settings_file(void) {
     return e && *e ? e : "larecomp.ini";
 }
 
+const char *const g_enemy_colour_modes[N_ENEMY_COLOUR_MODES] = {"Off", "Random per seed", "Random every load"};
+static const char *const k_enemy_colour_keys[N_ENEMY_COLOUR_MODES] = {"off", "seed", "load"};  // (larecomp.ini)
+
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
     .fullscreen = false,
@@ -203,6 +206,9 @@ void settings_load(void) {
         else if (!strcmp(key, "skin")) col_parse(&g_settings.skin, val);
         else if (!strcmp(key, "leaves")) col_parse(&g_settings.leaves, val);
         else if (!strcmp(key, "grass")) col_parse(&g_settings.grass, val);
+        else if (!strcmp(key, "enemy_colours")) {
+            for (int i = 0; i < N_ENEMY_COLOUR_MODES; i++) if (!strcmp(val, k_enemy_colour_keys[i])) g_settings.enemy_colours = i;
+        }
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
@@ -264,6 +270,7 @@ void settings_save(void) {
         col_format(cols[i].c, v, sizeof v);
         fprintf(f, "%s = %s\n", cols[i].key, v);
     }
+    fprintf(f, "enemy_colours = %s\n", k_enemy_colour_keys[g_settings.enemy_colours]);
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);

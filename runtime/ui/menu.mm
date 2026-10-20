@@ -468,6 +468,9 @@ static void tab_cosmetics(void) {
     }
     opt_colour("Leaves color", &g_settings.leaves, "The overworld's tree leaves and bushes.");
     opt_colour("Grass color", &g_settings.grass, "The overworld's grass.");
+    opt_section("Enemies");
+    opt_choice("Enemy colors", &g_settings.enemy_colours, g_enemy_colour_modes, N_ENEMY_COLOUR_MODES, 0,
+               "Each kind of enemy in another color. Enemies whose color shows their strength or type keep theirs.");
     opt_end();
 }
 
