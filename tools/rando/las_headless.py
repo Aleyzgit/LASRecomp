@@ -104,6 +104,7 @@ def default_settings(seed):
         'shellsanity': False,  # every Secret Seashell spot is a check (tools/rando/seashell_spots.py); off: vanilla
         'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
         'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
+        'dungeon-labyrinth': False,  # with room shuffle: every dungeon a wing of one Labyrinth (tools/rando/labyrinth.py)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
         'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
         'triforce-hunt': 0, 'triforce-extra': 0,  # pieces needed (0 = off), extra % (tools/rando/triforce.py)
@@ -347,6 +348,12 @@ def main():
     # (tools/rando/room_logic.py), the same layouts are written into the seed after LAS's files
     room_mode = settings.get('dungeon-room-shuffle', 'off')
     room_plan = None
+    lab_on = room_mode in ('coherent', 'chaos', 'madness') and bool(settings.get('dungeon-labyrinth'))
+    settings['dungeon-labyrinth'] = lab_on
+    lab_info = None
+    if lab_on and settings.get('shuffle-dungeons'):  # (the Labyrinth decides where each dungeon door leads)
+        print('labyrinth: dungeon entrance shuffle off (the Labyrinth picks where each dungeon door leads)', flush=True)
+        settings['shuffle-dungeons'] = False
     if room_mode in ('coherent', 'chaos', 'madness'):
         stage('Planning dungeon rooms', 0.03)
         import dungeon_gen
@@ -357,7 +364,21 @@ def main():
         layouts = jumps = None
         for attempt in range(40):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
             sub = settings['seed'] if attempt == 0 else f"{settings['seed']}~{attempt}"
-            if room_mode in ('chaos', 'madness'):  # (Madness: Chaos with one-way doorways)
+            lab = None
+            if lab_on:  # (Labyrinth: one shuffled dungeon of every dungeon, each mode keeping its pairing rules)
+                import labyrinth
+                t_lab = _time.time()
+                try:
+                    layouts, jumps, lab_info = labyrinth.plan(cat, sub, romfs, room_mode, settings,
+                                                              et_locks=base[1]['key-D7']['quantity'])
+                except RuntimeError as e:
+                    print('room layout:', e, '- planning another', flush=True)
+                    continue
+                lab_info['plan-seconds'] = round(_time.time() - t_lab, 2)
+                logic_rows = jumps
+                lab = {'arrivals': {k: tuple(v[:2]) for k, v in lab_info['arrivals'].items()},
+                       'et_locks': base[1]['key-D7']['quantity']}
+            elif room_mode in ('chaos', 'madness'):  # (Madness: Chaos with one-way doorways)
                 try:
                     layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'madness',
                                                                   settings=settings)
@@ -373,8 +394,8 @@ def main():
                     continue
                 logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
             logic_defs, item_defs, settings = (copy.deepcopy(x) for x in base)
-            print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra),
-                  flush=True)
+            print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra,
+                                                  lab=lab), flush=True)
             why = settings.pop('room-logic-unfillable', None)
             if not why:
                 break
@@ -384,6 +405,13 @@ def main():
         if layouts is None:
             raise RuntimeError('no dungeon room layout for this seed')
         room_plan = (layouts, jumps)
+        if lab_info:  # (the doors' arrivals, the cross-wing links, statistics: read by stage 2 and seed_sweep.py)
+            lab_info['planning-attempts'] = attempt + 1
+            lab_info.update({'small-keys': item_defs['key-D1']['quantity'], 'keysanity': settings.get('keysanity', 'off'),
+                             'dungeon-items': settings.get('dungeon-items', 'none'),
+                             'dungeon-of': dict(sorted(settings.get('dungeon-of', {}).items()))})
+            with open(os.path.join(out_dir, 'labyrinth.json'), 'w') as f:
+                json.dump(lab_info, f, indent=1)
         if os.environ.get('LARECOMP_PLAN_ONLY'):  # (test: layouts + room logic only; =<names>: print those conditions)
             for k in os.environ['LARECOMP_PLAN_ONLY'].split(','):
                 if k in logic_defs:
@@ -525,13 +553,14 @@ def main():
             print('  ', k, 'region', sh.logic_defs[k]['region'], 'cond', c, '| missing', [t for t in toks if not access.get(t)], flush=True)
     if unreached:
         print('  unreachable:', ', '.join(sorted(unreached)[:30]), flush=True)
+    if os.environ.get('LARECOMP_CHECK_ONLY'):  # (test: tools/rando/seed_sweep.py - placements + logic, no game files)
+        with open(os.path.join(out_dir, 'placements.json'), 'w') as f:  # (an unbeatable one's too: to look into)
+            json.dump({'placements': {k: v for k, v in pl.items() if isinstance(v, str)},
+                       'access': {k: 1 for k, v in settings.items() if v is True}}, f)
     if missing:
         print('SHUFFLE ERROR unbeatable seed', missing, file=sys.stderr)
         sys.exit(3)
-    if os.environ.get('LARECOMP_CHECK_ONLY'):  # (test: tools/rando/seed_sweep.py - placements + logic, no game files)
-        with open(os.path.join(out_dir, 'placements.json'), 'w') as f:
-            json.dump({'placements': {k: v for k, v in pl.items() if isinstance(v, str)},
-                       'access': {k: 1 for k, v in settings.items() if v is True}}, f)
+    if os.environ.get('LARECOMP_CHECK_ONLY'):
         sys.exit(0)
 
     if pot_locs or bush_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
@@ -668,7 +697,7 @@ def main():
                                                             vanilla=not settings.get('shellsanity'))) or '(vanilla)',
           flush=True)
     import keysanity_text  # (after every flow edit, digs / underwater too) a dungeon item outside its dungeon names it
-    keysanity_text.apply(out_dir, romfs, result['placements'])
+    keysanity_text.apply(out_dir, romfs, result['placements'], labyrinth=settings.get('dungeon-labyrinth'))
     if settings.get('enemy-minibosses'):  # the Field's walls for roaming mini-bosses (tools/rando/roam.py)
         import roam
         print('roam:', roam.write(out_dir, _uw_leb, romfs), flush=True)

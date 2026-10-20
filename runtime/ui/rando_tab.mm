@@ -128,6 +128,7 @@ struct GenOpts {
     bool digs = false;        // digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
     bool shellsanity = false; // every Secret Seashell spot is a check (tools/rando/seashell_spots.py); off: vanilla
     int room_shuffle = 0;     // dungeon-room-shuffle: off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
+    bool labyrinth = false;   // dungeon-labyrinth: with room shuffle, every dungeon a wing of one (tools/rando/labyrinth.py)
     bool pet_rooster = false, pet_ghost = false;  // pets in the pool (tools/rando/pets.py)
     bool pet_marin = false;   // Marin in the pool, the desert closed until she wakes the Walrus (open-desert off)
     int shopsanity = 0;       // off / vanilla prices / random prices (tools/rando/shopsanity.py)
@@ -196,7 +197,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
                  &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
                  &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina,
-                 &o.tunic_upgrades, &o.shellsanity};
+                 &o.tunic_upgrades, &o.shellsanity, &o.labyrinth};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -384,6 +385,7 @@ static void start_generation(void) {
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
     static const char *rs[] = {"off", "coherent", "chaos", "madness"};
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
+    fprintf(f, " \"dungeon-labyrinth\": %s,\n", g_opts.room_shuffle && g_opts.labyrinth ? "true" : "false");
     static const char *shop[] = {"off", "vanilla", "random"};
     fprintf(f, " \"shopsanity\": \"%s\", \"trendsanity\": %s,\n", shop[g_opts.shopsanity], g_opts.trendsanity ? "true" : "false");
     fprintf(f, " \"stealing\": \"%s\",\n", g_opts.shopsanity && g_opts.no_stealing ? "never"
@@ -831,6 +833,8 @@ extern "C" void rando_tab_draw(float scale) {
             if (!on) opt_disable_next();
             if (opt_radio(modes[m - 1].name, on && g_opts.room_shuffle == m, modes[m - 1].desc)) g_opts.room_shuffle = mode = m;
         }
+        if (!on) opt_disable_next();  // (any mode: it links the dungeons, the mode keeps its rules)
+        opt_toggle("Labyrinth", &g_opts.labyrinth, false, "All dungeons become wings of one big dungeon.");
         opt_indent(-1);
     }
     {  // its doorway letters on the dungeon map (runtime/ui/chaos_overlay.mm; a player setting, not part of the seed):
