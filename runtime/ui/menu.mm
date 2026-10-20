@@ -449,7 +449,7 @@ static void tab_cosmetics(void) {
     opt_colour("Tunic color", &g_settings.tunic, "Link's tunic color. Default: the game's own (or the randomizer seed's).");
     opt_colour("Heart color", &g_settings.hearts, "The color of the hearts on the HUD.");
     opt_colour("Hair color", &g_settings.hair, "Link's hair color.");
-    opt_colour("Skin color", &g_settings.skin, "Link's skin color.");
+    opt_colour("Body color", &g_settings.skin, "Link's body color.");  // (larecomp.ini: skin)
     opt_colour("Shield color", &g_settings.shield, "The color of Link's shield.");
     opt_section("Overworld");
     {   // Season: fills Leaves, Grass and Sand at once (palette: Orange 2, Gold 3, Pink 9, White 10); "Mixed" when
