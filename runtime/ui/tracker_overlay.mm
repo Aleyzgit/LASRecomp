@@ -751,7 +751,7 @@ static void cycle_test(uint64_t obj) {
         static uint64_t ra[256], rs[256];
         int nr = kernel_data_regions(ra, rs, 256);
         std::vector<uint64_t> cur{obj}, next;
-        std::unordered_map<uint64_t, char> seen;
+        std::unordered_map<uint64_t, std::pair<uint64_t, uint32_t>> seen;  // pane -> (parent, offset)
         for (int d = 0; d < 7 && !cur.empty() && seen.size() < 200000; d++, cur.swap(next)) {
             next.clear();
             for (uint64_t o : cur)
@@ -759,8 +759,20 @@ static void cycle_test(uint64_t obj) {
                     uint64_t p = LD64(o + off);
                     bool ok = false;
                     for (int k = 0; k < nr && !ok; k++) ok = p >= ra[k] && p + 0x800 > p && p + 0x800 <= ra[k] + rs[k];
-                    if (!ok || !seen.emplace(p, 1).second) continue;
-                    if (!strcmp((const char *)(uintptr_t)(p + 0xB0), names[i])) hits.push_back(p), LOG("[tracker] cycle: %s at depth %d (%zu seen)\n", names[i], d, seen.size());
+                    if (!ok || !seen.emplace(p, std::make_pair(o, off)).second) continue;
+                    if (!strcmp((const char *)(uintptr_t)(p + 0xB0), names[i])) {
+                        hits.push_back(p);
+                        std::string path;  // the chain of named panes / offsets up to the page object
+                        for (uint64_t q = p; q != obj && seen.count(q);) {
+                            auto pr = seen[q];
+                            char b[64];
+                            const char *pn = (const char *)(uintptr_t)(pr.first + 0xB0);
+                            snprintf(b, sizeof b, " <-+%x %.20s", pr.second, isalpha((unsigned char)pn[0]) && pn[1] == '_' ? pn : "");
+                            path += b;
+                            q = pr.first;
+                        }
+                        LOG("[tracker] cycle: %s %llx at depth %d (%zu seen):%s\n", names[i], (unsigned long long)p, d, seen.size(), path.c_str());
+                    }
                     next.push_back(p);
                 }
         }
@@ -1787,7 +1799,7 @@ extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font) {
         if (click) open_list(rbs[hover].cell), click = false;
     }
 
-    // the legend: right of the map paper
+    // the legend: left of the map paper, under the dungeon's name
     {
         std::vector<std::string> pills = dungeon_pills(dk);
         int found = 0;
@@ -1799,7 +1811,7 @@ extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font) {
         bool letters = g_settings.chaos_letters != CHAOS_LETTERS_OFF && g_room_shuffle != "off" && !g_room_shuffle.empty() &&
                        g_room_shuffle != "coherent";
         float h = 16 * u + lh * pills.size() + (letters ? lh * 3 + 10 * u : 0);
-        ImVec2 a(ox + 1222 * u - w, oy + 128 * u), z(ox + 1222 * u, oy + 128 * u + h);
+        ImVec2 a(ox + 62 * u, oy + 200 * u), z(ox + 62 * u + w, oy + 200 * u + h);  // (left of the paper, under the title)
         parchment(dl, a, z, u);
         float y = a.y + 9 * u;
         for (auto &p : pills) {
