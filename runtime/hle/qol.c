@@ -214,7 +214,7 @@ static bool apply_tilt(int removed) {  // false: not set up yet (or not the name
 }
 
 // LARECOMP_SETTING_AT="frame:key=value,..." (test): flip an in-game menu toggle at that presented frame, as the menu
-// would (move_360, blur_removal, dpad_move).
+// would (move_360, blur_removal, dpad_move; Cosmetics rows by index: hair, shield).
 static void setting_at_tick(void) {
     static const char *spec;
     static int init;
@@ -234,6 +234,8 @@ static void setting_at_tick(void) {
         bool *b = !strcmp(key, "move_360") ? &g_settings.move_360 : !strcmp(key, "blur_removal") ? &g_settings.blur_removal :
                   !strcmp(key, "dpad_move") ? &g_settings.dpad_move : NULL;
         if (b) { *b = v != 0; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
+        int *iv = !strcmp(key, "hair") ? &g_settings.hair : !strcmp(key, "shield") ? &g_settings.shield : NULL;
+        if (iv) { *iv = v; LOG("[qol] test: f%llu %s = %d\n", (unsigned long long)now, key, v); }
     }
     last = now;
 }
