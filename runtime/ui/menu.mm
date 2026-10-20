@@ -445,6 +445,15 @@ static void tab_display(void) {
 // never part of a seed
 static void tab_cosmetics(void) {
     opt_begin("##cosmetics", ImGui::GetFontSize() / 34);
+    CosColour *rows[] = {&g_settings.tunic, &g_settings.hearts, &g_settings.hair, &g_settings.skin, &g_settings.shield,
+                         &g_settings.leaves, &g_settings.grass, &g_settings.sand};
+    if (opt_button("Randomize all", "Every color below gets a random color."))
+        for (CosColour *c : rows) c->pick = 1 + rand() % (COL_RANDOM - 1);  // (a named colour: shown as what it is)
+    if (opt_button("Default all", "Everything on this page back to the game's own look.")) {
+        for (CosColour *c : rows) c->pick = COL_DEFAULT;
+        g_settings.enemy_colours = 0;
+        g_settings.screen_filter = 0;
+    }
     opt_section("Colors");
     opt_colour("Tunic color", &g_settings.tunic, "Link's tunic color. Default: the game's own (or the randomizer seed's).");
     opt_colour("Heart color", &g_settings.hearts, "The color of the hearts on the HUD.");
