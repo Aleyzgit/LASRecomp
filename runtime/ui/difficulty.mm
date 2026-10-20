@@ -16,7 +16,6 @@ extern "C" {
 int game_in_play(void);
 int rt_hookshot_seed_forced(void);  // hle/hookshot.c
 int rt_no_buff_seed_forced(void);   // hle/qol.c
-extern int g_start_screen;          // hle/warp.c: the start screen (no game running)
 #include "../livesplit.h"
 }
 
@@ -118,10 +117,13 @@ extern "C" void difficulty_draw(float scale) {
 
     // run timer / LiveSplit (runtime/hle/run_timer.c, runtime/livesplit.c, runtime/ui/race_overlay.mm)
     opt_section("Speedrun");
-    if (!g_start_screen) opt_disable_next();  // (one run per session: set before the game starts)
+    // (set before a save is loaded: free on the start screen, the title and the file select; locked while a file is
+    // in play - game_in_play: Link exists in a level - and free again back at the title)
+    bool locked = game_in_play();
+    if (locked) opt_disable_next();
     if (opt_toggle("Timer", &g_settings.timer, false,
-                   g_start_screen ? "A run timer in the corner: real time from the start of gameplay to the ending."
-                                  : "Set before starting a save."))
+                   locked ? "Set before starting a save."
+                          : "A run timer in the corner: real time from the start of gameplay to the ending."))
         settings_save();
     opt_indent(1);
     {  // (any time, also mid-session)
