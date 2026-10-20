@@ -709,9 +709,10 @@ bool interp_prepare(float t) {
             s_toggled += toggle;
             if (!blendable(av, bv) || toggle || (cc->snap && fabsf(d) > cut + 0.05f * fmaxf(fabsf(av), fabsf(bv)))) { out[q] = bv; continue; }
             // Values that are whole numbers in both frames and changed by one or more are a selection, not motion
-            // (a texture's frame, a mode): this frame's. Dusklight never blends a texture-swap animation
-            // (src/dusk/interp/material.cpp: a texNo track that changed is left at the sim frame's value).
-            if (av == rintf(av) && bv == rintf(bv) && fabsf(d) >= 1.0f && (!a2 || a2[q] == rintf(a2[q]))) { out[q] = bv; s_integral++; continue; }
+            // (a texture's frame, a mode): this frame's - unless the value took the same step the frame before (a
+            // frame counter, 1127 -> 1128 every frame: time, blended). Dusklight never blends a texture-swap
+            // animation (src/dusk/interp/material.cpp: a texNo track that changed is left at the sim frame's value).
+            if (av == rintf(av) && bv == rintf(bv) && fabsf(d) >= 1.0f && (!a2 || (a2[q] == rintf(a2[q]) && av - a2[q] != d))) { out[q] = bv; s_integral++; continue; }
             // A texture translation that scrolls a little every frame and wraps (0.98 -> 0.01) changed by nearly a
             // whole tile: blended, the wrap's midpoint is on screen for an image (the water's ripples jumping back).
             // When the change less a whole number of tiles is the step the value took the frame before, it is a
