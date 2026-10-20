@@ -14,8 +14,8 @@
 //            change the bullets, never a list. Game-styled: a line in the game's button row, a filter panel on Y
 //   input    while it drives, the left stick / d-pad, A and Y never reach the game, B neither while a list, a shown
 //            spot or the filters are up (runtime/hle/input.c -> tracker_map_input); the right stick still zooms /
-//            scrolls the game's map; every other button does what it does on the game's own map. The mouse works
-//            too. Outside rando (or with the tracker off) the Map page is vanilla
+//            scrolls the game's map; ZR hands the page back to the game's own map (warp points, pins). The mouse
+//            works too. Outside rando (or with the tracker off) the Map page is vanilla
 // Never shows what a check holds. Data: rando/<seed>/tracker.tsv (tools/rando/tracker.py). Reachability = LAS's
 // fixpoint over its logic nodes from the live save's inventory (followers count once their location is reachable).
 #include "../game_addresses.h"
@@ -633,11 +633,15 @@ struct UiState {
 }  // namespace
 static UiState g_ui;
 static std::atomic<bool> g_panel_open{false}, g_filter_open{false};
+static std::atomic<bool> g_vanilla{false};  // ZR: the game's own map for now (warp points, pins); reset on reopening
+static volatile uint64_t g_avail_frame;     // the tracker could drive the page (drawn, in either mode)
+static volatile uint64_t g_dgn_avail_frame; // (the same on the dungeon map page)
 static std::atomic<uint32_t> g_evq[64];
 static std::atomic<uint32_t> g_evw{0}, g_evr{0};
 static void ui_reset(void) {
     g_ui = UiState();
-    g_panel_open = false, g_filter_open = false;
+    g_panel_open = false, g_filter_open = false, g_vanilla = false;
+    g_avail_frame = 0;
     g_evr.store(g_evw.load());
 }
 static void ev_push(uint32_t ev) {  // EV_NAV carries a direction: angle in degrees (0 = right, 90 = up) << 8
@@ -650,20 +654,30 @@ static void ev_push(uint32_t ev) {  // EV_NAV carries a direction: angle in degr
 static bool dgn_takeover_active(void);
 static bool field_takeover_active(void) {
     uint64_t now = renderer_present_count();
-    return !g_map_closing && g_draw_frame && now - g_draw_frame <= 3 && now - g_map_frame <= 2;
+    return !g_vanilla && !g_map_closing && g_draw_frame && now - g_draw_frame <= 3 && now - g_map_frame <= 2;
 }
 static bool takeover_active(void) { return field_takeover_active() || dgn_takeover_active(); }
 
 // Game thread (runtime/hle/input.c fill_state): while the tracker drives the Map page, the left stick / d-pad, A and Y
-// are ours, B too while a panel or the filter bar is open (then it closes that, not the pause menu).
+// are ours, B too while a panel or the filter bar is open (then it closes that, not the pause menu). ZR switches
+// between the tracker and the game's own map (its cursor: warp points, pins) until the page is opened again.
+extern "C" bool chaos_dgnmap_shown(void);  // runtime/ui/chaos_overlay.mm (shown and not closing)
 extern "C" uint64_t tracker_map_input(uint64_t b, int32_t st[4]) {
-    enum { BA = 1, BB = 2, BY = 8 };
+    enum { BA = 1, BB = 2, BY = 8, BZR = 1 << 9 };
     const uint64_t dirs = 0xfull << 12 | 0xfull << 16;
     static uint64_t prev, hide, dir_next;
     static int dir_last = -1;
     uint64_t press = b & ~prev;
     prev = b;
     hide &= b;  // (released: the game may see it again)
+    uint64_t now0 = renderer_present_count();
+    bool dgn_avail = g_dgn_avail_frame && now0 - g_dgn_avail_frame <= 3;
+    bool field_avail = g_avail_frame && now0 - g_avail_frame <= 3 && now0 - g_map_frame <= 2 && !g_map_closing;
+    if ((field_avail || (dgn_avail && chaos_dgnmap_shown())) && (press & BZR)) {  // (not while the page closes)
+        g_vanilla = !g_vanilla;
+        g_panel_open = false, g_filter_open = false;
+        hide |= BZR;
+    }
     if (!takeover_active()) { dir_last = -1; return b & ~hide; }
     uint64_t now = renderer_present_count();
     // direction: the stick's angle, else the d-pad's
@@ -693,7 +707,7 @@ extern "C" uint64_t tracker_map_input(uint64_t b, int32_t st[4]) {
 // ---- the map page's layout panes (ui2d: name at +0xB0, translate +0x30/+0x34, flags at +0x58 with bit 0 = visible;
 // found with LARECOMP_PANE_SCAN=<frame>:2):
 //   L_MapCursor_00  the game's cursor with its place-name box   } hidden while the tracker drives: in the page's update
-//   L_Operation_00  its button hints (Memories, Pin, Zoom...)   } epilogue (MAP_PAGE_END_SITE), restored once it stops.
+//   L_Operation_00  its button hints (Memories, Pin, Zoom...)   } epilogue (MAP_PAGE_END_SITE), restored on hand-back.
 //   W_Cursor_00     the cursor's yellow corner brackets (3 such panes on the page; all are switched off)
 //                   L_MapCursor_00 is moved off the page, the others switched off (found with LARECOMP_TRACKER_CYCLE)
 //   T_MapName_NN    the place names on the island (datasheet UiFieldMapLocationName mId NN): our area bullets sit
@@ -705,7 +719,7 @@ static uint64_t g_pane[NPANES];
 static bool g_hidden[2];
 static std::vector<uint64_t> g_brackets;  // W_Cursor_00 panes
 static std::vector<char> g_brackets_hidden;
-static float g_cursor_t[2];   // (the cursor's own translate, put back once the tracker stops)
+static float g_cursor_t[2];   // (the cursor's own translate, put back on hand-back)
 
 static void pane_names(void) {
     if (g_pane_names[0][0]) return;
@@ -875,7 +889,7 @@ static volatile uint64_t g_dgn_draw_frame;
 extern "C" bool chaos_dgnmap_shown(void);
 static bool dgn_takeover_active(void) {
     uint64_t now = renderer_present_count();
-    return g_dgn_draw_frame && now - g_dgn_draw_frame <= 3 && chaos_dgnmap_shown();
+    return !g_vanilla && g_dgn_draw_frame && now - g_dgn_draw_frame <= 3 && chaos_dgnmap_shown();
 }
 static void dgn_find(uint64_t obj) {
     static uint64_t ra[256], rs[256];
@@ -1324,13 +1338,14 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         if (ui.last_solve == ~0ull) debug_dump();
         ui.last_solve = now;
     }
-    if (reopened) ui.panel = false, ui.filter_focus = false;  // (reopened: the map, no panel)
+    if (reopened) ui.panel = false, ui.filter_focus = false, g_vanilla = false;  // (reopened: the map, no panel)
     MapSnap snap;
     {
         std::lock_guard<std::mutex> lk(g_snap_mx);
         snap = g_snap;
     }
     if (!snap.frame || snap.closing || now - snap.frame > 2) return;  // (the page is closing or gone)
+    g_avail_frame = now;
     // the game's UI is a centred 16:9 box; the island parchment spans (187,123)-(1096,630) of 1280x720 = 16x16 screens
     float bw = fminf(display.x, display.y * 16.0f / 9.0f), bh = bw * 9.0f / 16.0f;
     float ox = (display.x - bw) * 0.5f, oy = (display.y - bh) * 0.5f, u = bw / 1280.0f;
@@ -1343,6 +1358,11 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     };
     auto R = [&](float x0, float y0, float x1, float y1) { return ImVec4(ox + x0 * u, oy + y0 * u, ox + x1 * u, oy + y1 * u); };
     ImDrawList *dl = ImGui::GetForegroundDrawList();
+    if (g_vanilla) {  // the game's own map: only a way back, left of the game's own button row
+        draw_prompt(dl, font, 19 * u, ImVec2(ox + 64 * u, oy + 668 * u), "ZR", "Tracker", u);
+        g_panel_open = false, g_filter_open = false;
+        return;
+    }
     g_draw_frame = now;
     ImGuiIO &io = ImGui::GetIO();
     ImVec2 mouse = io.MousePos;
@@ -1607,7 +1627,7 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     if (ui.panel) pr = {};
     else if (ui.spot >= 0) pr = {{"B", "Back to the list"}};
     else if (ui.filter_focus) pr = {{"A", "Toggle"}, {"Y", "Close"}};
-    else pr = {{"Y", std::string("Filter: ") + filter_word}, {"A", "Open"}};
+    else pr = {{"Y", std::string("Filter: ") + filter_word}, {"A", "Open"}, {"ZR", "Game map"}};
     float pw = 0;
     for (auto &p : pr) pw += prompt_width(font, pfs, p.first, p.second.c_str()) + 22 * u;
     float px = ox + 1226 * u - pw;
@@ -1690,10 +1710,16 @@ extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font) {
     seen_at = now;
     if (!g_indexed) build_index();
     if (reopened || ui.last_solve == ~0ull || now - ui.last_solve > 30) update_status(), ui.last_solve = now;
-    if (reopened) ui.panel = false, ui.filter_focus = false, ui.spot = -1, ui.sel_type = -1;
+    if (reopened) ui.panel = false, ui.filter_focus = false, ui.spot = -1, g_vanilla = false, ui.sel_type = -1;
+    g_dgn_avail_frame = now;
     float bw = fminf(display.x, display.y * 16.0f / 9.0f), bh = bw * 9.0f / 16.0f;
     float ox = (display.x - bw) * 0.5f, oy = (display.y - bh) * 0.5f, u = bw / 1280.0f;
     ImDrawList *dl = ImGui::GetForegroundDrawList();
+    if (g_vanilla) {
+        draw_prompt(dl, font, 19 * u, ImVec2(ox + 64 * u, oy + 668 * u), "ZR", "Tracker", u);
+        g_panel_open = false, g_filter_open = false;
+        return;
+    }
     float v[8];
     const char *lv = chaos_current_level();
     std::string dk = level_dungeon(lv);
@@ -1872,7 +1898,7 @@ extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font) {
         std::vector<std::pair<const char *, std::string>> pr;
         if (ui.panel) pr = {};
         else if (ui.filter_focus) pr = {{"A", "Toggle"}, {"Y", "Close"}};
-        else pr = {{"Y", std::string("Filter: ") + filter_word}, {"A", "Open"}};
+        else pr = {{"Y", std::string("Filter: ") + filter_word}, {"A", "Open"}, {"ZR", "Game map"}};
         float pw = 0;
         for (auto &p : pr) pw += prompt_width(font, pfs, p.first, p.second.c_str()) + 22 * u;
         float px = ox + 1226 * u - pw;
