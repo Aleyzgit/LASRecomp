@@ -50,6 +50,9 @@ LAWN = 0xb5  # ObjLawn: tall grass (an item may land in it)
 TREES = (0xbb, 0xbc)  # ObjTree, ObjPalmTree: the shell falls out when Link dashes into one (Pegasus Boots)
 HOLE_INDEX = 60  # a bomb hole holding something else drops by seashell index HOLE_INDEX + n, which no shell has
 TAG = 200  # a retagged drop: a Heart Piece (or a bomb hole's shell) with index TAG + the spot's vanilla seashell index
+# where a bomb hole's item lands when the tile grid can't tell: the Tal Tal hole (02J) is the pit on top of a pillar,
+# bombed from the ledge north of it - the shell flies up there (the grid's free tiles beside it are the sand below)
+HOLE_LANDING = {'Field_02J': (147.75, 24.63, 12.75)}
 DROP_KEY = re.compile(rb'Seashell(\d+)$')  # a bush's / rock's / tree's / pot's ItemDrop key
 
 
@@ -115,7 +118,7 @@ def scan(romfs, leb):
             if a.type == T_SHELL and level in BURIED_LEVELS and isinstance(a.parameters[0], int):
                 out[a.parameters[0]] = ('dig', level, room, a.posX, a.posY, a.posZ, a.key, 0)
             elif a.type == T_SHELL_DROP_AREA and isinstance(a.parameters[0], int):
-                spot = _landing(romfs, leb, room, a, False)
+                spot = HOLE_LANDING.get(room) or _landing(romfs, leb, room, a, False)
                 if not spot:
                     raise RuntimeError(f'{room}: no free tile beside the bomb hole {a.name}')
                 out.setdefault(a.parameters[0], ('hole', level, room) + spot + (a.key, 0))
