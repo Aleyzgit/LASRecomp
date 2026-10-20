@@ -25,9 +25,11 @@ Settings g_settings = {
     .rumble = true,
     .rumble_strength = 100,
     .controller_light = true,
+    .menu_confirm = MENU_CONFIRM_CONTROLLER,
     .show_fps = false,
     .inv_keys = true,
     .tracker = true,
+    .tracker_filters = -1,
     .chaos_letters = CHAOS_LETTERS_MAP,
     .diff_damage = 1.0f,
     .walk_speed = 1.0f,
@@ -173,8 +175,8 @@ void settings_load(void) {
         else if (!strcmp(key, "mirror_mode")) g_settings.mirror_mode = atoi(val) != 0;
         else if (!strcmp(key, "prompts")) g_settings.prompts = !strcmp(val, "nintendo") ? PROMPTS_NINTENDO : !strcmp(val, "xbox") ?
                                                               PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : PROMPTS_AUTO;
-        else if (!strcmp(key, "menu_confirm")) g_settings.menu_confirm = !strcmp(val, "controller") ? MENU_CONFIRM_CONTROLLER
-                                                                                                  : MENU_CONFIRM_GAME;
+        else if (!strcmp(key, "menu_confirm")) g_settings.menu_confirm = !strcmp(val, "game") ? MENU_CONFIRM_GAME
+                                                                                                  : MENU_CONFIRM_CONTROLLER;
         else if (!strcmp(key, "language")) {  // ("auto" or one of the game's codes; anything else: auto)
             // (zh-CN / zh-TW: what a settings file from before this wrote; the game reads zh-Hans / zh-Hant)
             const char *v = !strcmp(val, "zh-CN") ? "zh-Hans" : !strcmp(val, "zh-TW") ? "zh-Hant" : val;
@@ -183,6 +185,7 @@ void settings_load(void) {
                 if (!strcmp(v, g_language_codes[i])) g_settings.language = i;
         }
         else if (!strcmp(key, "tracker")) g_settings.tracker = atoi(val) != 0;
+        else if (!strcmp(key, "tracker_filters")) g_settings.tracker_filters = atoi(val);
         else if (!strcmp(key, "menu_tip_seen")) g_settings.menu_tip_seen = atoi(val) != 0, tip_key = true;
         else if (!strcmp(key, "aspect_asked")) g_settings.aspect_asked = atoi(val) != 0, aspect_key = true;
         else if (!strcmp(key, "chaos_letters"))
@@ -243,6 +246,7 @@ void settings_save(void) {
     fprintf(f, "language = %s\n", g_language_codes[g_settings.language > LANG_AUTO && g_settings.language < N_LANGUAGES
                                                      ? g_settings.language : LANG_AUTO]);
     fprintf(f, "tracker = %d\n", g_settings.tracker);
+    if (g_settings.tracker_filters >= 0) fprintf(f, "tracker_filters = %d\n", g_settings.tracker_filters);
     fprintf(f, "aspect_asked = %d\n", g_settings.aspect_asked);
     fprintf(f, "menu_tip_seen = %d\n", g_settings.menu_tip_seen);
     static const char *const letters[] = {"off", "explored", "map"};
