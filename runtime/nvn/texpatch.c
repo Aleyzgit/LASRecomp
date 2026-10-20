@@ -1042,6 +1042,11 @@ static void skin_apply(uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row, bo
     col_mapping(21 / 360.0f, 0.47f, 0.96f, c - 1, &sh, &sf, &vf);
     col_hsv(c - 1, &th, &ts, &tv);
     bool grey = sh == 0 && ts < 0.08f;
+    // A very dark body colour (Black, or any Custom / Random one this dark: luminance under 0.22) would swallow the
+    // face's dark details - pupils, brows, the mouth's and ears' lines, all drawn dark in the face maps on the skin.
+    // Then they turn light (near white, keeping a little of their own shading), so the face still reads.
+    float lum = (0.299f * (float)((c - 1) >> 16 & 255) + 0.587f * (float)((c - 1) >> 8 & 255) + 0.114f * (float)((c - 1) & 255)) / 255;
+    bool light_features = !body && lum < 0.22f;
     uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
     if (row < bw * 8) return;
     for (uint32_t by = 0; by < bh; by++)
@@ -1059,6 +1064,13 @@ static void skin_apply(uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row, bo
                 float s = mx > 0 ? d / mx : 0, v = mx;
                 float m = (1 - smooth(30, 42, hue)) * smooth(-20, -8, hue) * smooth(0.12f, 0.22f, s) *
                           (1 - smooth(0.9f, 0.97f, s)) * (body ? smooth(0.55f, 0.68f, v) : smooth(0.42f, 0.58f, v));
+                float fm = light_features ? (1 - smooth(0.4f, 0.58f, v)) * (1 - m) : 0;  // (a dark detail, not skin)
+                if (fm > 0.004f) {
+                    float lv = 0.93f - v * 0.35f;  // (near white; the darkest details lightest)
+                    uint8_t to[3] = {clamp8(lv * 255), clamp8(lv * 252), clamp8(lv * 246)};  // (a touch warm)
+                    for (int ch = 0; ch < 3; ch++) px[i][ch] = clamp8(px[i][ch] + (to[ch] - px[i][ch]) * fm + 0.5f);
+                    any = true;
+                }
                 if (m < 0.004f) continue;
                 any = true;
                 float nh = grey ? hue : th * 360 + (hue - 21) * 0.5f, ns = fminf(s * sf, 1), nv = fminf(v * vf, 1);
