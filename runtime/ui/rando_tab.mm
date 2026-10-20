@@ -294,6 +294,37 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
     return "";
 }
 
+// The New seed options are kept across restarts (larecomp.ini rando_options): their seed ID without the random part,
+// which re-rolls for every seed. Not the seed name either. Saved once a change is done (no row being dragged / typed in).
+static void opts_key(const GenOpts &o, char *out, size_t cap) {
+    GenOpts t = o;
+    t.rng = 0;
+    seed_id_encode(t, out, cap);
+}
+
+static void opts_load(void) {
+    if (!g_settings.rando_options[0]) return;  // (never changed: the defaults)
+    GenOpts t = g_opts;
+    std::string err = seed_id_decode(g_settings.rando_options, t);
+    if (!err.empty()) { LOG("[rando] saved options not loaded: %s\n", err.c_str()); return; }
+    t.rng = 0;  // (a fresh random part when shown)
+    strlcpy(t.seed, g_opts.seed, sizeof t.seed);
+    g_opts = t;
+    tri_mode_from_opts();
+}
+
+static void opts_save_if_changed(void) {
+    if (ImGui::IsAnyItemActive()) return;
+    static char defaults[48];
+    if (!defaults[0]) opts_key(GenOpts(), defaults, sizeof defaults);
+    char k[48];
+    opts_key(g_opts, k, sizeof k);
+    const char *saved = g_settings.rando_options[0] ? g_settings.rando_options : defaults;
+    if (!strcmp(k, saved)) return;
+    strlcpy(g_settings.rando_options, k, sizeof g_settings.rando_options);
+    settings_save();
+}
+
 static bool id_is_race(const std::string &id) {
     GenOpts o;
     return !id.empty() && seed_id_decode(id.c_str(), o).empty() && o.race;
@@ -549,6 +580,8 @@ extern "C" void rando_tab_draw(float scale) {
         if (!spoiler_view_draw(g_spoiler_seed, scale)) g_spoiler_seed.clear();
         return;
     }
+    static bool opts_once;  // the options the player last set (larecomp.ini)
+    if (!opts_once) { opts_once = true; opts_load(); }
     static bool id_once;  // LARECOMP_RANDO_ID=<seed ID>: the tab starts with that ID's options (test hook)
     if (const char *t = getenv("LARECOMP_RANDO_ID"); !id_once && t) {
         id_once = true;
@@ -721,7 +754,7 @@ extern "C" void rando_tab_draw(float scale) {
                 id_msg = "Loaded: the options are set from this ID.";
             }
         }
-        if (opt_action("Copy seed ID", "", "Copies the seed ID above, to share the seed.")) ImGui::SetClipboardText(idbuf);
+        if (opt_action("Copy new seed's ID", "", "Copies the seed ID above, to share the seed.")) ImGui::SetClipboardText(idbuf);
         if (opt_action("New seed ID", "", "A new random seed with the same options.")) { g_opts.rng = new_rng(); id_msg.clear(); }
     }
 
@@ -989,5 +1022,6 @@ extern "C" void rando_tab_draw(float scale) {
         opt_split_end();
     }
     ImGui::EndDisabled();
+    opts_save_if_changed();
     gen_overlay(scale);
 }
