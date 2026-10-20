@@ -20,7 +20,7 @@ elif shutil.which('pkg-config') and subprocess.run(['pkg-config', '--exists', 's
 elif sys.platform == 'darwin':
     brew = subprocess.run(['brew', '--prefix'], capture_output=True, text=True).stdout.strip() or '/opt/homebrew'
     flags = [f'-I{brew}/include', f'-L{brew}/lib', '-lSDL3']
-extra = {'macos': ['-framework', 'CoreFoundation'], 'linux': ['-D_GNU_SOURCE', '-pthread', '-ldl'],
+extra = {'macos': ['-framework', 'CoreFoundation'], 'linux': ['-pthread', '-ldl'],
          'windows': ['-D_FILE_OFFSET_BITS=64', '-D_POSIX_THREAD_SAFE_FUNCTIONS', '-D_CRT_RAND_S',
                      '-DWIN32_LEAN_AND_MEAN', '-DNOMINMAX', '-lwinmm', '-lole32', '-lshell32', '-lcomdlg32', '-luuid', '-ladvapi32']}[plat]
 with tempfile.TemporaryDirectory() as directory:
