@@ -2755,7 +2755,10 @@ void backend_guest_heap_prepare(void) {
     if (!g_vk.dev) return;
     gmem_chunk_shift();  // (the chunk / lazy decision, before the first draw binds anything)
 #ifdef __linux__
-    if (gmem_dmabuf || !g_vk.host_import || getenv("LARECOMP_VK_NO_GMEM") || g_vk.props.vendorID == 0x10DE) return;
+    // driver memory: write tracking can't watch that mapping (its queries over the heap would fail; PAGEMAP_SCAN
+    // refuses a range without userfaultfd write protection), so it's off there too
+    if (gmem_dmabuf) { plat_write_tracking_off("the guest heap is driver memory"); return; }
+    if (!g_vk.host_import || getenv("LARECOMP_VK_NO_GMEM") || g_vk.props.vendorID == 0x10DE) return;
     gmem_userptr = true;
     plat_write_tracking_off(gc_lazy ? "the guest heap is imported in userptr chunks" : "the guest heap is a userptr import");
 #endif
