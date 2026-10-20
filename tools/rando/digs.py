@@ -177,7 +177,7 @@ def add_to_logic(digs, logic_defs, item_defs):
 
 def apply(locs, digs, mods, out_dir, romfs, event_tools, oead_tools, item_get, data):
     """Flow entries for the dug-up items (SinkingSword.bfevfl), their actor flag, and rando/<seed>/digs.tsv; a Secret
-    Seashell on a tile: a buried shell (SHELLS)."""
+    Seashell on a tile: a buried shell (SHELLS) - on a tile grass or a bush stands on, an item like any other."""
     SHELLS.clear()
     common_out = os.path.join(out_dir, 'romfs', 'region_common')
 
@@ -204,7 +204,9 @@ def apply(locs, digs, mods, out_dir, romfs, event_tools, oead_tools, item_get, d
     for d in sorted(digs, key=tile_id):
         name = by_tile.get(tile_id(d))
         cols = ['-'] * 7
-        if name and mods.placements[name] == 'seashell':
+        # (a buried shell on a tile tall grass / a bush stands on lies on top of the ground for all to see - play-test
+        #  2026-10-20, 04M and 10F: a Secret Seashell there is dug up like any other item instead)
+        if name and mods.placements[name] == 'seashell' and not d['blocker']:
             index = mods.getItemInfo(name, mods.trap_models)[1]
             buried.setdefault(d['room'], []).append((d, index))
             SHELLS.append((name, index, GOT_FLAG_BASE + tile_id(d)))
