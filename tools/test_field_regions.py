@@ -110,6 +110,10 @@ def test_table():
     # the case that started this table: the Bomb Bag dig in Tal Tal Heights (PlayAll3) was 'river' / Martha's Bay
     if fr.region_of('Field_03I', 42) != ('wasteland', 'bracelet'):
         fail(f"Field_03I tile 42: {fr.region_of('Field_03I', 42)}")
+    # ... and the lane's last pocket past the rock at 03I tile 75 (above the Heights, no stairs down)
+    for room, tile in (('Field_03I', 77), ('Field_04I', 9), ('Field_04J', 11)):
+        if fr.region_of(room, tile) != ('wasteland', 'bracelet'):
+            fail(f'{room} tile {tile}: {fr.region_of(room, tile)}')
     print('table:', sum(1 for e in fr.SCREENS.values() if e is not None), 'screens with checks,',
           sum(1 for e in fr.SCREENS.values() if e is None), 'without')
 

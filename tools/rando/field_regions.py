@@ -87,10 +87,12 @@ SCREENS = {
     'Field_02G': ('wasteland', 'bracelet'),
     'Field_02H': (('wasteland', 'bracelet'), [
         ((4, 5, 6, 7, 8, 14, 17, 23, 24, 33, 34), ('taltal-east-1', 'hookshot | rooster')),
-        ((26, 27, 28, 29, 36, 38, 39, 48, 49, 58, 59), 'taltal-east-0'),
+        # (the raised ledge, no walkable link from taltal-east-0 ground: entered from the crossing side)
+        ((26, 27, 28, 29, 36, 38, 39, 48, 49, 58, 59), ('taltal-east-1', 'hookshot | rooster')),
     ]),
     'Field_02I': ('taltal-east-0', [
         ((26, 35, 36, 44, 45, 46, 54, 55, 56), ('wasteland', 'bracelet & break-crystal')),
+        ((20, 21, 30, 31, 40, 41, 50, 51), ('taltal-east-1', 'hookshot | rooster')),  # (02H's raised ledge)
     ]),
     'Field_02J': ('taltal-east-0', [
         ((5, 6, 10, 11, 12, 13, 14, 15, 16, 21, 24, 25, 26, 34, 35, 36, 37, 38, 39, 44, 45, 46, 54), 'taltal-east-1'),
@@ -135,7 +137,6 @@ SCREENS = {
     ]),
     'Field_03I': (('wasteland', 'bracelet'), [
         ((9, 19), 'taltal-east-0'),
-        ((76, 77, 78, 79), 'heights'),
     ]),
     'Field_03J': ('heights', [
         ((0, 10), 'taltal-east-0'),
@@ -178,9 +179,11 @@ SCREENS = {
         ((7, 8, 17, 18, 27, 28, 38, 48, 49, 58, 59), ('wasteland', 'bracelet')),
     ]),
     'Field_04I': ('heights', [
-        ((1, 2, 3, 11, 12, 13, 21, 22, 23, 31, 32, 40, 41, 42, 50, 51, 52), ('wasteland', 'bracelet')),
+        ((1, 2, 3, 9, 11, 12, 13, 21, 22, 23, 31, 32, 40, 41, 42, 50, 51, 52), ('wasteland', 'bracelet')),
     ]),
-    'Field_04J': 'heights',
+    'Field_04J': ('heights', [
+        ((0, 1, 11), ('wasteland', 'bracelet')),  # (the lane's last pocket past 03I's rock, above the Heights)
+    ]),
     'Field_04K': 'heights',
     'Field_04L': ('heights', [
         ((51, 61, 62, 71, 72), 'bridge'),
@@ -216,10 +219,14 @@ SCREENS = {
     'Field_05I': ('kanalet-outside', [
         ((53, 54), ('river', 'flippers')),
         ((1,), 'wasteland'),
+        ((16, 17, 18, 19), 'river'),  # (the strip between the moat and the outer wall: only from the moat)
     ]),
-    'Field_05J': 'kanalet-outside',
+    'Field_05J': ('kanalet-outside', [
+        ((10, 11, 12, 13, 14, 15, 16, 17, 18, 19), 'river'),
+    ]),
     'Field_05K': ('kanalet-outside', [
         ((27, 28, 29, 37, 38, 39, 47, 48, 49), 'bridge'),
+        ((10, 11, 12, 13, 14, 15, 16), 'river'),
     ]),
     'Field_05L': 'bridge',
     'Field_05M': None,
