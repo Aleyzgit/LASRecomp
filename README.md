@@ -62,7 +62,7 @@ Known issues and their status are on the [GitHub issues page](https://github.com
 - Optional run timer in the corner: real time from the start of gameplay to the ending (set it before starting a
   save), and LiveSplit support through its Server component: auto-start, a split for each instrument and the ending.
 - Apple MetalFX upscaler on macOS (the default there).
-- Internal resolution adjustments: raise or lower the resolution in steps, match the display, or use dynamic resolution. Combined with the MetalFX upscaler, even a MacBook Air should handle this easily with the right settings. Bilinear upscaling is the only option on Windows currently.
+- Internal resolution adjustments: raise or lower the resolution in steps, match the display, or use dynamic resolution. Combined with the MetalFX upscaler, even a MacBook Air should handle this easily with the right settings. On Windows and Linux the AMD FSR 1 upscaler is available.
 
 **Randomizer**
 - In-game seed generator.
