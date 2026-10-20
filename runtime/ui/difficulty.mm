@@ -123,6 +123,14 @@ extern "C" void difficulty_draw(float scale) {
                    g_start_screen ? "A run timer in the corner, from the start of gameplay to the ending. Loading doesn't count."
                                   : "Set before starting a save."))
         settings_save();
+    opt_indent(1);
+    {  // (any time, also mid-session)
+        static const char *const pos[] = {"Bottom left", "Bottom right"};
+        if (!g_settings.timer) opt_disable_next();
+        if (opt_choice("Timer position", &g_settings.timer_pos, pos, 2, TIMER_POS_LEFT, "Which corner the timer sits in."))
+            settings_save();
+    }
+    opt_indent(-1);
     if (opt_toggle("LiveSplit", &g_settings.livesplit, false,
                    "Drives LiveSplit through its Server component: the start, a split for each instrument and the "
                    "ending, and game time without loading.")) {

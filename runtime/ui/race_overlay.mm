@@ -118,7 +118,7 @@ extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale) {
                                   (unsigned long long)(ds / 600 % 60), (unsigned long long)(ds / 10 % 60), (unsigned long long)(ds % 10));
         else snprintf(t, sizeof t, "%llu:%02llu.%llu", (unsigned long long)(ds / 600), (unsigned long long)(ds / 10 % 60),
                       (unsigned long long)(ds % 10));
-        float size = 50 * scale;
+        float size = 62 * scale;
         // (digits at a fixed width: the panel and the time don't wobble as it counts)
         float dw = font->CalcTextSizeA(size, FLT_MAX, 0, "0").x, tw = 0;
         for (const char *c = t; *c; c++) {
@@ -126,12 +126,22 @@ extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale) {
             tw += *c >= '0' && *c <= '9' ? dw : font->CalcTextSizeA(size, FLT_MAX, 0, one).x;
         }
         // Baloo's line box is tall: the panel hugs the digits (cap height ~ 0.5 of the size, from ~0.3 down)
-        float padx = 16 * scale, top = size * 0.24f, bot = size * 0.80f;
-        ImVec2 a(24 * scale, display.y - 24 * scale - (bot - top) - 2 * 8 * scale);
-        ImVec2 z(a.x + tw + 2 * padx, display.y - 24 * scale);
+        float padx = 20 * scale, pady = 10 * scale, top = size * 0.24f, bot = size * 0.80f;
+        float pw = tw + 2 * padx, ph = (bot - top) + 2 * pady;
+        // bottom left, or bottom right. The game's HUD sits in a 16:9 box centred in the window (wider windows: the
+        // corners are free): hearts top left, item buttons top right, and bottom right the "Now saving." note (about
+        // 0.79-1.0 of the box's width, 0.86-0.94 of its height; found 2026-10-20) - at the right, the panel goes above
+        // that note when they'd meet.
+        float ax = g_settings.timer_pos == TIMER_POS_RIGHT ? display.x - 30 * scale - pw : 30 * scale;
+        ImVec2 a(ax, display.y - 30 * scale - ph), z(a.x + pw, a.y + ph);
+        if (g_settings.timer_pos == TIMER_POS_RIGHT) {
+            float bw = fminf(display.x, display.y * 16 / 9), bx = (display.x - bw) * 0.5f;
+            float sx0 = bx + 0.79f * bw, sx1 = bx + bw, sy0 = 0.86f * display.y, sy1 = 0.94f * display.y;
+            if (z.x > sx0 && a.x < sx1 && z.y > sy0 && a.y < sy1) a.y = sy0 - 10 * scale - ph, z.y = a.y + ph;
+        }
         timer_panel(dl, a, z, scale, st == 2);
         ImU32 ink = st == 2 ? IM_COL32(0x8A, 0x55, 0x00, 255) : IM_COL32(0x3B, 0x2A, 0x14, 255);
-        float x = a.x + padx, y = a.y + 8 * scale - top;
+        float x = a.x + padx, y = a.y + pady - top;
         for (const char *c = t; *c; c++) {
             char one[2] = {*c, 0};
             float gw = font->CalcTextSizeA(size, FLT_MAX, 0, one).x, cw = *c >= '0' && *c <= '9' ? dw : gw;
