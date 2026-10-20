@@ -640,6 +640,8 @@ static void fill_state(Cpu *c) {
       shell_spots_tick(c, renderer_present_count());
       extern void qol_tick(void);
       qol_tick();
+      extern void run_timer_tick(void);
+      run_timer_tick();  // (run timer / LiveSplit: runtime/hle/run_timer.c)
       extern void pets_game_tick(Cpu *c);
       pets_game_tick(c); }
     extern uint64_t g_watch_lo, g_watch_hi;
