@@ -16,6 +16,8 @@ extern "C" {
 int game_in_play(void);
 int rt_hookshot_seed_forced(void);  // hle/hookshot.c
 int rt_no_buff_seed_forced(void);   // hle/qol.c
+void run_timer_restart(void);       // hle/run_timer.c
+#include "../livesplit.h"
 }
 
 
@@ -113,5 +115,34 @@ extern "C" void difficulty_draw(float scale) {
     }
     if (opt_toggle("One-hit KO", &g_settings.diff_ohko, false, "Any hit defeats Link, whatever his hearts."))
         settings_save();
+
+    // run timer / LiveSplit (runtime/hle/run_timer.c, runtime/livesplit.c, runtime/ui/race_overlay.mm)
+    opt_section("Speedrun");
+    if (opt_toggle("Timer", &g_settings.timer, false,
+                   "A run timer in the corner. Loading and this menu don't count. Randomizer seeds start it on a new "
+                   "file; it stops at the ending and is kept with each save."))
+        settings_save();
+    opt_indent(1);
+    if (!(g_settings.timer || g_settings.livesplit) || !game_in_play()) opt_disable_next();
+    if (opt_button("Start timer", "Starts the timer from zero now.")) run_timer_restart();
+    opt_indent(-1);
+    if (opt_toggle("LiveSplit", &g_settings.livesplit, false,
+                   "Drives LiveSplit through its Server component: the start, a split for each instrument and the "
+                   "ending, and game time without loading.")) {
+        settings_save();
+        livesplit_poke();
+    }
+    opt_indent(1);
+    {
+        char d[160];
+        snprintf(d, sizeof d, "Where LiveSplit's Server listens: host:port.%s",
+                 !g_settings.livesplit ? "" : livesplit_connected() ? "\n\nConnected." : "\n\nNot connected.");
+        if (!g_settings.livesplit) opt_disable_next();
+        if (opt_text("Server", g_settings.livesplit_host, sizeof g_settings.livesplit_host, "localhost:16834", d)) {
+            if (!g_settings.livesplit_host[0]) snprintf(g_settings.livesplit_host, sizeof g_settings.livesplit_host, "localhost:16834");
+            settings_save();
+        }
+    }
+    opt_indent(-1);
     opt_end();
 }

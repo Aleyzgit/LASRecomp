@@ -511,6 +511,8 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" bool chaos_overlay_wanted(void);
 extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
+extern "C" bool race_overlay_wanted(void);
+extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale);
 
 // Reboot (runtime/main.c): the game is gone - menu and name dialog close; the ImGui context stays.
 RT_ON_RESET(menu_reset) {
@@ -714,7 +716,8 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool trk = !open && tracker_overlay_wanted();
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos) {
+    bool race = race_overlay_wanted();  // (run timer, race seed hash: race_overlay.mm)
+    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos && !race) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -768,6 +771,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::End();
     }
 
+    if (race) race_overlay_draw(io.DisplaySize, g_menu_font_big, scale);
     if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (chaos) chaos_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (inv) {

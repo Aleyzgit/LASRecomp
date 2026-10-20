@@ -743,6 +743,8 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             save_editor_file_read(f->path, b->addr, off, n);
             extern void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
             flags_ext_save_read(f->path, b->addr, off, n);
+            extern void run_timer_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
+            run_timer_save_read(f->path, b->addr, off, n);  // (runtime/hle/run_timer.c: the run's time with the save)
         }
         OUT(int64_t, 0) = n < 0 ? 0 : n;
         resp_size(resp, 8);
@@ -764,6 +766,8 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             extern bool flags_ext_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
             errno = 0;
             if (!flags_ext_save_written(f->path, a->addr, off, size)) error = errno ? errno : EIO;
+            extern void run_timer_save_written(const char *path, uint64_t addr, int64_t off, int64_t size);
+            if (!error) run_timer_save_written(f->path, a->addr, off, size);
         }
         if (error && f->fs) file_failed(f, "write", error);
         else if (error) { errno = error; resp->result = errno_result(); }

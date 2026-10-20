@@ -27,6 +27,7 @@ HLE_FUNC("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE", swk
     char text[96];
     int ok = menu_keyboard_run(initial, max_len, text, sizeof text);
     if (!ok) snprintf(text, sizeof text, "%s", initial);  // cancelled: keep what was there
+    else { extern void run_timer_new_file(void); run_timer_new_file(); }  // (a new file: runtime/hle/run_timer.c)
     LOG("[swkbd] name entry (max %d, initial \"%s\"): %s \"%s\"\n", max_len, initial, ok ? "entered" : "cancelled", text);
     if (ptr && size) {
         memset((void *)(uintptr_t)ptr, 0, size);

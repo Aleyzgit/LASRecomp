@@ -67,6 +67,10 @@ typedef struct {
     // cosmetics (runtime/ui/cosmetics.mm; applied live by runtime/nvn/texpatch.c), never part of a seed
     int tunic;           // index into g_tunic_colours (0 = Default: the game's / the seed's own)
     int hearts;          // index into g_heart_colours (0 = Default red)
+    // speedrun (Gameplay tab; runtime/hle/run_timer.c, runtime/livesplit.c)
+    bool timer;            // the in-game run timer in the corner (game time: loads / our menu don't count)
+    bool livesplit;        // drive LiveSplit (its Server component) over TCP: start, splits, game time
+    char livesplit_host[64];  // host:port of the LiveSplit Server ("localhost:16834")
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 
