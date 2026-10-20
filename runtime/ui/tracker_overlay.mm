@@ -113,7 +113,7 @@ enum St { ST_LOGIC, ST_TRICK, ST_NEEDS, ST_DONE };  // best first
 static const char *const kKindTok[K_N] = {"chest", "heart", "shell", "boss", "shop", "other", "bush", "dig", "pot"};
 // filter bits: kinds 0..8, then the two switches
 enum { F_IN_LOGIC = 1 << 16, F_HIDE_DONE = 1 << 17 };
-static const int kDefaultFilters = (1 << K_CHEST) | (1 << K_HEART) | (1 << K_SHELL) | (1 << K_BOSS) | (1 << K_SHOP) |
+static const int kDefaultFilters = F_IN_LOGIC | (1 << K_CHEST) | (1 << K_HEART) | (1 << K_SHELL) | (1 << K_BOSS) | (1 << K_SHOP) |
                                    (1 << K_OTHER);
 
 static std::unordered_map<std::string, int> g_tok;
@@ -575,6 +575,7 @@ struct UiState {
     int panel_type = 0, panel_id = 0, panel_row = 0;
     float panel_scroll = 0;
     bool filter_focus = false;  // the cursor is on the filter bar
+    int spot = -1;              // A in the list: this check's spot is shown on the map (B: back to the list)
     int chip = 0;
     uint64_t last_solve = ~0ull;
 };
@@ -646,62 +647,169 @@ extern "C" uint64_t tracker_map_input(uint64_t b, int32_t st[4]) {
     return b & ~(dirs | BA | BY | hide);
 }
 
-// ---- the game's own cursor and button bar. The map page's layout panes (ui2d: name at +0xB0, flags at +0x58, bit 0 =
-// visible; found with LARECOMP_PANE_SCAN=<frame>:2): L_MapCursor_00 = the cursor with its place-name box,
-// L_Operation_00 = the button hints along the bottom (X Memories, Y Hide markers, Zoom, A Pin, B Back). While the
-// tracker drives, both are hidden every frame (the page's update runs right after this); handing back restores them.
-// The panes are found once per opening by following the page object's pointers (as the scan does).
-static const char *const kHidePanes[] = {"L_MapCursor_00", "L_Operation_00"};
-enum { NHIDE = sizeof kHidePanes / sizeof kHidePanes[0] };
-static uint64_t g_hide_pane[NHIDE];
-static bool g_hidden[NHIDE];
+// ---- the map page's layout panes (ui2d: name at +0xB0, translate +0x30/+0x34, flags at +0x58 with bit 0 = visible;
+// found with LARECOMP_PANE_SCAN=<frame>:2):
+//   L_MapCursor_00  the game's cursor with its place-name box   } hidden while the tracker drives: in the page's update
+//   L_Operation_00  its button hints (Memories, Pin, Zoom...)   } epilogue (MAP_PAGE_END_SITE), restored on hand-back.
+//   W_Cursor_00     the cursor's yellow corner brackets (3 such panes on the page; all are switched off)
+//                   L_MapCursor_00 is moved off the page, the others switched off (found with LARECOMP_TRACKER_CYCLE)
+//   T_MapName_NN    the place names on the island (datasheet UiFieldMapLocationName mId NN): our area bullets sit
+//                   beside them; translate = position in the map core (origin = page centre, y up)
+// The panes are found once per opening, breadth first over the page object's pointers.
+enum { PANE_CURSOR, PANE_OPS, PANE_LABEL0, NPANES = PANE_LABEL0 + 21 };
+static char g_pane_names[NPANES][24];
+static uint64_t g_pane[NPANES];
+static bool g_hidden[2];
+static std::vector<uint64_t> g_brackets;  // W_Cursor_00 panes
+static std::vector<char> g_brackets_hidden;
+static float g_cursor_t[2];   // (the cursor's own translate, put back on hand-back)
 static uint64_t g_panes_for;  // the page object they were found for
 
-static void find_panes_rec(uint64_t obj, int depth, uint64_t *seen, int *nseen, const uint64_t *ra, const uint64_t *rs, int nr) {
-    for (uint32_t off = 0; off < 0x800; off += 8) {
-        uint64_t p = LD64(obj + off);
-        bool ok = false;
-        for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 > p && p + 0x800 <= ra[i] + rs[i];
-        if (!ok) continue;
-        bool dup = false;
-        for (int i = 0; i < *nseen && !dup; i++) dup = seen[i] == p;
-        if (dup || *nseen >= 4096) continue;
-        seen[(*nseen)++] = p;
-        const char *nm = (const char *)(uintptr_t)(p + 0xB0);
-        for (int k = 0; k < NHIDE; k++)
-            if (!g_hide_pane[k] && !strncmp(nm, kHidePanes[k], 15) && nm[strlen(kHidePanes[k])] == 0) g_hide_pane[k] = p;
-        if (depth > 0) find_panes_rec(p, depth - 1, seen, nseen, ra, rs, nr);
+static void pane_names(void) {
+    if (g_pane_names[0][0]) return;
+    snprintf(g_pane_names[PANE_CURSOR], 24, "L_MapCursor_00");
+    snprintf(g_pane_names[PANE_OPS], 24, "L_Operation_00");
+    for (int i = 0; i < 21; i++) snprintf(g_pane_names[PANE_LABEL0 + i], 24, "T_MapName_%02d", i);
+}
+
+// breadth first from the page object over pointers into guest data (nearest first: the pane graph is large)
+static void find_panes(uint64_t obj) {
+    static uint64_t ra[256], rs[256];
+    int nr = kernel_data_regions(ra, rs, 256);
+    std::vector<uint64_t> cur{obj}, next;
+    std::unordered_map<uint64_t, char> seen;
+    seen[obj] = 1;
+    for (int depth = 0; depth < 7 && !cur.empty() && seen.size() < 60000; depth++) {
+        next.clear();
+        for (uint64_t o : cur)
+            for (uint32_t off = 0; off < 0x800; off += 8) {
+                uint64_t p = LD64(o + off);
+                bool ok = false;
+                for (int i = 0; i < nr && !ok; i++) ok = p >= ra[i] && p + 0x800 > p && p + 0x800 <= ra[i] + rs[i];
+                if (!ok || !seen.emplace(p, 1).second) continue;
+                const char *nm = (const char *)(uintptr_t)(p + 0xB0);
+                if (nm[0] == 'L' || nm[0] == 'T')
+                    for (int k = 0; k < NPANES; k++)
+                        if (!g_pane[k] && !strcmp(nm, g_pane_names[k])) g_pane[k] = p;
+                if (nm[0] == 'W' && !strcmp(nm, "W_Cursor_00") && g_brackets.size() < 8 &&
+                    std::find(g_brackets.begin(), g_brackets.end(), p) == g_brackets.end())
+                    g_brackets.push_back(p), g_brackets_hidden.push_back(0);
+                next.push_back(p);
+            }
+        bool all = g_brackets.size() >= 3;
+        for (int k = 0; k < NPANES; k++) all &= g_pane[k] != 0;
+        if (all) break;
+        cur.swap(next);
     }
+}
+static bool pane_ok(int k) {
+    uint64_t p = g_pane[k];
+    return p && !strcmp((const char *)(uintptr_t)(p + 0xB0), g_pane_names[k]);
+}
+
+// LARECOMP_TRACKER_CYCLE=<pane>,<pane>,... (test): from 100 frames after the map opens, every 40 frames the next pane in
+// the list is switched off (bit 0 of +0x58, every frame), to see which of the page's panes draws what
+static void cycle_test(uint64_t obj) {
+    static char buf[1024], *names[64];
+    static int n = -1;
+    if (n < 0) {
+        n = 0;
+        const char *e = getenv("LARECOMP_TRACKER_CYCLE");
+        if (e) {
+            snprintf(buf, sizeof buf, "%s", e);
+            for (char *t = strtok(buf, ","); t && n < 64; t = strtok(NULL, ",")) names[n++] = t;
+        }
+    }
+    if (!n) return;
+    uint64_t f = renderer_present_count() - g_map_opened;
+    if (f < 100) return;
+    int i = (int)((f - 100) / 40);
+    if (i >= n) return;
+    static int found_for = -1;
+    static std::vector<uint64_t> hits;
+    if (found_for != i) {
+        found_for = i, hits.clear();
+        static uint64_t ra[256], rs[256];
+        int nr = kernel_data_regions(ra, rs, 256);
+        std::vector<uint64_t> cur{obj}, next;
+        std::unordered_map<uint64_t, char> seen;
+        for (int d = 0; d < 7 && !cur.empty() && seen.size() < 60000; d++, cur.swap(next)) {
+            next.clear();
+            for (uint64_t o : cur)
+                for (uint32_t off = 0; off < 0x800; off += 8) {
+                    uint64_t p = LD64(o + off);
+                    bool ok = false;
+                    for (int k = 0; k < nr && !ok; k++) ok = p >= ra[k] && p + 0x800 > p && p + 0x800 <= ra[k] + rs[k];
+                    if (!ok || !seen.emplace(p, 1).second) continue;
+                    if (!strcmp((const char *)(uintptr_t)(p + 0xB0), names[i])) hits.push_back(p);
+                    next.push_back(p);
+                }
+        }
+        LOG("[tracker] cycle frame %llu: hiding %s (%zu panes)\n", (unsigned long long)renderer_present_count(), names[i], hits.size());
+    }
+    for (uint64_t p : hits) ST8(p + 0x58, LD8(p + 0x58) & ~1);
 }
 
 static bool takeover_active(void);
 static void map_page_takeover(uint64_t obj) {
     if (!obj) return;
+    cycle_test(obj);
     bool on = takeover_active();
     static int tries;
     static uint64_t tried_at;
     uint64_t now = renderer_present_count();
     if (g_panes_for != obj) tries = 0, tried_at = 0;
     bool missing = false;
-    for (int k = 0; k < NHIDE; k++) missing |= !g_hide_pane[k];
+    for (int k = 0; k < NPANES; k++) missing |= !g_pane[k];
+    missing |= g_brackets.size() < 3;
     // (a new page object: find its panes; parts of the page are built after it opens, so look again a few times)
     if (on && (g_panes_for != obj || (missing && tries < 12 && now - tried_at >= 20))) {
-        static uint64_t ra[256], rs[256], seen[4096];
-        int nr = kernel_data_regions(ra, rs, 256), nseen = 0;
-        if (g_panes_for != obj) memset(g_hide_pane, 0, sizeof g_hide_pane), memset(g_hidden, 0, sizeof g_hidden);
-        find_panes_rec(obj, 5, seen, &nseen, ra, rs, nr);
+        pane_names();
+        if (g_panes_for != obj)
+            memset(g_pane, 0, sizeof g_pane), memset(g_hidden, 0, sizeof g_hidden), g_brackets.clear(), g_brackets_hidden.clear();
+        find_panes(obj);
         g_panes_for = obj, tries++, tried_at = now;
-        LOG("[tracker] map page %llx: cursor pane %llx, button bar %llx (try %d)\n", (unsigned long long)obj,
-            (unsigned long long)g_hide_pane[0], (unsigned long long)g_hide_pane[1], tries);
+        int labels = 0;
+        for (int k = PANE_LABEL0; k < NPANES; k++) labels += g_pane[k] != 0;
+        LOG("[tracker] map page %llx: cursor %llx, button bar %llx, %d place names, %zu brackets (try %d)\n",
+            (unsigned long long)obj, (unsigned long long)g_pane[PANE_CURSOR], (unsigned long long)g_pane[PANE_OPS], labels,
+            g_brackets.size(), tries);
     }
     if (g_panes_for != obj) return;
-    for (int k = 0; k < NHIDE; k++) {
-        uint64_t p = g_hide_pane[k];
-        if (!p || memcmp((const void *)(uintptr_t)(p + 0xB0), kHidePanes[k], strlen(kHidePanes[k]))) continue;
-        uint8_t fl = LD8(p + 0x58);
-        if (on && (fl & 1)) ST8(p + 0x58, fl & ~1), g_hidden[k] = true;
-        else if (!on && g_hidden[k]) ST8(p + 0x58, fl | 1), g_hidden[k] = false;
+    if (pane_ok(PANE_CURSOR)) {
+        float *t = (float *)(uintptr_t)(g_pane[PANE_CURSOR] + 0x30);
+        if (on) {
+            if (t[0] < 50000) g_cursor_t[0] = t[0], g_cursor_t[1] = t[1];
+            t[0] = t[1] = 100000.0f;  // (off the page)
+            g_hidden[0] = true;
+        } else if (g_hidden[0]) t[0] = g_cursor_t[0], t[1] = g_cursor_t[1], g_hidden[0] = false;
     }
+    for (size_t i = 0; i < g_brackets.size(); i++) {
+        uint64_t p = g_brackets[i];
+        if (strcmp((const char *)(uintptr_t)(p + 0xB0), "W_Cursor_00")) continue;
+        uint8_t fl = LD8(p + 0x58);
+        if (on && (fl & 1)) ST8(p + 0x58, fl & ~1), g_brackets_hidden[i] = 1;
+        else if (!on && g_brackets_hidden[i]) ST8(p + 0x58, fl | 1), g_brackets_hidden[i] = 0;
+    }
+    if (pane_ok(PANE_OPS)) {
+        uint64_t p = g_pane[PANE_OPS];
+        uint8_t fl = LD8(p + 0x58);
+        if (on && (fl & 1)) ST8(p + 0x58, fl & ~1), g_hidden[1] = true;
+        else if (!on && g_hidden[1]) ST8(p + 0x58, fl | 1), g_hidden[1] = false;
+    }
+}
+
+static int g_label_align[21];
+// a place name's position (default view, 1280x720 UI units) and whether the game shows it; false = not found
+static bool label_pos(int id, ImVec2 *p, bool *shown) {
+    int k = PANE_LABEL0 + id;
+    if (id < 0 || id >= 21 || !pane_ok(k)) return false;
+    const float *t = (const float *)(uintptr_t)(g_pane[k] + 0x30);
+    if (!(fabsf(t[0]) < 2000 && fabsf(t[1]) < 2000)) return false;
+    *p = ImVec2(640 + t[0], 360 - t[1]);
+    g_label_align[id] = LD8(g_pane[k] + 0x5B) % 3;  // (base position, x: 0 centre, 1 left edge, 2 right edge)
+    *shown = (LD8(g_pane[k] + 0x58) & 1) && LD8(g_pane[k] + 0x5A) > 0;
+    return true;
 }
 
 // ---- drawing
@@ -751,6 +859,7 @@ struct Badge { int open, total, done, best; float x, y; };  // best = the best s
 }  // namespace
 static std::unordered_map<int, std::vector<int>> g_screen_checks;  // screen (row * 16 + col) -> its checks
 static std::vector<std::vector<int>> g_group_checks;                // dungeon icon -> its checks
+static std::vector<std::vector<int>> g_area_checks;                 // place name (T_MapName_NN) -> its checks
 static bool g_indexed;
 static void index_reset(void) { g_screen_checks.clear(), g_group_checks.clear(), g_status.clear(), g_indexed = false; }
 
@@ -820,6 +929,58 @@ static std::string screen_title(const std::vector<int> &list) {
 
 static ImVec2 text_size(ImFont *font, float fs, const char *t) { return font->CalcTextSizeA(fs, FLT_MAX, 0, t); }
 
+// game-styled drawing: parchment panels (the map's own paper and brown ink), white prompt text with a shadow and
+// round button glyphs (the pause menu's button row)
+#define P_PARCH IM_COL32(0xF1, 0xE4, 0xC0, 246)
+#define P_PARCH_LT IM_COL32(0xFA, 0xF2, 0xDC, 255)
+#define P_PARCH_DK IM_COL32(0xE2, 0xCC, 0x96, 255)
+#define P_BROWN IM_COL32(0x6B, 0x4A, 0x22, 255)
+#define P_LINE IM_COL32(0xB8, 0x98, 0x60, 255)
+#define P_GOLD IM_COL32(0xD9, 0x9A, 0x1E, 255)
+#define P_INK IM_COL32(0x3B, 0x2A, 0x14, 255)
+#define P_INK_DIM IM_COL32(0x6E, 0x58, 0x3A, 255)
+#define P_INK_FADED IM_COL32(0x9C, 0x8A, 0x6C, 255)
+#define P_GREEN IM_COL32(0x1F, 0x7A, 0x45, 255)
+#define P_AMBER IM_COL32(0xA8, 0x5E, 0x06, 255)
+#define P_PURPLE IM_COL32(0x5B, 0x3F, 0xB0, 255)
+static void parchment(ImDrawList *dl, ImVec2 a, ImVec2 z, float u) {
+    dl->AddRectFilled(ImVec2(a.x + 3 * u, a.y + 4 * u), ImVec2(z.x + 3 * u, z.y + 4 * u), IM_COL32(0, 0, 0, 70), 12 * u);
+    dl->AddRectFilled(a, z, P_PARCH, 12 * u);
+    dl->AddRect(a, z, P_BROWN, 12 * u, 0, 2.5f * u);
+    dl->AddRect(ImVec2(a.x + 5 * u, a.y + 5 * u), ImVec2(z.x - 5 * u, z.y - 5 * u), P_LINE, 8 * u, 0, 1 * u);
+}
+static void shadow_text(ImDrawList *dl, ImFont *font, float fs, ImVec2 p, const char *t, float u) {
+    dl->AddText(font, fs, ImVec2(p.x + 1.6f * u, p.y + 1.6f * u), IM_COL32(40, 25, 5, 170), t);
+    dl->AddText(font, fs, p, IM_COL32(255, 255, 255, 255), t);
+}
+static float prompt_width(ImFont *font, float fs, const char *btn, const char *label) {
+    float g = strlen(btn) > 1 ? fs * 1.45f : fs * 1.0f;
+    return g + 6 + text_size(font, fs, label).x;
+}
+static float draw_prompt(ImDrawList *dl, ImFont *font, float fs, ImVec2 p, const char *btn, const char *label, float u) {
+    float g = strlen(btn) > 1 ? fs * 1.45f : fs * 1.0f, r = fs * 0.5f;
+    ImVec2 c(p.x + g * 0.5f, p.y + fs * 0.55f);
+    if (strlen(btn) > 1) {
+        dl->AddRectFilled(ImVec2(p.x, c.y - r), ImVec2(p.x + g, c.y + r), IM_COL32(40, 25, 5, 120), r);
+        dl->AddRectFilled(ImVec2(p.x - 1, c.y - r - 1), ImVec2(p.x + g - 1, c.y + r - 1), IM_COL32(255, 255, 255, 255), r);
+    } else {
+        dl->AddCircleFilled(ImVec2(c.x + 1.5f * u, c.y + 1.5f * u), r, IM_COL32(40, 25, 5, 120));
+        dl->AddCircleFilled(c, r, IM_COL32(255, 255, 255, 255));
+    }
+    float bs = fs * (strlen(btn) > 1 ? 0.62f : 0.72f);
+    ImVec2 bt = text_size(font, bs, btn);
+    dl->AddText(font, bs, ImVec2(c.x - bt.x * 0.5f - (strlen(btn) > 1 ? 1 : 0), c.y - bt.y * 0.5f), IM_COL32(60, 45, 25, 255), btn);
+    shadow_text(dl, font, fs, ImVec2(p.x + g + 6 * u, p.y), label, u);
+    return g + 6 * u + text_size(font, fs, label).x;
+}
+// LARECOMP_TRACKER_LAYOUT=side (hidden, for comparing): the filters and counts in a panel beside the parchment;
+// default: one line in the game's button row with a filter panel on Y
+static bool tracker_layout_side(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("LARECOMP_TRACKER_LAYOUT"); v = e && !strcmp(e, "side"); }
+    return v == 1;
+}
+
 extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     uint64_t now = renderer_present_count();
     UiState &ui = g_ui;
@@ -854,12 +1015,8 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     };
     auto R = [&](float x0, float y0, float x1, float y1) { return ImVec4(ox + x0 * u, oy + y0 * u, ox + x1 * u, oy + y1 * u); };
     ImDrawList *dl = ImGui::GetForegroundDrawList();
-    if (g_vanilla) {  // the game's own map: only a way back
-        const char *t = "ZR  tracker";
-        float fs = 16 * u;
-        ImVec2 ts = text_size(font, fs, t), a(ox + 196 * u, oy + 84 * u);
-        dl->AddRectFilled(ImVec2(a.x - 10 * u, a.y - 5 * u), ImVec2(a.x + ts.x + 10 * u, a.y + ts.y + 5 * u), C_BG, 10 * u);
-        dl->AddText(font, fs, a, C_TEXT, t);
+    if (g_vanilla) {  // the game's own map: only a way back, left of the game's own button row
+        draw_prompt(dl, font, 19 * u, ImVec2(ox + 64 * u, oy + 668 * u), "ZR", "Tracker", u);
         g_panel_open = false, g_filter_open = false;
         return;
     }
@@ -873,31 +1030,64 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     int f = filters();
     float zs = msc > 1 ? fminf(msc, 1.5f) : 1.0f;  // (badges grow a little with the zoom)
 
-    // ---- badges and dungeon icons = the cursor's targets (screens first, then dungeons: same order as drawn)
+    // ---- areas: the game's place names (T_MapName_NN). Each Field screen belongs to the nearest name on the island
+    // (default view); a screen's checks (interiors at their door) count for its area
+    static const char *const kLabel[21] = {"Kanalet Castle", "Rapids Ride", "Southern Face Shrine", "Animal Village",
+                                           "Yarna Desert", "", "Martha's Bay", "Pothole Field", "", "", "Mabe Village",
+                                           "Mysterious Forest", "Goponga Swamp", "Koholint Prairie", "Tabahl Wasteland",
+                                           "Tal Tal Mountain Range", "Mt. Tamaranch", "Tal Tal Heights", "Toronbo Shores",
+                                           "Ukuku Prairie", "Cemetery"};
+    ImVec2 lp[21];
+    bool lhave[21] = {}, lshown[21] = {};
+    int nlabels = 0;
+    // the game draws the names ~22 layout units tall: "Tal Tal Heights" is 135 wide
+    float name_k = 135.0f / std::max(1.0f, text_size(font, 1, "Tal Tal Heights").x);
+    float lw[21] = {};
+    for (int i = 0; i < 21; i++)
+        if (kLabel[i][0] && label_pos(i, &lp[i], &lshown[i])) {  // (lp: the name's centre)
+            lhave[i] = true, nlabels++;
+            lw[i] = name_k * text_size(font, 1, kLabel[i]).x;
+            if (g_label_align[i] == 1) lp[i].x += lw[i] * 0.5f;
+            else if (g_label_align[i] == 2) lp[i].x -= lw[i] * 0.5f;
+        }
+    std::vector<std::vector<int>> &area_checks = g_area_checks;
+    area_checks.assign(21, {});
+    if (nlabels)
+        for (auto &e : g_screen_checks) {
+            ImVec2 c = ui_pt((e.first % 16) + 0.5f, (e.first / 16) + 0.5f);
+            int best = -1;
+            float bd = 1e9f;
+            for (int i = 0; i < 21; i++)
+                if (lhave[i]) {
+                    float d = hypotf(lp[i].x - c.x, lp[i].y - c.y);
+                    if (d < bd) bd = d, best = i;
+                }
+            for (int k : e.second) area_checks[best].push_back(k);
+        }
+    // ---- bullets beside the names and dungeon icons = the cursor's targets (areas first, then dungeons)
     const ImVec4 clip = R(60, 112, 1222, 640);
     std::vector<Target> targets;
     std::vector<Badge> badges;
-    for (auto &e : g_screen_checks) {
-        Badge b = badge_of(e.second, f);
-        if (!b.total) continue;                                    // (no check of a shown kind here)
-        if (!b.open && (f & (F_HIDE_DONE | F_IN_LOGIC))) continue;  // nothing open (in logic) left
-        ImVec2 p = ui_pt((e.first % 16) + 0.5f, (e.first / 16) + 0.5f);
-        b.x = p.x, b.y = p.y;
-        targets.push_back({0, e.first, p.x, p.y});
+    float br = 10.5f * u * zs;
+    for (int i = 0; i < 21; i++) {
+        if (!lhave[i] || area_checks[i].empty()) continue;
+        Badge b = badge_of(area_checks[i], f);
+        if (!b.total || !b.open) continue;  // (nothing open under the filters here)
+        b.x = lp[i].x + lw[i] * 0.5f + 8 + 11.5f, b.y = lp[i].y;  // (beside the name: never over it)
+        targets.push_back({0, i, b.x, b.y});
         badges.push_back(b);
     }
     std::vector<Badge> dbadges(g_groups.size());
     for (size_t g = 0; g < g_groups.size(); g++) {
         ImVec2 p = ui_pt(g_groups[g].x, g_groups[g].y);
         Badge b = badge_of(g_group_checks[g], (1 << K_N) - 1);  // (an icon counts all its checks)
+        for (int i = 0; i < 21; i++)  // (over a place name: to the left of the name)
+            if (lhave[i] && fabsf(p.x - lp[i].x) < lw[i] * 0.5f + 16 && fabsf(p.y - lp[i].y) < 11 + 16) p.x = lp[i].x - lw[i] * 0.5f - 18;
         b.x = p.x, b.y = p.y;
         dbadges[g] = b;
+        targets.push_back({1, (int)g, p.x, p.y});
     }
-    for (size_t i = 0; i < badges.size(); i++)  // a screen badge sharing its screen with a dungeon icon: to its left
-        for (auto &d : dbadges)
-            if (fabsf(badges[i].x - d.x) < 1 && fabsf(badges[i].y - d.y) < 1) badges[i].x -= 30, targets[i].x -= 30;
-    for (size_t g = 0; g < g_groups.size(); g++) targets.push_back({1, (int)g, dbadges[g].x, dbadges[g].y});
-    // the cursor: kept on its badge; else the one nearest Link's screen (PlayerStatus +0x40, e.g. "11C" on the
+    // the cursor: kept on its target; else the area nearest Link's screen (PlayerStatus +0x40, e.g. "11C" on the
     // Field) or the map's centre
     auto find_target = [&](int type, int id) -> int {
         for (size_t i = 0; i < targets.size(); i++) if (targets[i].type == type && targets[i].id == id) return (int)i;
@@ -920,31 +1110,39 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         ui.sel_type = targets[cur].type, ui.sel_id = targets[cur].id;
     }
 
-    // ---- filter bar geometry: along the top, above the island
-    struct Chip { int bit; std::string label; ImVec4 r; };
+    // ---- the filters: the two switches, then one toggle per kind of check in the seed
+    struct Chip { int bit; std::string label; };
     std::vector<Chip> chips;
-    {
-        chips.push_back({F_IN_LOGIC, "In logic now", {}});
-        chips.push_back({F_HIDE_DONE, "Hide checked", {}});
-        for (int k = 0; k < K_N; k++) if (g_kind_present[k]) chips.push_back({1 << k, kind_label(k), {}});
-        float fs = 14 * u, x = ox + 196 * u, y = oy + 84 * u, h = 24 * u;
-        for (size_t i = 0; i < chips.size(); i++) {
-            ImVec2 ts = text_size(font, fs, chips[i].label.c_str());
-            if (i == 2) x += 10 * u;  // (a gap between the switches and the kinds)
-            chips[i].r = ImVec4(x, y, x + ts.x + 20 * u, y + h);
-            x += ts.x + 20 * u + 6 * u;
-        }
-    }
+    chips.push_back({F_IN_LOGIC, "In logic now"});
+    chips.push_back({F_HIDE_DONE, "Hide checked"});
+    for (int k = 0; k < K_N; k++) if (g_kind_present[k]) chips.push_back({1 << k, kind_label(k)});
     if (ui.chip >= (int)chips.size()) ui.chip = (int)chips.size() - 1;
 
     auto panel_list = [&](int type, int id) -> const std::vector<int> * {
-        if (type == 0) { auto it = g_screen_checks.find(id); return it == g_screen_checks.end() ? nullptr : &it->second; }
+        if (type == 0) return id >= 0 && id < 21 ? &area_checks[id] : nullptr;
         return id >= 0 && id < (int)g_group_checks.size() ? &g_group_checks[id] : nullptr;
+    };
+    auto title_of = [&](int type, int id) -> std::string {
+        if (type == 0) return id >= 0 && id < 21 ? kLabel[id] : "";
+        return std::string(dungeon_name(g_groups[id].label)) + " (" + g_groups[id].label + ")";
     };
     auto open_panel = [&](int type, int id) {
         ui.panel = true, ui.panel_type = type, ui.panel_id = id, ui.panel_row = 0, ui.panel_scroll = 0;
-        ui.filter_focus = false;
+        ui.filter_focus = false, ui.spot = -1;
     };
+    // the panel's rows: open in logic, needs an item, trick logic, collected (struck out, last)
+    std::vector<Row> rows;
+    auto build_rows = [&]() {
+        rows.clear();
+        const std::vector<int> *list = ui.panel || ui.spot >= 0 ? panel_list(ui.panel_type, ui.panel_id) : nullptr;
+        if (!list) return;
+        static const int order[4] = {0, 2, 1, 3};  // (by St: logic 0, trick 2, needs 1, done 3)
+        for (int i : *list) rows.push_back({i, g_status[i]});
+        std::stable_sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
+            return order[a.st] != order[b.st] ? order[a.st] < order[b.st] : g_checks[a.check].name < g_checks[b.check].name;
+        });
+    };
+    build_rows();
 
     // ---- controller events
     for (uint32_t r = g_evr.load(); r != g_evw.load(); r = g_evr.load()) {
@@ -953,14 +1151,14 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
         int kind = ev & 0xff;
         if (kind == EV_NAV) {
             float a = (float)(ev >> 8) * 0.0174533f, dx = cosf(a), dy = -sinf(a);  // (UI y grows down)
-            if (ui.panel) {
+            if (ui.spot >= 0) {
+            } else if (ui.panel) {
                 if (fabsf(dy) > fabsf(dx)) ui.panel_row += dy > 0 ? 1 : -1;
             } else if (ui.filter_focus) {
-                if (fabsf(dx) > fabsf(dy)) ui.chip = (ui.chip + (dx > 0 ? 1 : (int)chips.size() - 1)) % (int)chips.size();
-                else if (dy > 0) ui.filter_focus = false;
+                if (fabsf(dy) > fabsf(dx)) ui.chip = (ui.chip + (dy > 0 ? 1 : (int)chips.size() - 1)) % (int)chips.size();
             } else if (cur >= 0) {
-                // the nearest badge in that direction: distance along it + twice the sideways offset, within ~65 deg
-                // (then any badge on that side)
+                // the nearest target in that direction: distance along it + twice the sideways offset, within ~65 deg
+                // (then any target on that side)
                 const Target &c = targets[cur];
                 int best = -1;
                 float bs = 1e9f;
@@ -974,218 +1172,326 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
                         if (s < bs) bs = s, best = (int)i;
                     }
                 if (best >= 0) cur = best, ui.sel_type = targets[best].type, ui.sel_id = targets[best].id;
-                else if (dy < 0 && fabsf(dy) > fabsf(dx)) ui.filter_focus = true;  // (up from the top: the filters)
             }
         } else if (kind == EV_A) {
             if (ui.filter_focus) set_filters(f ^ chips[ui.chip].bit), f = filters();
-            else if (!ui.panel && cur >= 0) open_panel(targets[cur].type, targets[cur].id);
+            else if (ui.panel && ui.panel_row >= 0 && ui.panel_row < (int)rows.size()) ui.spot = rows[ui.panel_row].check, ui.panel = false;
+            else if (!ui.panel && ui.spot < 0 && cur >= 0) open_panel(targets[cur].type, targets[cur].id), build_rows();
         } else if (kind == EV_B) {
-            if (ui.panel) ui.panel = false;
+            if (ui.spot >= 0) ui.spot = -1, ui.panel = true;  // (back to the list)
+            else if (ui.panel) ui.panel = false;
             else ui.filter_focus = false;
         } else if (kind == EV_Y) {
-            ui.panel = false;
-            ui.filter_focus = !ui.filter_focus;
+            if (ui.spot < 0 && !ui.panel) ui.filter_focus = !ui.filter_focus;
         }
     }
 
     // ---- the map layer
     dl->PushClipRect(ImVec2(clip.x, clip.y), ImVec2(clip.z, clip.w), true);
     int hover = -1;
-    float br = 11.5f * u * zs;
     for (size_t i = 0; i < badges.size(); i++) {
         const Badge &b = badges[i];
         ImVec2 p = to_screen(ImVec2(b.x, b.y));
-        int st = b.open ? b.best : ST_DONE;
-        dl->AddCircleFilled(p, br + 2 * u, C_INK);
+        int st = b.best;
+        dl->AddCircleFilled(ImVec2(p.x + 1.5f * u, p.y + 2 * u), br + 2 * u, IM_COL32(40, 25, 5, 90));
+        dl->AddCircleFilled(p, br + 2 * u, P_BROWN);
         dl->AddCircleFilled(p, br, kStCol[st]);
         char txt[8];
         snprintf(txt, sizeof txt, "%d", b.open);
-        float fs = (b.open > 9 ? 14.0f : 16.0f) * u * zs;
+        float fs = (b.open > 9 ? 13.0f : 15.0f) * u * zs;
         ImVec2 ts = text_size(font, fs, txt);
         dl->AddText(font, fs, ImVec2(p.x - ts.x * 0.5f, p.y - ts.y * 0.5f), kStFg[st], txt);
-        if (hypotf(mouse.x - p.x, mouse.y - p.y) < br * 1.3f) hover = (int)i;
+        if (hypotf(mouse.x - p.x, mouse.y - p.y) < br * 1.4f) hover = (int)i;
     }
     for (size_t g = 0; g < g_groups.size(); g++) {
         const Badge &b = dbadges[g];
         ImVec2 p = to_screen(ImVec2(b.x, b.y));
-        float s = 15 * u * zs;
+        float s = 13 * u * zs;
         ImVec2 a(p.x - s, p.y - s), z(p.x + s, p.y + s);
-        dl->AddRectFilled(a, z, C_INK, 5 * u);
-        dl->AddRect(a, z, C_GOLD, 5 * u, 0, 2.2f * u);
+        dl->AddRectFilled(ImVec2(a.x + 1.5f * u, a.y + 2 * u), ImVec2(z.x + 1.5f * u, z.y + 2 * u), IM_COL32(40, 25, 5, 90), 5 * u);
+        dl->AddRectFilled(a, z, P_PARCH_LT, 5 * u);
+        dl->AddRect(a, z, P_BROWN, 5 * u, 0, 2.2f * u);
         const std::string &lab = g_groups[g].label;
         const char *num = lab.size() == 2 && lab[0] == 'D' ? lab.c_str() + 1 : lab.c_str();
-        float fs = 18 * u * zs;
+        float fs = 17 * u * zs;
         ImVec2 ts = text_size(font, fs, num);
-        dl->AddText(font, fs, ImVec2(p.x - ts.x * 0.5f, p.y - ts.y * 0.5f), IM_COL32(0xF6, 0xD4, 0x7E, 255), num);
-        if (b.open) {  // the best open check inside
-            dl->AddCircleFilled(ImVec2(z.x - 1 * u, a.y + 1 * u), 6 * u, C_INK);
-            dl->AddCircleFilled(ImVec2(z.x - 1 * u, a.y + 1 * u), 4.5f * u, kStCol[b.best]);
+        dl->AddText(font, fs, ImVec2(p.x - ts.x * 0.5f, p.y - ts.y * 0.5f), P_INK, num);
+        if (b.open && (!(f & F_IN_LOGIC) || b.best == ST_LOGIC)) {  // the best open check inside
+            dl->AddCircleFilled(ImVec2(z.x - 1 * u, a.y + 1 * u), 5.5f * u, P_BROWN);
+            dl->AddCircleFilled(ImVec2(z.x - 1 * u, a.y + 1 * u), 4 * u, kStCol[b.best]);
         }
         char cnt[16];
         snprintf(cnt, sizeof cnt, "%d/%d", b.done, b.total);
         float cs = 12 * u;
         ImVec2 ct = text_size(font, cs, cnt);
-        ImVec2 ca(p.x - ct.x * 0.5f - 4 * u, z.y + 1 * u);
-        dl->AddRectFilled(ca, ImVec2(ca.x + ct.x + 8 * u, ca.y + ct.y + 1 * u), C_BG, ct.y);
-        dl->AddText(font, cs, ImVec2(ca.x + 4 * u, ca.y), C_TEXT, cnt);
+        ImVec2 ca(p.x - ct.x * 0.5f - 4 * u, z.y + 1.5f * u);
+        dl->AddRectFilled(ca, ImVec2(ca.x + ct.x + 8 * u, ca.y + ct.y + 1 * u), P_PARCH_LT, ct.y);
+        dl->AddRect(ca, ImVec2(ca.x + ct.x + 8 * u, ca.y + ct.y + 1 * u), P_LINE, ct.y, 0, 1 * u);
+        dl->AddText(font, cs, ImVec2(ca.x + 4 * u, ca.y), P_INK, cnt);
         if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) hover = (int)(badges.size() + g);
     }
-    if (cur >= 0 && !ui.filter_focus) {  // the cursor
+    if (cur >= 0 && !ui.filter_focus && ui.spot < 0) {  // the cursor
         ImVec2 p = to_screen(ImVec2(targets[cur].x, targets[cur].y));
+        float pulse = 1.0f + 0.12f * sinf((float)now * 0.12f);
         if (targets[cur].type == 0) {
-            dl->AddCircle(p, br + 5.5f * u, C_INK, 0, 5 * u);
-            dl->AddCircle(p, br + 5.5f * u, IM_COL32(255, 255, 255, 255), 0, 3 * u);
+            dl->AddCircle(p, (br + 6 * u) * pulse, P_BROWN, 0, 5 * u);
+            dl->AddCircle(p, (br + 6 * u) * pulse, IM_COL32(0xFF, 0xE0, 0x6A, 255), 0, 3 * u);
         } else {
-            float s = 15 * u * zs + 5 * u;
-            dl->AddRect(ImVec2(p.x - s, p.y - s), ImVec2(p.x + s, p.y + s), IM_COL32(255, 255, 255, 255), 7 * u, 0, 3 * u);
+            float s = (13 * u * zs + 6 * u) * pulse;
+            dl->AddRect(ImVec2(p.x - s, p.y - s), ImVec2(p.x + s, p.y + s), P_BROWN, 7 * u, 0, 5 * u);
+            dl->AddRect(ImVec2(p.x - s, p.y - s), ImVec2(p.x + s, p.y + s), IM_COL32(0xFF, 0xE0, 0x6A, 255), 7 * u, 0, 3 * u);
         }
+    }
+    if (ui.spot >= 0) {  // A in the list: that check's spot (its screen; a dungeon check: the dungeon's door)
+        const Check &c = g_checks[ui.spot];
+        ImVec2 p = to_screen(c.group >= 0 && c.group < (int)g_groups.size() ? ui_pt(g_groups[c.group].x, g_groups[c.group].y)
+                                                                              : ui_pt(c.x, c.y));
+        float rr = (16 + 4 * sinf((float)now * 0.15f)) * u * zs;
+        dl->AddCircle(p, rr, P_BROWN, 0, 6 * u);
+        dl->AddCircle(p, rr, IM_COL32(0xFF, 0xE0, 0x6A, 255), 0, 3.5f * u);
+        dl->AddCircleFilled(p, 4 * u, kStCol[g_status[ui.spot]]);
     }
     dl->PopClipRect();
     bool mouse_on_ui = false;
-    if (!ui.panel && hover >= 0 && mouse.x >= clip.x && mouse.x <= clip.z && mouse.y >= clip.y && mouse.y <= clip.w) {
+    if (!ui.panel && ui.spot < 0 && hover >= 0 && mouse.x >= clip.x && mouse.x <= clip.z && mouse.y >= clip.y && mouse.y <= clip.w) {
         mouse_on_ui = true;  // hovering moves the cursor (when the mouse moved), a click opens
         if (mouse_moved || click) cur = hover, ui.sel_type = targets[hover].type, ui.sel_id = targets[hover].id, ui.filter_focus = false;
-        if (click) open_panel(targets[hover].type, targets[hover].id), click = false;
+        if (click) open_panel(targets[hover].type, targets[hover].id), build_rows(), click = false;
     }
 
-    // ---- the filter bar
-    {
-        ImVec4 bar(chips.front().r.x - 8 * u, chips.front().r.y - 4 * u, chips.back().r.z + 8 * u, chips.front().r.w + 4 * u);
-        dl->AddRectFilled(ImVec2(bar.x, bar.y), ImVec2(bar.z, bar.w), C_BG, 10 * u);
-        for (size_t i = 0; i < chips.size(); i++) {
-            const Chip &c = chips[i];
-            bool on = f & c.bit, sw = i < 2;
-            ImVec2 a(c.r.x, c.r.y), z(c.r.z, c.r.w);
-            float rr = (c.r.w - c.r.y) * 0.5f;
-            if (on) dl->AddRectFilled(a, z, sw ? IM_COL32(0x3A, 0x30, 0x18, 255) : IM_COL32(0x1E, 0x3A, 0x47, 255), rr);
-            dl->AddRect(a, z, on ? (sw ? C_GOLD : IM_COL32(0x4E, 0x6D, 0x79, 255)) : IM_COL32(0x3A, 0x56, 0x62, 255), rr, 0, 1.2f * u);
-            float fs = 14 * u;
-            ImVec2 ts = text_size(font, fs, c.label.c_str());
-            dl->AddText(font, fs, ImVec2(a.x + 10 * u, a.y + (c.r.w - c.r.y - ts.y) * 0.5f),
-                        on ? (sw ? IM_COL32(0xF6, 0xD4, 0x7E, 255) : C_TEXT) : IM_COL32(0x9A, 0xA8, 0xAD, 255), c.label.c_str());
-            if (ui.filter_focus && (int)i == ui.chip)
-                dl->AddRect(ImVec2(a.x - 3 * u, a.y - 3 * u), ImVec2(z.x + 3 * u, z.y + 3 * u), IM_COL32(255, 255, 255, 255), rr + 3 * u, 0, 2.5f * u);
-            if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) {
-                mouse_on_ui = true;
-                if (click) set_filters(f ^ c.bit), f = filters(), click = false;
+    // ---- counts: the cursor's target and the whole seed (the kinds shown)
+    int n_sel[4] = {0, 0, 0, 0}, n_sel_all = 0;
+    std::string sel_name;
+    if (cur >= 0) {
+        const std::vector<int> *list = panel_list(targets[cur].type, targets[cur].id);
+        if (list) for (int i : *list) n_sel[g_status[i]]++, n_sel_all++;
+        sel_name = title_of(targets[cur].type, targets[cur].id);
+    }
+    if (ui.spot >= 0) sel_name = pretty(g_checks[ui.spot].name), n_sel_all = 0;
+    int run_logic = 0, run_done = 0, run_all = 0;
+    for (size_t i = 0; i < g_checks.size(); i++) {
+        if (!(f >> g_checks[i].kind & 1)) continue;
+        run_all++;
+        run_done += g_status[i] == ST_DONE;
+        run_logic += g_status[i] == ST_LOGIC;
+    }
+    int tri_have = 0, tri_need = 0;
+    bool tri = triforce_counts(&tri_have, &tri_need);
+    bool side = tracker_layout_side();
+    float pfs = 19 * u;  // (the game's button prompts' size)
+
+    // one filter row: a check box and its label (game-styled, on parchment); mouse toggles
+    auto filter_row = [&](size_t i, ImVec2 a, float w, float h, float fs) {
+        const Chip &c = chips[i];
+        bool on = f & c.bit, focus = ui.filter_focus && (int)i == ui.chip;
+        ImVec2 z(a.x + w, a.y + h);
+        if (focus) {
+            dl->AddRectFilled(a, z, P_PARCH_DK, 5 * u);
+            dl->AddRect(a, z, P_GOLD, 5 * u, 0, 2 * u);
+        }
+        float bx = a.x + 8 * u, by = a.y + h * 0.5f, bs = h * 0.28f;
+        dl->AddRectFilled(ImVec2(bx, by - bs), ImVec2(bx + 2 * bs, by + bs), P_PARCH_LT, 2 * u);
+        dl->AddRect(ImVec2(bx, by - bs), ImVec2(bx + 2 * bs, by + bs), P_BROWN, 2 * u, 0, 1.5f * u);
+        if (on) {  // a tick
+            dl->AddLine(ImVec2(bx + bs * 0.4f, by), ImVec2(bx + bs * 0.9f, by + bs * 0.6f), P_GREEN, 2.4f * u);
+            dl->AddLine(ImVec2(bx + bs * 0.9f, by + bs * 0.6f), ImVec2(bx + bs * 1.7f, by - bs * 0.7f), P_GREEN, 2.4f * u);
+        }
+        ImVec2 ts = text_size(font, fs, c.label.c_str());
+        dl->AddText(font, fs, ImVec2(bx + 2 * bs + 8 * u, by - ts.y * 0.5f), P_INK, c.label.c_str());
+        if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) {
+            mouse_on_ui = true;
+            if (mouse_moved && ui.filter_focus) ui.chip = (int)i;
+            if (click) set_filters(f ^ c.bit), f = filters(), click = false;
+        }
+    };
+    const char *filter_word = (f & F_IN_LOGIC) ? "In logic now" : (f & F_HIDE_DONE) ? "Hide checked" : "Everything";
+
+    if (!side) {
+        // ---- variant "bottom": one line where the game's own button prompts were (L_Operation_00, hidden): the
+        // cursor's screen and the run's totals on the left, the prompts on the right; Y opens a filter panel
+        float y = oy + 668 * u;
+        std::vector<std::pair<const char *, std::string>> pr;
+        if (ui.panel) pr = {};
+        else if (ui.spot >= 0) pr = {{"B", "Back to the list"}};
+        else if (ui.filter_focus) pr = {{"A", "Toggle"}, {"Y", "Close"}};
+        else pr = {{"Y", std::string("Filter: ") + filter_word}, {"A", "Open"}, {"ZR", "Game map"}};
+        float pw = 0;
+        for (auto &p : pr) pw += prompt_width(font, pfs, p.first, p.second.c_str()) + 22 * u;
+        float px = ox + 1226 * u - pw;
+        for (auto &p : pr) px += draw_prompt(dl, font, pfs, ImVec2(px, y), p.first, p.second.c_str(), u) + 22 * u;
+        char info[200];
+        int k = 0;
+        if (ui.spot >= 0) {
+            int st = g_status[ui.spot];
+            std::string t = st == ST_LOGIC ? "in logic" : st == ST_TRICK ? "trick logic" : st == ST_NEEDS ? needs_text(ui.spot) : "collected";
+            k = snprintf(info, sizeof info, "%s   %s     ", sel_name.c_str(), t.c_str());
+        } else if (!sel_name.empty() && !ui.panel) {
+            k = snprintf(info, sizeof info, "%s   %d in logic", sel_name.c_str(), n_sel[ST_LOGIC]);
+            if (n_sel[ST_TRICK] && k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d trick", n_sel[ST_TRICK]);
+            if (n_sel[ST_NEEDS] && k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d need an item", n_sel[ST_NEEDS]);
+            if (k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, ", %d/%d     ", n_sel[ST_DONE], n_sel_all);
+        }
+        if (k < (int)sizeof info) k += snprintf(info + k, sizeof info - k, "All: %d in logic, %d/%d", run_logic, run_done, run_all);
+        if (tri && k < (int)sizeof info) snprintf(info + k, sizeof info - k, ", Triforce %d/%d", tri_have, tri_need);
+        float x0 = ox + 64 * u, room = px - pw - x0 - 24 * u;
+        (void)room;
+        dl->PushClipRect(ImVec2(x0, y - 4 * u), ImVec2(ox + 1226 * u - pw - 16 * u, y + 40 * u), true);
+        shadow_text(dl, font, pfs * 0.92f, ImVec2(x0, y + pfs * 0.04f), info, u);
+        dl->PopClipRect();
+        if (ui.filter_focus) {  // the filter panel, over the map
+            float w = 300 * u, rh = 30 * u, h = 56 * u + rh * chips.size() + 14 * u;
+            ImVec2 a(ox + 640 * u - w * 0.5f, oy + 380 * u - h * 0.5f), z(a.x + w, a.y + h);
+            parchment(dl, a, z, u);
+            if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) mouse_on_ui = true;
+            dl->AddText(font, 24 * u, ImVec2(a.x + 20 * u, a.y + 14 * u), P_INK, "Filters");
+            for (size_t i = 0; i < chips.size(); i++) {
+                if (i == 2) dl->AddLine(ImVec2(a.x + 18 * u, a.y + 52 * u + rh * 2 + 0.5f), ImVec2(z.x - 18 * u, a.y + 52 * u + rh * 2 + 0.5f), P_LINE, 1.2f * u);
+                filter_row(i, ImVec2(a.x + 12 * u, a.y + 52 * u + rh * i + (i >= 2 ? 6 * u : 0)), w - 24 * u, rh - 2 * u, 18 * u);
             }
+            if (click && !mouse_on_ui) ui.filter_focus = false;
         }
+    } else {
+        // ---- variant "side": a slim panel beside the parchment (left of it; outside the 16:9 box when the window is
+        // wider): the filters, the cursor's screen, the run's totals. Prompts in the game's row
+        bool wide = ox > 236 * u;
+        ImVec2 a = wide ? ImVec2(ox - 226 * u, oy + 122 * u) : ImVec2(ox + 8 * u, oy + 122 * u);
+        ImVec2 z = wide ? ImVec2(ox - 12 * u, oy + 632 * u) : ImVec2(ox + 180 * u, oy + 632 * u);
+        float w = z.x - a.x, fs = (wide ? 16.0f : 14.0f) * u, rh = (wide ? 24.0f : 21.0f) * u;
+        parchment(dl, a, z, u);
+        if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y) mouse_on_ui = true;
+        float x = a.x + 12 * u, y = a.y + 10 * u;
+        dl->AddText(font, fs * 1.2f, ImVec2(x, y), P_INK, "Filters");
+        y += fs * 1.2f + 8 * u;
+        for (size_t i = 0; i < chips.size(); i++) {
+            if (i == 2) { dl->AddLine(ImVec2(x, y + 3 * u), ImVec2(z.x - 12 * u, y + 3 * u), P_LINE, 1.2f * u); y += 7 * u; }
+            filter_row(i, ImVec2(a.x + 4 * u, y), w - 8 * u, rh - 1 * u, fs);
+            y += rh;
+        }
+        y += 6 * u;
+        dl->AddLine(ImVec2(x, y), ImVec2(z.x - 12 * u, y), P_LINE, 1.2f * u);
+        y += 8 * u;
+        auto line = [&](const char *t, ImU32 col, float s) {
+            dl->PushClipRect(ImVec2(a.x, a.y), ImVec2(z.x - 8 * u, z.y), true);
+            dl->AddText(font, s, ImVec2(x, y), col, t);
+            dl->PopClipRect();
+            y += s + 4 * u;
+        };
+        char b[96];
+        if (!sel_name.empty()) {
+            line(sel_name.c_str(), P_INK, fs * 1.1f);
+            snprintf(b, sizeof b, "%d in logic", n_sel[ST_LOGIC]);
+            line(b, P_GREEN, fs);
+            if (n_sel[ST_TRICK]) { snprintf(b, sizeof b, "%d trick logic", n_sel[ST_TRICK]); line(b, P_PURPLE, fs); }
+            if (n_sel[ST_NEEDS]) { snprintf(b, sizeof b, "%d need an item", n_sel[ST_NEEDS]); line(b, P_AMBER, fs); }
+            snprintf(b, sizeof b, "%d/%d collected", n_sel[ST_DONE], n_sel_all);
+            line(b, P_INK_DIM, fs);
+            y += 4 * u;
+            dl->AddLine(ImVec2(x, y), ImVec2(z.x - 12 * u, y), P_LINE, 1.2f * u);
+            y += 8 * u;
+        }
+        line("All checks", P_INK, fs * 1.1f);
+        snprintf(b, sizeof b, "%d in logic", run_logic);
+        line(b, P_GREEN, fs);
+        snprintf(b, sizeof b, "%d/%d collected", run_done, run_all);
+        line(b, P_INK_DIM, fs);
+        if (tri) { snprintf(b, sizeof b, "Triforce %d/%d", tri_have, tri_need); line(b, P_INK_DIM, fs); }
+        float py = oy + 668 * u;
+        std::vector<std::pair<const char *, const char *>> pr;
+        if (ui.panel) pr = {};
+        else if (ui.spot >= 0) pr = {{"B", "Back to the list"}};
+        else if (ui.filter_focus) pr = {{"A", "Toggle"}, {"Y", "Done"}};
+        else pr = {{"A", "Open"}, {"Y", "Filters"}, {"ZR", "Game map"}, {"B", "Back"}};
+        float pw = 0;
+        for (auto &p : pr) pw += prompt_width(font, pfs, p.first, p.second) + 22 * u;
+        float px = ox + 1226 * u - pw;
+        for (auto &p : pr) px += draw_prompt(dl, font, pfs, ImVec2(px, py), p.first, p.second, u) + 22 * u;
     }
 
-    // ---- the status line under the island: the cursor's screen, and the totals (of the kinds shown)
-    {
-        int open_logic = 0, done = 0, all = 0;
-        for (size_t i = 0; i < g_checks.size(); i++) {
-            if (!(f >> g_checks[i].kind & 1)) continue;
-            all++;
-            done += g_status[i] == ST_DONE;
-            open_logic += g_status[i] == ST_LOGIC;
-        }
-        std::string line;
-        if (cur >= 0 && !ui.panel && !ui.filter_focus) {
-            const std::vector<int> *list = panel_list(targets[cur].type, targets[cur].id);
-            int n[4] = {0, 0, 0, 0};
-            if (list) for (int i : *list) n[g_status[i]]++;
-            int tot = list ? (int)list->size() : 0;
-            std::string t = targets[cur].type == 0 ? (list ? screen_title(*list) : "") : dungeon_name(g_groups[targets[cur].id].label);
-            char b[200];
-            int k = snprintf(b, sizeof b, "%s   %d in logic", t.c_str(), n[ST_LOGIC]);
-            if (n[ST_TRICK]) k += snprintf(b + k, sizeof b - k, "  %d trick", n[ST_TRICK]);
-            if (n[ST_NEEDS] && k < (int)sizeof b) k += snprintf(b + k, sizeof b - k, "  %d need an item", n[ST_NEEDS]);
-            if (k < (int)sizeof b) snprintf(b + k, sizeof b - k, "   %d/%d collected", n[ST_DONE], tot);
-            line = b;
-        }
-        char tot[96];
-        int th, tn;
-        if (triforce_counts(&th, &tn)) snprintf(tot, sizeof tot, "In logic %d   Collected %d/%d   Triforce %d/%d", open_logic, done, all, th, tn);
-        else snprintf(tot, sizeof tot, "In logic %d   Collected %d/%d", open_logic, done, all);
-        float fs = 16 * u, y = oy + 646 * u;
-        ImVec2 tl = text_size(font, fs, line.empty() ? "X" : line.c_str()), tt = text_size(font, fs, tot);
-        float x0 = ox + 186 * u, x1 = ox + 1096 * u;
-        dl->AddRectFilled(ImVec2(x0 - 8 * u, y - 4 * u), ImVec2(x1 + 8 * u, y + tl.y + 4 * u), C_BG, 8 * u);
-        dl->AddText(font, fs, ImVec2(x0, y), C_TEXT, line.c_str());
-        dl->AddText(font, fs, ImVec2(x1 - tt.x, y), C_DIM, tot);
-    }
-
-    // ---- the screen panel: right half of the map window, over the game's side panel
+    // ---- the area panel (one list by status): parchment, gold border, brown ink, centred over the dimmed map
     if (ui.panel) {
-        const std::vector<int> *list = panel_list(ui.panel_type, ui.panel_id);
-        if (!list) ui.panel = false;
+        if (rows.empty() && !panel_list(ui.panel_type, ui.panel_id)) ui.panel = false;
         else {
-            std::vector<Row> rows;
-            for (int i : *list) rows.push_back({i, g_status[i]});
-            std::stable_sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
-                return a.st != b.st ? a.st < b.st : g_checks[a.check].name < g_checks[b.check].name;
-            });
             int done = 0;
             for (auto &r : rows) done += r.st == ST_DONE;
-            std::string title = ui.panel_type == 0 ? screen_title(*list) : std::string(dungeon_name(g_groups[ui.panel_id].label)) +
-                                                                                " (" + g_groups[ui.panel_id].label + ")";
-            char sub[64];
+            std::string title = title_of(ui.panel_type, ui.panel_id);
+            char sub[64], filt[64];
             snprintf(sub, sizeof sub, "%d / %d collected", done, (int)rows.size());
+            snprintf(filt, sizeof filt, "Filter: %s", filter_word);
             ui.panel_row = std::max(0, std::min(ui.panel_row, (int)rows.size() - 1));
-            ImVec4 pr = R(640, 116, 1218, 636);
-            dl->AddRectFilled(ImVec2(pr.x, pr.y), ImVec2(pr.z, pr.w), C_BG, 12 * u);
-            dl->AddRect(ImVec2(pr.x, pr.y), ImVec2(pr.z, pr.w), C_LINE, 12 * u, 0, 1.5f * u);
-            bool in_panel = mouse.x >= pr.x && mouse.x <= pr.z && mouse.y >= pr.y && mouse.y <= pr.w;
-            float x = pr.x + 22 * u, y = pr.y + 16 * u;
-            float fs_t = 28 * u, fs_s = 17 * u, fs_r = 17 * u, fs_k = 13 * u;
-            dl->AddText(font, fs_t, ImVec2(x, y), C_TEXT, title.c_str());
+            dl->AddRectFilled(ImVec2(clip.x, clip.y), ImVec2(clip.z, clip.w), IM_COL32(40, 25, 5, 110));  // (the map, dimmed)
+            ImVec2 a(ox + 260 * u, oy + 120 * u), z(ox + 1020 * u, oy + 636 * u);
+            dl->AddRectFilled(ImVec2(a.x + 4 * u, a.y + 6 * u), ImVec2(z.x + 4 * u, z.y + 6 * u), IM_COL32(0, 0, 0, 80), 16 * u);
+            dl->AddRectFilled(ImVec2(a.x - 3 * u, a.y - 3 * u), ImVec2(z.x + 3 * u, z.y + 3 * u), IM_COL32(0x4A, 0x30, 0x20, 255), 18 * u);
+            dl->AddRectFilled(a, z, IM_COL32(0xF3, 0xE6, 0xC6, 255), 16 * u);
+            dl->AddRect(a, z, IM_COL32(0xC8, 0x9B, 0x3C, 255), 16 * u, 0, 4 * u);
+            bool in_panel = mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y;
+            float x = a.x + 34 * u, y = a.y + 22 * u;
+            float fs_t = 32 * u, fs_s = 18 * u, fs_r = 17 * u, fs_w = 14 * u, fs_k = 13 * u;
+            ImU32 ink = IM_COL32(0x3B, 0x26, 0x14, 255), ink2 = IM_COL32(0x6B, 0x4E, 0x2E, 255), gold = IM_COL32(0xC8, 0x9B, 0x3C, 255);
+            dl->AddText(font, fs_t, ImVec2(x, y), ink, title.c_str());
             ImVec2 tt = text_size(font, fs_t, title.c_str());
-            dl->AddText(font, fs_s, ImVec2(x + tt.x + 14 * u, y + tt.y - text_size(font, fs_s, sub).y - 3 * u), C_DIM, sub);
-            y += tt.y + 12 * u;
-            float rh = 34 * u, top = y, bottom = pr.w - 40 * u;
+            float base = y + tt.y * 0.78f;
+            dl->AddText(font, fs_s, ImVec2(x + tt.x + 14 * u, base - text_size(font, fs_s, sub).y * 0.78f), ink2, sub);
+            ImVec2 ft = text_size(font, fs_w, filt);
+            dl->AddText(font, fs_w, ImVec2(z.x - 34 * u - ft.x, base - ft.y * 0.78f), ink2, filt);
+            y += tt.y + 10 * u;
+            dl->AddRectFilled(ImVec2(x, y), ImVec2(z.x - 34 * u, y + 2 * u), gold);
+            y += 12 * u;
+            float rh = 38 * u, top = y, bottom = z.y - 52 * u;
             int vis = std::max(1, (int)((bottom - top) / rh));
             if (ui.panel_row < (int)ui.panel_scroll) ui.panel_scroll = (float)ui.panel_row;
             if (ui.panel_row >= (int)ui.panel_scroll + vis) ui.panel_scroll = (float)(ui.panel_row - vis + 1);
             if (in_panel && io.MouseWheel != 0)
                 ui.panel_scroll = std::max(0.0f, std::min((float)std::max(0, (int)rows.size() - vis), ui.panel_scroll - io.MouseWheel));
-            dl->PushClipRect(ImVec2(pr.x, top), ImVec2(pr.z, bottom), true);
+            static const ImU32 dot[4] = {IM_COL32(0x2E, 0x9B, 0x5F, 255), IM_COL32(0x7E, 0x5F, 0xD0, 255), IM_COL32(0xD9, 0x82, 0x1F, 255),
+                                         IM_COL32(0x9A, 0x8A, 0x72, 255)};
+            dl->PushClipRect(ImVec2(a.x, top - 4 * u), ImVec2(z.x, bottom), true);
             for (int i = (int)ui.panel_scroll; i < (int)rows.size() && i < (int)ui.panel_scroll + vis + 1; i++) {
                 const Row &r = rows[i];
                 const Check &c = g_checks[r.check];
                 float ry = top + (i - ui.panel_scroll) * rh;
-                ImVec2 a(pr.x + 12 * u, ry), z(pr.z - 12 * u, ry + rh - 4 * u);
-                bool selr = i == ui.panel_row;
-                dl->AddRectFilled(a, z, selr ? IM_COL32(0x1E, 0x3A, 0x47, 255) : C_CARD, 8 * u);
-                if (selr) dl->AddRect(a, z, C_GOLD, 8 * u, 0, 1.5f * u);
-                if (mouse.x >= a.x && mouse.x <= z.x && mouse.y >= a.y && mouse.y <= z.y && mouse_moved) ui.panel_row = i;
-                float cy = (a.y + z.y) * 0.5f;
-                dl->AddCircleFilled(ImVec2(a.x + 16 * u, cy), 6 * u, kStCol[r.st]);
+                ImVec2 ra(x - 6 * u, ry), rz(z.x - 28 * u, ry + rh - 6 * u);
+                bool sel = i == ui.panel_row;
+                dl->AddRectFilled(ra, rz, sel ? IM_COL32(0xFF, 0xF6, 0xDD, 255) : IM_COL32(0xEA, 0xD9, 0xB0, 255), 10 * u);
+                if (sel) dl->AddRect(ra, rz, IM_COL32(0x4A, 0x30, 0x20, 255), 10 * u, 0, 3 * u);
+                if (mouse.x >= ra.x && mouse.x <= rz.x && mouse.y >= ra.y && mouse.y <= rz.y) {
+                    if (mouse_moved) ui.panel_row = i;
+                    if (click) ui.panel_row = i, ui.spot = r.check, ui.panel = false, click = false;
+                }
+                float cy = (ra.y + rz.y) * 0.5f;
+                dl->AddCircleFilled(ImVec2(ra.x + 20 * u, cy), 7 * u, dot[r.st]);
                 std::string nm = pretty(c.name);
-                ImVec2 ns = text_size(font, fs_r, nm.c_str());
-                ImU32 ncol = r.st == ST_DONE ? IM_COL32(0x8C, 0x98, 0x9D, 255) : C_TEXT;
-                dl->AddText(font, fs_r, ImVec2(a.x + 30 * u, cy - ns.y * 0.5f), ncol, nm.c_str());
-                if (r.st == ST_DONE)  // (struck out)
-                    dl->AddLine(ImVec2(a.x + 30 * u, cy + 1 * u), ImVec2(a.x + 30 * u + ns.x, cy + 1 * u), ncol, 1.5f * u);
-                float kx = a.x + 30 * u + ns.x + 12 * u;
-                dl->AddText(font, fs_k, ImVec2(kx, cy - text_size(font, fs_k, "X").y * 0.5f), IM_COL32(0x9A, 0xA8, 0xAD, 255), kind_one(c.kind));
+                ImU32 ncol = r.st == ST_DONE ? IM_COL32(0x8C, 0x7B, 0x62, 255) : ink;
+                std::string where = !c.dcell.empty() ? "Room " + c.dcell : c.area.empty() ? "" : area_name(c.area);
                 std::string tag = r.st == ST_TRICK ? "trick logic" : r.st == ST_NEEDS ? needs_text(r.check) : "";
+                ImVec2 tg = tag.empty() ? ImVec2(0, 0) : text_size(font, fs_k, tag.c_str());
+                float tag_w = tag.empty() ? 0 : std::min(tg.x + 20 * u, 230 * u);
+                float wx = rz.x - 14 * u - tag_w - (tag_w > 0 ? 12 * u : 0) - 160 * u;  // the spot column
+                dl->PushClipRect(ImVec2(ra.x, ra.y), ImVec2(wx - 10 * u, rz.y), true);
+                ImVec2 ns = text_size(font, fs_r, nm.c_str());
+                dl->AddText(font, fs_r, ImVec2(ra.x + 36 * u, cy - ns.y * 0.5f), ncol, nm.c_str());
+                if (r.st == ST_DONE) dl->AddLine(ImVec2(ra.x + 36 * u, cy + 1 * u), ImVec2(ra.x + 36 * u + ns.x, cy + 1 * u), ncol, 1.6f * u);
+                dl->PopClipRect();
+                dl->PushClipRect(ImVec2(wx, ra.y), ImVec2(wx + 156 * u, rz.y), true);
+                dl->AddText(font, fs_w, ImVec2(wx, cy - text_size(font, fs_w, "X").y * 0.5f), ink2, where.c_str());
+                dl->PopClipRect();
                 if (!tag.empty()) {
-                    ImVec2 ts = text_size(font, fs_k, tag.c_str());
-                    float maxw = (z.x - a.x) * 0.5f;
-                    while (ts.x > maxw && tag.size() > 8) tag = tag.substr(0, tag.size() - 4) + "...", ts = text_size(font, fs_k, tag.c_str());
-                    ImVec2 ta(z.x - ts.x - 22 * u, cy - ts.y * 0.5f - 3 * u), tz(z.x - 8 * u, cy + ts.y * 0.5f + 3 * u);
-                    dl->AddRectFilled(ta, tz, r.st == ST_TRICK ? IM_COL32(0x2A, 0x21, 0x42, 255) : IM_COL32(0x3A, 0x2C, 0x14, 255), ts.y);
-                    dl->AddText(font, fs_k, ImVec2(ta.x + 7 * u, ta.y + 3 * u),
-                                r.st == ST_TRICK ? IM_COL32(0xCD, 0xBD, 0xF7, 255) : IM_COL32(0xF6, 0xC7, 0x7A, 255), tag.c_str());
+                    while (tg.x + 20 * u > tag_w && tag.size() > 8) tag = tag.substr(0, tag.size() - 4) + "...", tg = text_size(font, fs_k, tag.c_str());
+                    ImVec2 ta(rz.x - 14 * u - tag_w, cy - tg.y * 0.5f - 3 * u), tz(rz.x - 14 * u, cy + tg.y * 0.5f + 3 * u);
+                    bool tr = r.st == ST_TRICK;
+                    dl->AddRectFilled(ta, tz, tr ? IM_COL32(0xDE, 0xD3, 0xF4, 255) : IM_COL32(0xF2, 0xD2, 0x9B, 255), tz.y - ta.y);
+                    dl->AddText(font, fs_k, ImVec2(ta.x + 10 * u, ta.y + 3 * u), tr ? IM_COL32(0x3E, 0x28, 0x7E, 255) : IM_COL32(0x6A, 0x3C, 0x05, 255),
+                                tag.c_str());
                 }
             }
             dl->PopClipRect();
+            const char *foot = "Up / Down  choose      A  show on map      B  back";
+            dl->AddText(font, 16 * u, ImVec2(x, z.y - 36 * u), IM_COL32(0x4A, 0x30, 0x20, 255), foot);
             if ((click && !in_panel) || rclick) ui.panel = false;
         }
-    } else if (rclick && ui.filter_focus) ui.filter_focus = false;
-    {  // the button hints, where the game's own bar was (L_Operation_00, hidden)
-        const char *hint = ui.panel ? "Up / Down  scroll     B  back"
-                         : ui.filter_focus ? "Left / Right  choose     A  toggle     B  back"
-                                           : "A  open     Y  filters     R stick  zoom     ZR  game map     B  back";
-        float fs = 20 * u;
-        ImVec2 ts = text_size(font, fs, hint);
-        ImVec2 a(ox + 1222 * u - ts.x, oy + 676 * u);
-        dl->AddRectFilled(ImVec2(a.x - 12 * u, a.y - 5 * u), ImVec2(a.x + ts.x + 12 * u, a.y + ts.y + 5 * u), C_BG, 10 * u);
-        dl->AddText(font, fs, a, C_TEXT, hint);
-    }
+    } else if (rclick && ui.spot >= 0) ui.spot = -1, ui.panel = true;
+    else if (rclick && ui.filter_focus) ui.filter_focus = false;
     (void)mouse_on_ui;
-    g_panel_open = ui.panel;
+    g_panel_open = ui.panel || ui.spot >= 0;  // (B is ours while the list or a shown spot is up)
     g_filter_open = ui.filter_focus;
 }
