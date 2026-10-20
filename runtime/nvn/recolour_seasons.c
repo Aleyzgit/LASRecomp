@@ -13,7 +13,7 @@
 #include "../settings.h"
 #include "recolour.h"
 
-enum { S_TREE = 16, S_PALM, S_BUSH, S_GRASS, S_SAND, S_BEACH };  // (S_BEACH: the pale beach sand)
+enum { S_TREE = 16, S_PALM, S_BUSH, S_GRASS, S_SAND, S_BEACH, S_MYST };  // (S_BEACH: the pale beach sand)
 
 static bool ends_alb(const char *t) { size_t n = strlen(t); return n > 4 && !strcmp(t + n - 4, "_alb"); }
 static bool pre(const char *t, const char *p) { return !strncmp(t, p, strlen(p)); }
@@ -21,7 +21,9 @@ static bool pre(const char *t, const char *p) { return !strncmp(t, p, strlen(p))
 static int field(int source, const char *t) {  // Field.bntx (the overworld's textures) and the foliage actors
     (void)source;
     if (!ends_alb(t)) return 0;
-    if (pre(t, "MI_Tree_01_") || pre(t, "MI_RiverTree_02_") || pre(t, "MI_MysteriousTree_01_") || pre(t, "MI_Leaf_01_") ||
+    // the Mysterious Woods' trees (olive, ~50 degrees: outside the greens' range): the whole canopy map moves
+    if (pre(t, "MI_MysteriousTree_01_")) return S_MYST;
+    if (pre(t, "MI_Tree_01_") || pre(t, "MI_RiverTree_02_") || pre(t, "MI_Leaf_01_") ||
         pre(t, "MI_d2_2d_ha_") || pre(t, "MI_TravellersTree_01_") || pre(t, "MI_BdTel"))
         return S_TREE;
     if (pre(t, "MI_PalmTree_02_")) return S_PALM;
@@ -75,6 +77,12 @@ static bool tint(int cls, float t[8]) {
         recolour_pack(t, sh, sf, vf, recolour_deg(h), 0.1f, beach ? 0.05f : 0.12f, 0.35f);
         return true;
     }
+    if (cls == S_MYST) {  // (Leaves; typical: 55, 0.8, 0.45)
+        if (!col_target(&g_settings.leaves, COL_SLOT_LEAVES, &rgb)) return false;
+        col_mapping(55 / 360.0f, 0.8f, 0.45f, rgb, &sh, &sf, &vf);
+        recolour_pack(t, sh, sf, vf, recolour_deg(55), 0.5f, 0.08f, 0.35f);
+        return true;
+    }
     if (cls == S_GRASS) {
         if (!col_target(&g_settings.grass, COL_SLOT_GRASS, &rgb)) return false;
         col_mapping(100 / 360.0f, 0.65f, 0.8f, rgb, &sh, &sf, &vf);
@@ -88,4 +96,4 @@ static bool tint(int cls, float t[8]) {
 }
 
 const RecolourOption g_recolour_seasons = {"leaves / grass / sand", k_sources, (int)(sizeof k_sources / sizeof *k_sources), S_TREE,
-                                           S_BEACH, tint};
+                                           S_MYST, tint};
