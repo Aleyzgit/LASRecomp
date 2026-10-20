@@ -429,7 +429,7 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
     GROW(cur->cbs, cur->ncbs, cur->cap_cbs, 4096);
     CbRec *c = &cur->cbs[cur->ncbs++];
     c->stage = (uint8_t)stage, c->slot = (uint8_t)slot, c->off = (uint32_t)cur->nbytes, c->size = (uint32_t)size;
-    c->used = (uint32_t)(used && used < size ? used : size);
+    c->used = stage >= 2 ? 0 : (uint32_t)(used && used < size ? used : size);  // (stage 2, 3: a texture entry - never compared)
     c->addr = (uint64_t)(uintptr_t)src;
     c->prev_off = c->blend = c->prev2_off = -1;
     c->snap = 0, c->maxd = -1;
@@ -437,6 +437,13 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
     cur->nbytes += (size + 15) & ~15ull;
     d->ncb++;
     return src;
+}
+
+// Texture-pool entries: logged like uniform blocks (stage 2 + the stage, slot i, no bytes compared: used = 0) and
+// read back from the log by a replay, in the draw's bind order after its uniform blocks.
+const void *interp_texentry(int stage, int i, const void *entry, uint32_t size) {
+    const void *r = interp_cbuf(2 + stage, 0, i, entry, size, 0);
+    return r;
 }
 
 // ---- blending
@@ -557,7 +564,7 @@ bool interp_frame_end(bool log_next) {
         for (uint32_t i = 0; i < d->ncb && i < p->ncb; i++) {
             CbRec *cc = &cur->cbs[d->first_cb + i], *pc = &prev->cbs[p->first_cb + i];
             if (cc->stage != pc->stage || cc->slot != pc->slot || cc->size != pc->size) continue;
-            if (!(stages & (cc->stage == 0 ? 1 : 2))) continue;
+            if (cc->stage > 1 || !(stages & (cc->stage == 0 ? 1 : 2))) continue;  // (texture entries are never blended)
             const float *a = (const float *)(prev->bytes + pc->off), *b = (const float *)(cur->bytes + cc->off);
             if (!memcmp(a, b, cc->used)) { cc->maxd = 0; continue; }
             changed++;
@@ -627,7 +634,7 @@ bool interp_frame_end(bool log_next) {
             if (!d->depth_only) continue;
             for (uint32_t i = 0; i < d->ncb; i++) {
                 CbRec *cc = &cur->cbs[d->first_cb + i];
-                if (cc->slot > 1 || cc->prev_off < 0) continue;
+                if (cc->stage > 1 || cc->slot > 1 || cc->prev_off < 0) continue;
                 int k = 0;
                 for (; k < nl; k++) if (lcls[k].slot == cc->slot && lcls[k].size == cc->size) break;
                 if (k == nl) { if (nl == 32) continue; lcls[nl].slot = cc->slot, lcls[nl].size = cc->size, lcls[nl].snap = false; nl++; }
@@ -647,7 +654,7 @@ bool interp_frame_end(bool log_next) {
             DrawRec *d = &cur->draws[j];
             for (uint32_t i = 0; i < d->ncb; i++) {
                 CbRec *cc = &cur->cbs[d->first_cb + i];
-                if (cc->slot > 1 || cc->prev_off < 0) continue;
+                if (cc->stage > 1 || cc->slot > 1 || cc->prev_off < 0) continue;
                 int k = 0;
                 bool light = d->depth_only || cc->stage == 1;
                 if (light) { for (; k < nl; k++) if (lcls[k].slot == cc->slot && lcls[k].size == cc->size) break; light = k < nl; }

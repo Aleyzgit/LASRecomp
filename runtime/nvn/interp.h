@@ -15,6 +15,10 @@ extern bool g_interp_log, g_interp_replaying;
 bool interp_list_submitted(uint64_t handle);  // true for the frame's first list (the backend saves its state then)
 void interp_draw(uint64_t key, bool depth_only);  // depth_only: no colour target (a shadow pass)
 const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t size, uint64_t used);  // used: bytes the shader reads
+// The texture-pool entry a draw's texture i resolves to: logged with the frame (a replay takes the logged one - the
+// pool is the game's memory and it rewrites entries while the replays run; an area's lighting texture swapped under
+// an in-between showed it with the next area's ambient light for one image).
+const void *interp_texentry(int stage, int i, const void *entry, uint32_t size);
 void interp_texture_destroyed(void);  // (render thread, in queue order) a texture went away during the frame
 
 // Objects freed at once by the game's threads (programs, memory pools, samplers): a replay must not run while one goes,

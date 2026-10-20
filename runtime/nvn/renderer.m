@@ -2028,6 +2028,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
         if (i < 64) { tex_wh[stage][i][0] = tex_wh[stage][i][1] = 0; tex_fr[stage][i][0] = tex_fr[stage][i][1] = 1; }
         if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
             NvnTexEntry *e = &((NvnTexEntry *)st.tpool->entries)[tic];
+            if (g_interp_log) e = (NvnTexEntry *)interp_texentry(stage, i, e, sizeof *e);  // (frame interpolation: the frame's entry)
             if (e->tex) tex = sampled_texture(e->tex, &e->view, e->has_view, st_->type);
             else if (e->dead_format) nvn_dead_slot_sampled(e, tic);
             if (e->tex && stage == 1) {
