@@ -3,10 +3,8 @@
 // One run per gameplay session: it starts when gameplay does (a new file or a loaded one) and lasts until the player
 // quits to the start screen or the desktop (a reboot: RT_ON_RESET). Nothing is saved. The clock always runs (it costs
 // nothing); Timer shows it - set before the game starts, the row is greyed out in game - and LiveSplit gets it.
-// Game time: host time between the game thread's frames, except while a level transition is under way - the game
-// manager's flag at +0x510, set from the moment a level jump starts (a door, stairs, a warp...) through the fade-out,
-// the load and the fade-in until Link can move again (found 2026-10-19: 1 for ~105 frames around every door / warp,
-// 0 while playing; also 1 on the title screen and while a save loads). Menus count, ours and the game's.
+// Real time: it never stops - level loads and transitions, the map, the Items page, the game's pause menu and ours all
+// count (user 2026-10-20).
 //   end      the Wind Fish ending: the "Ending" level or the ending movie (runtime/hle/movie.c); the time stays, gold
 //   splits   each instrument obtained (live save +0x556C bits 7-14), then the ending
 #include "../game_addresses.h"
@@ -25,7 +23,6 @@ extern uint64_t renderer_present_count(void);
 
 #define KEYITEMS (GA_LIVE_SAVE + 0x556C)  // key items: bits 7-14 the instruments
 #define INSTRUMENTS(v) ((v) >> 7 & 0xFF)
-#define GM_LEVEL_CHANGE 0x510              // game manager: a level transition is under way
 
 enum { RUN_NONE = 0, RUN_GOING = 1, RUN_DONE = 2 };
 
@@ -62,7 +59,7 @@ void run_timer_livesplit_sync(void (*send)(const char *line, void *ctx), void *c
     send("starttimer", ctx);
     send("initgametime", ctx);
     send(line, ctx);
-    send(g_counting ? "unpausegametime" : "pausegametime", ctx);
+    send("unpausegametime", ctx);
 }
 
 static uint32_t instruments_now(void) { return INSTRUMENTS(LD32(KEYITEMS)); }
@@ -75,7 +72,7 @@ static void start_run(void) {
     livesplit_cmd("starttimer");
     livesplit_cmd("initgametime");
     ls_gametime();
-    livesplit_cmd("pausegametime");
+    livesplit_cmd("unpausegametime");  // (LiveSplit's game time runs with ours: real time, kept in step below)
 }
 
 static void finish_run(const char *why) {
@@ -133,19 +130,9 @@ void run_timer_tick(void) {
         }
         g_inst = inst;
     }
-    uint64_t gm = LD64(GA_GAME_MGR);
-    bool transition = gm && LD32(gm + GM_LEVEL_CHANGE) != 0;
-    bool counting = !transition;
-    if (counting && g_counting) g_us += (dt < 500000000ull ? dt : 500000000ull) / 1000;  // (a stall: at most 0.5 s)
-    if (counting != (bool)g_counting) {
-        g_counting = counting;
-        if (ENV("LARECOMP_TIMER_TRACE"))
-            LOG("[timer] %s at %llu us (level %s)\n", counting ? "counting" : "paused: level transition", (unsigned long long)g_us,
-                game_level_name());
-        ls_gametime();
-        livesplit_cmd(counting ? "unpausegametime" : "pausegametime");
-        g_sync_ns = now;
-    } else if (counting && now - g_sync_ns > 5000000000ull) {  // (keep LiveSplit's game time in step)
+    if (g_counting) g_us += (dt < 10000000000ull ? dt : 10000000000ull) / 1000;  // (at most 10 s a frame: the Mac asleep)
+    g_counting = 1;
+    if (now - g_sync_ns > 5000000000ull) {  // (keep LiveSplit's game time in step)
         ls_gametime();
         g_sync_ns = now;
     }

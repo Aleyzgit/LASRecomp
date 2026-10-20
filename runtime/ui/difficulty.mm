@@ -120,7 +120,7 @@ extern "C" void difficulty_draw(float scale) {
     opt_section("Speedrun");
     if (!g_start_screen) opt_disable_next();  // (one run per session: set before the game starts)
     if (opt_toggle("Timer", &g_settings.timer, false,
-                   g_start_screen ? "A run timer in the corner, from the start of gameplay to the ending. Loading doesn't count."
+                   g_start_screen ? "A run timer in the corner: real time from the start of gameplay to the ending."
                                   : "Set before starting a save."))
         settings_save();
     opt_indent(1);

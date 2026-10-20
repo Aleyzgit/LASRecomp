@@ -24,6 +24,7 @@ extern "C" {
 int game_in_play(void);
 extern int g_start_screen;
 int run_timer_state(uint64_t *us, bool *counting);  // runtime/hle/run_timer.c
+bool inventory_items_page_shown(void);              // inventory_overlay.mm
 int texpatch_ui_rgba_list(const char *const *names, int n, uint8_t **out, int *w, int *h);  // runtime/nvn/texpatch.c
 uint64_t renderer_present_count(void);
 #ifdef __APPLE__
@@ -108,7 +109,7 @@ static void timer_panel(ImDrawList *dl, ImVec2 a, ImVec2 z, float u, bool done) 
 
 extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale) {
     ImDrawList *dl = ImGui::GetBackgroundDrawList();
-    if (g_settings.timer && game_in_play()) {
+    if (g_settings.timer && game_in_play() && !inventory_items_page_shown()) {  // (not over the Items page: it still counts)
         uint64_t us = 0;
         bool counting = false;
         int st = run_timer_state(&us, &counting);
