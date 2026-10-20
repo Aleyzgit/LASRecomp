@@ -211,8 +211,29 @@ static void recompute_pad(void) {
     pad_ry = -SDL_GetGamepadAxis(pad, SDL_GAMEPAD_AXIS_RIGHTY);
 }
 
+// Every press reaches the game, however short. recompute_pad reads the pad as it is now, so a quick tap whose press
+// and release SDL hands over together (a Bluetooth pad's reports often come batched), or that fell between two of the
+// game's polls, never showed: the game's menus took a second press now and then. A press the game hasn't polled yet
+// that is released is still given to the game's next polls (fill_state). UI thread: note_press; game thread: the rest.
+static _Atomic uint64_t press_unseen;  // pressed (events), not yet in a state the game polled
+static _Atomic uint64_t tap_buttons;   // released while unseen: the game's next poll gets them
+static uint64_t pad_bits(int host) {   // the game buttons bound to host button `host` (SDL button / PADB_*TRIGGER)
+    uint64_t b = 0;
+    for (int i = 0; i < BIND_PAD_COUNT; i++)
+        if (g_bind_pad[i] == host) b |= 1ull << i;
+    return b;
+}
+static void note_press(uint64_t down, uint64_t up) {
+    if (down) press_unseen |= down;
+    if (up) {
+        uint64_t u = atomic_fetch_and(&press_unseen, ~up) & up;
+        if (u) tap_buttons |= u;
+    }
+}
+
 // Forget held keys (the menu took focus); the gamepad is re-read on its next event.
 void input_reset(void) {
+    press_unseen = 0, tap_buttons = 0;
     rumble_clear();
     memset(keys_down, 0, sizeof keys_down);
     recompute_keyboard();
@@ -331,11 +352,15 @@ void input_handle_event(const SDL_Event *e) {
         SDL_free(ids);
     }
     switch (e->type) {
-    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP:
+    case SDL_EVENT_KEY_DOWN: case SDL_EVENT_KEY_UP: {
         if (e->type == SDL_EVENT_KEY_DOWN && e->key.scancode == SDL_SCANCODE_F9 && !e->key.repeat) g_debug_frame_request = 1;
         if (e->key.scancode < SDL_SCANCODE_COUNT) keys_down[e->key.scancode] = e->type == SDL_EVENT_KEY_DOWN;
+        uint64_t before = key_buttons;
         recompute_keyboard();
+        uint64_t now = key_buttons;
+        note_press(now & ~before, before & ~now);
         break;
+    }
     case SDL_EVENT_GAMEPAD_ADDED:
         if (!pad) { pad = SDL_OpenGamepad(e->gdevice.which); LOG("[input] gamepad: %s\n", SDL_GetGamepadName(pad)); note_family(); }
         break;
@@ -348,7 +373,25 @@ void input_handle_event(const SDL_Event *e) {
         }
         recompute_pad();
         break;
-    case SDL_EVENT_GAMEPAD_AXIS_MOTION: case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+    case SDL_EVENT_GAMEPAD_BUTTON_DOWN: case SDL_EVENT_GAMEPAD_BUTTON_UP:
+        if (!host_test || e->gbutton.which == TEST_DEVICE) {  // (the press as the event has it, before reading the pad)
+            uint64_t b = pad_bits(e->gbutton.button);
+            note_press(e->gbutton.down ? b : 0, e->gbutton.down ? 0 : b);
+        }
+        recompute_pad();
+        break;
+    case SDL_EVENT_GAMEPAD_AXIS_MOTION:
+        if ((e->gaxis.axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER || e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) &&
+            !host_test) {  // (the triggers as buttons: past half way)
+            static bool trig[2];
+            int t = e->gaxis.axis == SDL_GAMEPAD_AXIS_RIGHT_TRIGGER;
+            bool on = e->gaxis.value > 16000;
+            if (on != trig[t]) {
+                uint64_t b = pad_bits(PADB_LTRIGGER + t);
+                note_press(on ? b : 0, on ? 0 : b);
+                trig[t] = on;
+            }
+        }
         recompute_pad();
         break;
     }
@@ -369,6 +412,7 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 // "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
 //   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
 // "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
+// "frame:resize:<W>x<H>" resizes the window to W x H points (menu_apply_window_requests: the main thread).
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
 //   "wait" lets it time out); "frame:reset:pad|key" resets to the defaults.
@@ -380,9 +424,18 @@ static void push_key(SDL_Scancode sc, SDL_Keymod mod, bool down) {
     e.key.key = SDL_GetKeyFromScancode(sc, mod, false);
     SDL_PushEvent(&e);
 }
+uint32_t g_window_resize_request;  // (W << 16 | H: menu_apply_window_requests applies it)
 static void test_push(uint64_t frame, unsigned long start, unsigned long len, const char *dev, const char *arg) {
     SDL_Event e;
     memset(&e, 0, sizeof e);
+    if (!strcmp(dev, "resize")) {
+        unsigned w = 0, h = 0;
+        if (frame == start && sscanf(arg, "%ux%u", &w, &h) == 2 && w && h && w < 65536 && h < 65536) {
+            LOG("[input] test: window to %ux%u\n", w, h);
+            __atomic_store_n(&g_window_resize_request, w << 16 | h, __ATOMIC_RELAXED);
+        }
+        return;
+    }
     if (!strcmp(dev, "shot")) {
         extern char g_window_shot_request[256];  // runtime/hle/hookshot.c
         if (frame == start) snprintf(g_window_shot_request, sizeof g_window_shot_request, "build/%s.png", arg);
@@ -441,7 +494,8 @@ static void host_test_frame(uint64_t frame) {
             unsigned long start = 0, len = 10;
             char dev[8] = "", name[400] = "";
             if (sscanf(tok, "%lu:%7[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
-            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot")) {
+            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot") ||
+                !strcmp(dev, "resize")) {
                 test_push(frame, start, len, dev, name);
                 continue;
             }
@@ -586,6 +640,8 @@ static void fill_state(Cpu *c) {
       shell_spots_tick(c, renderer_present_count());
       extern void qol_tick(void);
       qol_tick();
+      extern void run_timer_tick(void);
+      run_timer_tick();  // (run timer / LiveSplit: runtime/hle/run_timer.c)
       extern void pets_game_tick(Cpu *c);
       pets_game_tick(c); }
     extern uint64_t g_watch_lo, g_watch_hi;
@@ -598,7 +654,18 @@ static void fill_state(Cpu *c) {
         LOG("[input] watching controller object %llx\n", c->x[1] - 8);
     }
     bool menu = menu_input_captured();  // the overlay menu / name entry has the controls (typing there isn't for the game)
-    uint64_t b = menu ? script_buttons : key_buttons | pad_buttons | script_buttons;
+    uint64_t held = key_buttons | pad_buttons;
+    atomic_fetch_and(&press_unseen, ~held);  // (the game sees these now)
+    static uint64_t tap, tap_frame;  // (pressed and released since the last poll: held for the rest of this frame)
+    {
+        extern uint64_t renderer_present_count(void);
+        uint64_t t = atomic_exchange(&tap_buttons, 0), f = renderer_present_count();
+        if (t) {
+            tap |= t, tap_frame = f;
+            if (getenv("LARECOMP_INPUT")) LOG("[input] short press %#llx\n", (unsigned long long)t);
+        } else if (f > tap_frame) tap = 0;
+    }
+    uint64_t b = menu ? script_buttons : held | tap | script_buttons;
     {   // injected Plus: held for ~10 presented frames (the game polls several times per frame)
         extern uint64_t renderer_present_count(void);
         static uint64_t until;
@@ -647,6 +714,10 @@ static void fill_state(Cpu *c) {
         extern uint64_t pets_menu_input(uint64_t b, int32_t st[4]);
         int32_t st[4] = {lx, ly, rx, ry};
         b = pets_menu_input(b, st);
+        // the check tracker drives the Map page in randomizer seeds (runtime/ui/tracker_overlay.mm): its cursor takes
+        // the d-pad / left stick / A / Y (and B while one of its panels is open)
+        extern uint64_t tracker_map_input(uint64_t b, int32_t st[4]);
+        b = tracker_map_input(b, st);
         lx = st[0], ly = st[1], rx = st[2], ry = st[3];
     }
     *(uint64_t *)(s + 8) = b;

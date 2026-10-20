@@ -18,6 +18,7 @@ int texpatch_identify(const NvnTexture *t);
 int texpatch_bottle_kind(int id);
 // One of the game's own UI textures by name (e.g. "MapMark_05^w") as RGBA8 (malloc'd; NULL if missing)
 uint8_t *texpatch_ui_rgba(const char *name, int *w, int *h);
+int texpatch_ui_rgba_list(const char *const *names, int n, uint8_t **out, int *w, int *h);  // (each archive read once)
 // The Hint Sheet's icon: the dungeon map's, on a bottle-icon-sized canvas (drawn in place of the first bottle's icon;
 // runtime/hle/hint_sheet.c hint_sheet_icon_draw says which draws). NULL: not in the game files.
 NvnTexture *texpatch_hint_icon(void);

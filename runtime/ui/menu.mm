@@ -237,6 +237,7 @@ bool menu_handle_event(const SDL_Event *e) {
     }
 }
 
+extern "C" uint32_t g_window_resize_request;  // (test scripts: runtime/hle/input.c "resize")
 void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
@@ -252,6 +253,8 @@ void menu_apply_window_requests(void *win) {
         first = false;
         SDL_SetWindowFullscreen(w, g_settings.fullscreen);
     }
+    if (uint32_t r = __atomic_exchange_n(&g_window_resize_request, 0u, __ATOMIC_RELAXED))
+        SDL_SetWindowSize(w, (int)(r >> 16), (int)(r & 0xffff));
 }
 
 // ------------------------------------------------------------------ render thread
@@ -507,10 +510,14 @@ static void tab_quit(float scale, bool in_game) {
 
 extern "C" bool inventory_overlay_wanted(void);
 extern "C" bool tracker_overlay_wanted(void);
+extern "C" bool tracker_dungeon_wanted(void);
+extern "C" void tracker_dungeon_draw(ImVec2 display, ImFont *font);
 extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" bool chaos_overlay_wanted(void);
 extern "C" void chaos_overlay_draw(ImVec2 display, ImFont *font);
 extern "C" void inventory_overlay_draw(ImVec2 display, ImFont *font);
+extern "C" bool race_overlay_wanted(void);
+extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale);
 
 // Reboot (runtime/main.c): the game is gone - menu and name dialog close; the ImGui context stays.
 RT_ON_RESET(menu_reset) {
@@ -712,9 +719,11 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool open = g_open.load();
     bool inv = !open && inventory_overlay_wanted();
     bool trk = !open && tracker_overlay_wanted();
+    bool trkd = !open && tracker_dungeon_wanted();
     bool chaos = !open && chaos_overlay_wanted();
     bool kbd = g_kbd.load() == 1;
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !chaos) {
+    bool race = race_overlay_wanted();  // (run timer, race seed hash: race_overlay.mm)
+    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !trkd && !chaos && !race) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -768,8 +777,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::End();
     }
 
+    if (race) race_overlay_draw(io.DisplaySize, g_menu_font_big, scale);
     if (trk) tracker_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (chaos) chaos_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
+    if (trkd) tracker_dungeon_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     if (inv) {
         inventory_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     }
