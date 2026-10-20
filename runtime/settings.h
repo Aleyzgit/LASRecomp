@@ -1,5 +1,6 @@
 // User settings (larecomp.ini next to the executable's working directory), edited from the in-game menu.
 #pragma once
+#include "cosmetic_colour.h"
 #include <stdbool.h>
 
 enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
@@ -66,20 +67,28 @@ typedef struct {
     bool walk_speed_dungeons;  // walk speed also indoors: houses, caves, dungeons (Gameplay tab, under Walk speed)
     bool diff_ohko;      // any hit kills
     bool diff_hero;      // Hero Mode flag forced on in the loaded save (2x damage, no recovery hearts)
-    // cosmetics (runtime/ui/cosmetics.mm; applied live by runtime/nvn/texpatch.c), never part of a seed
-    int tunic;           // index into g_tunic_colours (0 = Default: the game's / the seed's own)
-    int hearts;          // index into g_heart_colours (0 = Default red)
+    // cosmetics (Cosmetics tab, runtime/ui/menu.mm), live, never part of a seed: colour rows of the shared palette
+    // (runtime/cosmetic_colour.h; Default = the game's own, for the tunic also the seed's)
+    CosColour tunic, hearts;  // runtime/nvn/texpatch.c (tunic map, heart tints)
+    CosColour hair, shield;   // runtime/nvn/recolour_link.c
+    CosColour skin;           // runtime/nvn/texpatch.c skin_apply
+    CosColour leaves, grass;  // the overworld's foliage, runtime/nvn/recolour_seasons.c
+    CosColour sand;           // the beaches, the desert, the sandy south (recolour_seasons.c)
+    int enemy_colours;        // 0 Off, 1 Random per seed, 2 Random every load (runtime/nvn/recolour_enemies.c)
+    int screen_filter;        // 0 Off, 1 Game Boy, 2 Game Boy Color, 3 Grayscale (runtime/nvn/screen_filter.h)
     // speedrun (Gameplay tab; runtime/hle/run_timer.c, runtime/livesplit.c)
     bool timer;            // the in-game run timer in the corner (game time: level loads don't count)
     int timer_pos;         // TIMER_POS_*: which bottom corner it sits in
     bool livesplit;        // drive LiveSplit (its Server component) over TCP: start, splits, game time
     char livesplit_host[64];  // host:port of the LiveSplit Server ("localhost:16834")
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
+    char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
 } Settings;
 
-enum { N_TUNIC_COLOURS = 13, N_HEART_COLOURS = 9 };
-extern const char *const g_tunic_colours[N_TUNIC_COLOURS];
-extern const char *const g_heart_colours[N_HEART_COLOURS];
+
+enum { N_ENEMY_COLOUR_MODES = 3, N_SCREEN_FILTERS = 4 };
+extern const char *const g_screen_filters[N_SCREEN_FILTERS];  // (the menu's names)
+extern const char *const g_enemy_colour_modes[N_ENEMY_COLOUR_MODES];  // (the menu's names)
 
 extern Settings g_settings;
 

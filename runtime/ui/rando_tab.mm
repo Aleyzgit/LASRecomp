@@ -144,6 +144,7 @@ struct GenOpts {
     bool miniboss_souls = false;  // miniboss-souls: a dungeon mini-boss only appears once its soul is found (souls.py)
     // starting-items (the game's own start): stored as "not" so seed IDs made before these options (zeros) keep them
     bool no_start_sword = false, no_start_shield = false, no_start_ocarina = false;  // (ocarina: with Manbo's Mambo)
+    bool random_cosmetics = false;  // random-cosmetics: the seed's own cosmetic set (runtime/cosmetics_seed.c)
     bool tunic_upgrades = false;  // tunic-upgrades: the red / blue tunics add up instead of swapping (runtime: qol.c)
     // stealing (LAS 'stealing': never / normal / always), stored so that seed IDs made before these options (zeros)
     // keep their old rule, 'always' (stealing allowed, no sword needed); new seeds default to the vanilla sword rule
@@ -202,7 +203,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
                  &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
                  &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina,
-                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.labyrinth};
+                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.labyrinth};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -292,6 +293,37 @@ static std::string seed_id_decode(const char *text, GenOpts &o) {
     if (t.entrances > 2) t.entrances = 2;
     o = t;
     return "";
+}
+
+// The New seed options are kept across restarts (larecomp.ini rando_options): their seed ID without the random part,
+// which re-rolls for every seed. Not the seed name either. Saved once a change is done (no row being dragged / typed in).
+static void opts_key(const GenOpts &o, char *out, size_t cap) {
+    GenOpts t = o;
+    t.rng = 0;
+    seed_id_encode(t, out, cap);
+}
+
+static void opts_load(void) {
+    if (!g_settings.rando_options[0]) return;  // (never changed: the defaults)
+    GenOpts t = g_opts;
+    std::string err = seed_id_decode(g_settings.rando_options, t);
+    if (!err.empty()) { LOG("[rando] saved options not loaded: %s\n", err.c_str()); return; }
+    t.rng = 0;  // (a fresh random part when shown)
+    strlcpy(t.seed, g_opts.seed, sizeof t.seed);
+    g_opts = t;
+    tri_mode_from_opts();
+}
+
+static void opts_save_if_changed(void) {
+    if (ImGui::IsAnyItemActive()) return;
+    static char defaults[48];
+    if (!defaults[0]) opts_key(GenOpts(), defaults, sizeof defaults);
+    char k[48];
+    opts_key(g_opts, k, sizeof k);
+    const char *saved = g_settings.rando_options[0] ? g_settings.rando_options : defaults;
+    if (!strcmp(k, saved)) return;
+    strlcpy(g_settings.rando_options, k, sizeof g_settings.rando_options);
+    settings_save();
 }
 
 static bool id_is_race(const std::string &id) {
@@ -396,8 +428,9 @@ static void start_generation(void) {
     }
     fprintf(f, " \"pots\": %s, \"no-buff-drops\": %s, \"bushes\": %s, \"digs\": %s,\n", g_opts.pots ? "true" : "false",
             g_opts.no_buffs ? "true" : "false", g_opts.bushes ? "true" : "false", g_opts.digs ? "true" : "false");
-    fprintf(f, " \"tunic-upgrades\": %s, \"shellsanity\": %s,\n", g_opts.tunic_upgrades ? "true" : "false",
-            g_opts.shellsanity ? "true" : "false");
+    fprintf(f, " \"tunic-upgrades\": %s, \"shellsanity\": %s, \"random-cosmetics\": %s,\n",
+            g_opts.tunic_upgrades ? "true" : "false", g_opts.shellsanity ? "true" : "false",
+            g_opts.random_cosmetics ? "true" : "false");
     fprintf(f, " \"include-fishing\": %s, \"include-rapids\": %s, \"include-dampe\": %s, \"include-trade-gifts\": %s,"
                " \"include-blue-rupees\": %s,\n", g_opts.inc_fishing ? "true" : "false", g_opts.inc_rapids ? "true" : "false",
             g_opts.inc_dampe ? "true" : "false", g_opts.inc_trade ? "true" : "false", g_opts.inc_blue ? "true" : "false");
@@ -550,6 +583,8 @@ extern "C" void rando_tab_draw(float scale) {
         if (!spoiler_view_draw(g_spoiler_seed, scale)) g_spoiler_seed.clear();
         return;
     }
+    static bool opts_once;  // the options the player last set (larecomp.ini)
+    if (!opts_once) { opts_once = true; opts_load(); }
     static bool id_once;  // LARECOMP_RANDO_ID=<seed ID>: the tab starts with that ID's options (test hook)
     if (const char *t = getenv("LARECOMP_RANDO_ID"); !id_once && t) {
         id_once = true;
@@ -722,7 +757,7 @@ extern "C" void rando_tab_draw(float scale) {
                 id_msg = "Loaded: the options are set from this ID.";
             }
         }
-        if (opt_action("Copy seed ID", "", "Copies the seed ID above, to share the seed.")) ImGui::SetClipboardText(idbuf);
+        if (opt_action("Copy new seed's ID", "", "Copies the seed ID above, to share the seed.")) ImGui::SetClipboardText(idbuf);
         if (opt_action("New seed ID", "", "A new random seed with the same options.")) { g_opts.rng = new_rng(); id_msg.clear(); }
     }
 
@@ -949,6 +984,8 @@ extern "C" void rando_tab_draw(float scale) {
     opt_toggle("Fast songs", &g_opts.fast_songs, true, "Learning a song skips its cutscene.");
     opt_toggle("Boss cutscenes", &g_opts.boss_cutscenes, false, "Bosses' intro cutscenes play.");
     opt_toggle("Randomize music", &g_opts.randomize_music, false, "The game's music tracks are shuffled.");
+    opt_toggle("Random cosmetics", &g_opts.random_cosmetics, false,
+               "The seed gets its own colors and season. Your choices in the Cosmetics tab still win.");
     opt_toggle("Spoiler log", &g_opts.spoiler, true, "Writes where every item is, to read from the seed's Spoiler log.");
     opt_toggle("Race mode", &g_opts.race, false,
                "The spoiler log stays shut until the credits, and the title screen shows a seed hash to compare.");
@@ -995,5 +1032,6 @@ extern "C" void rando_tab_draw(float scale) {
         opt_split_end();
     }
     ImGui::EndDisabled();
+    opts_save_if_changed();
     gen_overlay(scale);
 }
