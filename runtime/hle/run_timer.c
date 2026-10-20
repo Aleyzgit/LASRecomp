@@ -1,7 +1,8 @@
 // Run timer (Gameplay tab "Timer", drawn by runtime/ui/race_overlay.mm) and LiveSplit auto-splitting (runtime/livesplit.c).
 //
-// One run per gameplay session: it starts when gameplay does (a new file or a loaded one) and lasts until the player
-// quits to the start screen or the desktop (a reboot: RT_ON_RESET). Nothing is saved. The clock always runs (it costs
+// One run per attempt: it starts from 0:00 every time gameplay starts from the file select (a new file or a loaded
+// one - the file select reads the saves, then Link comes into play) and lasts until the next such start, or a quit to
+// the start screen / desktop (a reboot: RT_ON_RESET). Back at the title is a new attempt. Nothing is saved. The clock always runs (it costs
 // nothing); Timer shows it - set before the game starts, the row is greyed out in game - and LiveSplit gets it.
 // Real time: it never stops - level loads and transitions, the map, the Items page, the game's pause menu and ours all
 // count (user 2026-10-20).
@@ -32,9 +33,11 @@ static volatile int g_counting;    // the clock is running right now
 static volatile int g_movie_end;   // the ending movie opened
 static uint64_t g_last_ns, g_sync_ns;
 static uint32_t g_inst;            // instruments seen this run
+static volatile int g_save_read;   // the file select read the saves: the next start of play is a new attempt
+static int g_was_in_play;
 
 RT_ON_RESET(run_timer_reset) {  // (quit to the start screen / another seed: the session is over)
-    g_us = 0, g_state = RUN_NONE, g_counting = 0, g_movie_end = 0, g_last_ns = 0;
+    g_us = 0, g_state = RUN_NONE, g_counting = 0, g_movie_end = 0, g_last_ns = 0, g_save_read = 0, g_was_in_play = 0;
 }
 
 static void fmt_time(uint64_t us, char *out, size_t n) {
@@ -93,6 +96,11 @@ static void finish_run(const char *why) {
     }
 }
 
+// fs.c: a save file was read (the file select reads every slot; a whole save from offset 0)
+void run_timer_save_read(int64_t off, int64_t size) {
+    if (off == 0 && size >= 0x5EC8) g_save_read = 1;
+}
+
 // runtime/hle/movie.c: the ending movie
 void run_timer_ending_movie(void) { g_movie_end = 1; }
 
@@ -108,9 +116,11 @@ void run_timer_tick(void) {
     uint64_t now = plat_now_ns(), dt = g_last_ns && now > g_last_ns ? now - g_last_ns : 0;
     g_last_ns = now;
     if (g_settings.livesplit) livesplit_poke();  // (connects in the background, also before the run)
-    bool in_play = game_in_play() != 0;
-    if (g_state == RUN_NONE) {
+    bool in_play = game_in_play() != 0, entered = in_play && !g_was_in_play;
+    g_was_in_play = in_play;
+    if (g_state == RUN_NONE || (entered && g_save_read)) {  // (a new attempt: from 0:00)
         if (!in_play) return;
+        g_save_read = 0;
         start_run();
     }
     if (g_state != RUN_GOING) return;

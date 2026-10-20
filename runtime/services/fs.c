@@ -743,6 +743,8 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
             save_editor_file_read(f->path, b->addr, off, n);
             extern void flags_ext_save_read(const char *path, uint64_t addr, int64_t off, int64_t size);
             flags_ext_save_read(f->path, b->addr, off, n);
+            extern void run_timer_save_read(int64_t off, int64_t size);
+            run_timer_save_read(off, n);  // (runtime/hle/run_timer.c: a save loaded from the file select is a new attempt)
         }
         OUT(int64_t, 0) = n < 0 ? 0 : n;
         resp_size(resp, 8);
