@@ -4,11 +4,11 @@
 // the colour (float3 / vec3), pf.x the mode.
 //   1 Game Boy: the original's four greens (#0F380F #306230 #8BAC0F #9BBC0F), chosen by luminance
 //   2 Game Boy Color: more saturated and a little brighter, 6 levels a channel (its 15-bit colours, posterised)
-//   3 Sepia
+//   3 Grayscale: luminance only, no tint, contrast raised a little (a gentle S-curve)
 #pragma once
 #include "../settings.h"
 
-enum { SCREEN_FILTER_OFF, SCREEN_FILTER_GB, SCREEN_FILTER_GBC, SCREEN_FILTER_SEPIA };
+enum { SCREEN_FILTER_OFF, SCREEN_FILTER_GB, SCREEN_FILTER_GBC, SCREEN_FILTER_GRAY };
 
 // pf for the present shader (x: the mode)
 static inline void screen_filter_params(float pf[4]) {
@@ -27,7 +27,7 @@ static inline void screen_filter_params(float pf[4]) {
     "      c = clamp(mix(" V3 "(l), c, 1.4) * 1.06, 0.0, 1.0);\n"                                                      \
     "      c = floor(c * 5.0 + 0.5) / 5.0;\n"                                                                          \
     "    } else {\n"                                                                                                   \
-    "      c = clamp(" V3 "(dot(c, " V3 "(0.393, 0.769, 0.189)), dot(c, " V3 "(0.349, 0.686, 0.168)),\n"               \
-    "                    dot(c, " V3 "(0.272, 0.534, 0.131))), 0.0, 1.0);\n"                                           \
+    "      l = clamp((l - 0.5) * 1.2 + 0.5, 0.0, 1.0);\n"                                                              \
+    "      c = " V3 "(l * l * (3.0 - 2.0 * l) * 0.35 + l * 0.65);\n"                                                   \
     "    }\n"                                                                                                          \
     "  }\n"
