@@ -1,7 +1,7 @@
 // Cosmetics: Link's hair and shield colours (Cosmetics tab "Hair color" / "Shield color"), live: draws sampling his
 // hair's colour map (Playerlink.bfres MI_hair_alb: hair only) or a shield's (MI_shieldA_alb, the first shield: only
-// its blue face moves, the red emblem and the metal stay; MI_shieldB_alb, the Mirror Shield: its orange
-// trim) get the chosen colour's hue, saturation and value, keeping the shading (recolour.c).
+// its blue face moves, the red emblem and the metal stay; MI_shieldB_alb, the Mirror Shield: its frame - the
+// face is a mirror) get the chosen colour's hue, saturation and value, keeping the shading (recolour.c).
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -53,7 +53,11 @@ static bool tint(int cls, float t[8]) {
         c = k_shield[s];
         // (hues as drawn: the lit blue face reads teal, ~195 degrees; its map's blue is 211)
         if (cls == C_SHIELD_A) src = 195, width = 0.15f, min_sat = 0.25f;  // the blue face
-        else src = 38, width = 0.08f, min_sat = 0.4f;                        // the Mirror Shield's orange
+        else {  // the Mirror Shield: its frame (beige, pale: more saturation); the face is a mirror and stays one
+            recolour_pack(t, c[0] < 0 ? 0 : recolour_deg(c[0] - 40), c[0] < 0 ? c[1] : c[1] * 3, c[2], recolour_deg(40), 0.5f, 0,
+                         0);
+            return true;
+        }
     }
     recolour_pack(t, c[0] < 0 ? 0 : recolour_deg(c[0] - src), c[1], c[2], recolour_deg(src), width, min_sat, 1);
     return true;

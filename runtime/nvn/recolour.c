@@ -156,7 +156,11 @@ int recolour_identify(const NvnTexture *t, uint64_t total) {
             h = hash64((const uint8_t *)(uintptr_t)t->addr, r->size);
             if (nh < 4) hsize[nh] = r->size, hval[nh] = h, nh++;
         }
-        if (h == r->hash) return i;
+        if (h == r->hash) {
+            static int nlog;
+            if (nlog++ < 48) LOG("[recolour] %ux%u (%u levels) uploaded: class %d\n", r->w, r->h, r->levels, r->cls);
+            return i;
+        }
     }
     return -1;
 }

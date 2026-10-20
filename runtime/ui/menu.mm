@@ -452,6 +452,7 @@ static void tab_cosmetics(void) {
                "The color of the hearts on the HUD.");
     opt_choice("Hair color", &g_settings.hair, g_hair_colours, N_HAIR_COLOURS, 0, "Link's hair color.");
     opt_choice("Shield color", &g_settings.shield, g_shield_colours, N_SHIELD_COLOURS, 0, "The color of Link's shield.");
+    opt_choice("Skin color", &g_settings.skin, g_skin_colours, N_SKIN_COLOURS, 0, "Link's skin color.");
     if (opt_action("Random colors", "", "Picks a random tunic and heart color (any other color, Default included).")) {
         g_settings.tunic = (g_settings.tunic + 1 + rand() % (N_TUNIC_COLOURS - 1)) % N_TUNIC_COLOURS;
         g_settings.hearts = (g_settings.hearts + 1 + rand() % (N_HEART_COLOURS - 1)) % N_HEART_COLOURS;

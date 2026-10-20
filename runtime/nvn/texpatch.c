@@ -23,6 +23,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "../hle.h"
 #include "../input_bind.h"
@@ -38,7 +39,8 @@
 
 enum { K_BC5, K_BC3, K_ASTC4, K_RGBA8, K_BC1 };
 enum { R_A = 1, R_B, R_X, R_Y, R_L, R_R, R_ZL, R_ZR, R_PLUS, R_MINUS, R_HERO, R_SHEET, R_BOTTLE, R_BOTTLE_MODEL, R_FAIRY_MODEL,
-       R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_TUNIC_BLUE, R_HEART, R_POWDER_MODEL, R_DGN_MAP, R_MAP_MODEL, R_POWER_PIECE_MODEL };
+       R_ITEM_CURSOR, R_TUNIC, R_TUNIC_RED, R_TUNIC_BLUE, R_HEART, R_POWDER_MODEL, R_DGN_MAP, R_MAP_MODEL, R_POWER_PIECE_MODEL,
+       R_SKIN };
 enum { STYLE_NINTENDO, STYLE_XBOX, STYLE_PS };
 // labels: R_A..R_MINUS = the button that role is on by default; or these
 enum { L_LS = 32, L_RS, L_DUP, L_DDOWN, L_DLEFT, L_DRIGHT, L_OTHER };
@@ -78,7 +80,14 @@ static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | p[1] << 8); }
 static uint32_t rd32(const uint8_t *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint64_t rd64(const uint8_t *p) { return rd32(p) | (uint64_t)rd32(p + 4) << 32; }
 
+static bool g_scanning_link;  // (Playerlink.bfres: its face maps are Link's skin)
+
 static int role_of(const char *name) {
+    // cosmetics: Link's skin (Cosmetics tab "Skin color"): his face's maps (eyes / mouth expressions, ears; the body
+    // map's arms and hands are recoloured with the tunic map, tunic_apply)
+    if (g_scanning_link && (!strncmp(name, "MI_eye_alb", 10) || !strncmp(name, "MI_mouth_alb", 12) ||
+                            !strncmp(name, "MI_ear_alb", 10)))
+        return R_SKIN;
     static const struct { const char *prefix; int role; } m[] = {
         {"BtnA_", R_A}, {"BtnB_", R_B}, {"BtnX_", R_X}, {"BtnY_", R_Y}, {"BtnL_", R_L}, {"BtnR_", R_R},
         {"BtnZL_", R_ZL}, {"BtnZR_", R_ZR}, {"BtnPlus_", R_PLUS}, {"BtnMinus_", R_MINUS},
@@ -181,8 +190,10 @@ static void load_refs(void) {
                                          "region_common/actor/ItemPowerPiece.bfres"};
     for (int m = 0; m < (int)(sizeof models / sizeof *models); m++)
         if ((f = read_all(models[m], &len))) {  // (their textures: one BNTX inside)
+            g_scanning_link = m == 1;
             for (size_t i = 0; i + 8 < len; i += 4)
                 if (!memcmp(f + i, "BNTX\0\0\0\0", 8)) { scan_bntx(f + i, len - i, false); break; }
+            g_scanning_link = false;
             free(f);
         }
     f = read_all("region_common/ui/pictogram.bffnt", &len);  // message icons: one RGBA8 sheet in a BNTX
@@ -256,7 +267,7 @@ int texpatch_identify(const NvnTexture *t) {
         bool tunic = r->role == R_TUNIC || r->role == R_TUNIC_RED || r->role == R_TUNIC_BLUE;
         if (r->w != t->width || r->h != t->height || (r->role != R_POWDER_MODEL && r->role != R_MAP_MODEL &&
             r->role != R_POWER_PIECE_MODEL &&
-            (t->levels > 1) != (r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || tunic))) continue;
+            (t->levels > 1) != (r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || tunic || r->role == R_SKIN))) continue;
         uint64_t n = r->size < total ? r->size : total;
         if (!memcmp((const void *)(uintptr_t)t->addr, r->data, n)) {
             static int nlog;
@@ -343,10 +354,12 @@ static uint32_t labels_hash(void) {
 static bool restyled(int role, int style) { return style != STYLE_NINTENDO || prompt_label(role) != role; }
 
 static void cosmetics_test(void);
+static int skin_colour(void);
 
 uint32_t texpatch_generation(void) {  // (a rebind re-uploads the glyphs, like a style change; so does a tunic colour)
     cosmetics_test();
-    return (1 + (uint32_t)prompt_style() + (hide_hero() ? 4 : 0) + (labels_hash() << 3)) ^ (uint32_t)g_settings.tunic * 0x9E3779B1u;
+    return (1 + (uint32_t)prompt_style() + (hide_hero() ? 4 : 0) + (labels_hash() << 3)) ^ (uint32_t)g_settings.tunic * 0x9E3779B1u ^
+           (uint32_t)skin_colour() * 0x85EBCA6Bu;
 }
 
 // ------------------------------------------------------------------ block codecs (BC4/BC5, BC1/BC3, ASTC 4x4)
@@ -1011,6 +1024,62 @@ static void tunic_apply(uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h, ui
     for (uint32_t y = 0; y < bh; y++) memcpy(blocks + y * row, src + y * bw * 8, bw * 8);
 }
 
+// Link's skin colour (Cosmetics tab "Skin color"): fantasy colours over his skin, keeping the shading. The skin is
+// told by its colour in the maps (BC1): a peach hue (-8..30 degrees), not grey, bright - so the brows and eyes (dark),
+// the mouth's dark lines, the hair, the tunic and the leather stay. The body map (tunic, belt, boots, arms) has
+// browns close to skin: there it must also be brighter than the leather.
+// Per colour: hue (degrees; < 0 keep), saturation and value factors.
+static const float k_skin[N_SKIN_COLOURS][3] = {
+    {0}, {215, 1.5f, 0.92f} /* Blue */, {115, 1.35f, 0.85f} /* Green */, {275, 1.4f, 0.88f} /* Purple */,
+    {356, 1.6f, 0.92f} /* Red */, {46, 1.7f, 1.0f} /* Gold */, {-1, 0.08f, 1.02f} /* Silver */, {322, 1.3f, 1.0f} /* Pink */,
+    {176, 1.5f, 0.85f} /* Teal */, {-1, 0.04f, 0.68f} /* Grey */};
+
+static int skin_colour(void) {  // (the last entry, Random: one of the colours, picked whenever the row is set to it)
+    static int pick;
+    static unsigned seed;
+    int v = g_settings.skin;
+    if (v != N_SKIN_COLOURS - 1) { pick = 0; return v > 0 && v < N_SKIN_COLOURS ? v : 0; }
+    if (!seed) seed = (unsigned)time(NULL) ^ (unsigned)(uintptr_t)&seed;
+    if (!pick) { seed = seed * 1103515245u + 12345u; pick = 1 + (int)((seed >> 16) % (N_SKIN_COLOURS - 2)); }
+    return pick;
+}
+
+static float smooth(float e0, float e1, float x) { float t = sat((x - e0) / (e1 - e0)); return t * t * (3 - 2 * t); }
+
+static void skin_apply(uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row, bool body) {
+    int c = skin_colour();
+    if (!c) return;
+    const float *k = k_skin[c];
+    uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+    if (row < bw * 8) return;
+    for (uint32_t by = 0; by < bh; by++)
+        for (uint32_t bx = 0; bx < bw; bx++) {
+            uint8_t *b = blocks + by * row + bx * 8, px[16][4];
+            bc1_decode(b, px);
+            bool any = false, holes = false;
+            for (int i = 0; i < 16; i++) {
+                if (!px[i][3]) { holes = true; continue; }
+                float r = px[i][0] / 255.0f, g = px[i][1] / 255.0f, bl = px[i][2] / 255.0f;
+                float mx = fmaxf(r, fmaxf(g, bl)), mn = fminf(r, fminf(g, bl)), d = mx - mn, hue = 0;
+                if (d > 0) hue = mx == r ? fmodf((g - bl) / d + 6, 6) : mx == g ? (bl - r) / d + 2 : (r - g) / d + 4;
+                hue *= 60;
+                if (hue > 180) hue -= 360;
+                float s = mx > 0 ? d / mx : 0, v = mx;
+                float m = (1 - smooth(30, 42, hue)) * smooth(-20, -8, hue) * smooth(0.12f, 0.22f, s) *
+                          (1 - smooth(0.9f, 0.97f, s)) * (body ? smooth(0.55f, 0.68f, v) : smooth(0.42f, 0.58f, v));
+                if (m < 0.004f) continue;
+                any = true;
+                float nh = k[0] < 0 ? hue : k[0] + (hue - 18) * 0.5f, ns = fminf(s * k[1], 1), nv = fminf(v * k[2], 1);
+                nh = fmodf(nh + 720, 360) / 60;
+                int sector = (int)nh % 6;
+                float f = nh - floorf(nh), p = nv * (1 - ns), q = nv * (1 - ns * f), t = nv * (1 - ns * (1 - f));
+                float o[6][3] = {{nv, t, p}, {q, nv, p}, {p, nv, t}, {p, q, nv}, {t, p, nv}, {nv, p, q}};
+                for (int ch = 0; ch < 3; ch++) px[i][ch] = clamp8(px[i][ch] + (o[sector][ch] * 255 - px[i][ch]) * m + 0.5f);
+            }
+            if (any && !holes) bc1_encode4(px, b);
+        }
+}
+
 // pictogram.bffnt: glyph index -> role (its CMAP: '+' 0, '-' 1, 'A' 2, 'B' 3, 'L' 6, 'R' 8, 'X' 10, 'Y' 11, 'Z' 12
 // = ZL, 'l' 13 / 'r' 15 = L / R (second style), 'z' 17 = ZR); 4 columns of 64x64 cells, rows from the bottom.
 static const int8_t k_sheet_roles[18] = {R_PLUS, R_MINUS, R_A, R_B, 0, 0, R_L, 0, R_R, 0, R_X, R_Y, R_ZL, R_L, 0, R_R, 0, R_ZR};
@@ -1018,7 +1087,12 @@ static const int8_t k_sheet_roles[18] = {R_PLUS, R_MINUS, R_A, R_B, 0, 0, R_L, 0
 void texpatch_apply(int id, uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row) {
     if (id < 0 || id >= g_nrefs) return;
     const Ref *r = &g_refs[id];
-    if (r->role == R_TUNIC || r->role == R_TUNIC_RED || r->role == R_TUNIC_BLUE) { tunic_apply(lv, blocks, w, h, row); return; }
+    if (r->role == R_TUNIC || r->role == R_TUNIC_RED || r->role == R_TUNIC_BLUE) {
+        tunic_apply(lv, blocks, w, h, row);
+        skin_apply(blocks, w, h, row, true);  // (the arms and hands)
+        return;
+    }
+    if (r->role == R_SKIN) { skin_apply(blocks, w, h, row, false); return; }
     if (lv || r->w != w || r->h != h) return;
     if (r->role == R_BOTTLE || r->role == R_BOTTLE_MODEL || r->role == R_FAIRY_MODEL || r->role == R_POWDER_MODEL ||
         r->role == R_ITEM_CURSOR || r->role == R_DGN_MAP || r->role == R_MAP_MODEL || r->role == R_POWER_PIECE_MODEL ||

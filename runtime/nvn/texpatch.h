@@ -29,7 +29,7 @@ bool texpatch_is_item_cursor(int id);
 uint32_t texpatch_generation(void);
 // Rewrites level `lv` of known texture `id` in place: `blocks` = its linear data in the texture's own format
 // (rows of 4x4 blocks, `row` bytes apart; RGBA8 rows for uncompressed). No-op for the Nintendo look. Only the
-// tunic (Cosmetics tab colour) changes levels other than 0.
+// tunic and Link's skin (Cosmetics tab colours) change levels other than 0.
 void texpatch_apply(int id, uint32_t lv, uint8_t *blocks, uint32_t w, uint32_t h, uint32_t row);
 // Known texture `id` is a heart of the HUD / file select (full, empty, frame, life-up flash): 1, else 0.
 int texpatch_heart_kind(int id);

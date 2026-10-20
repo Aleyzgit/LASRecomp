@@ -68,6 +68,7 @@ typedef struct {
     int tunic;           // index into g_tunic_colours (0 = Default: the game's / the seed's own)
     int hearts;          // index into g_heart_colours (0 = Default red)
     int hair, shield;    // g_hair_colours / g_shield_colours (0 = Default; last = Random), runtime/nvn/recolour_link.c
+    int skin;            // g_skin_colours (0 = Default; last = Random), runtime/nvn/texpatch.c skin_apply
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
 } Settings;
 
@@ -77,6 +78,8 @@ extern const char *const g_heart_colours[N_HEART_COLOURS];
 enum { N_HAIR_COLOURS = 11, N_SHIELD_COLOURS = 8 };
 extern const char *const g_hair_colours[N_HAIR_COLOURS];
 extern const char *const g_shield_colours[N_SHIELD_COLOURS];
+enum { N_SKIN_COLOURS = 11 };
+extern const char *const g_skin_colours[N_SKIN_COLOURS];
 
 extern Settings g_settings;
 

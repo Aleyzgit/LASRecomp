@@ -21,6 +21,9 @@ const char *const g_hair_colours[N_HAIR_COLOURS] = {"Default", "Blond", "Brown",
 const char *const g_shield_colours[N_SHIELD_COLOURS] = {"Default", "Red", "Green", "Purple", "Gold", "Black", "White",
                                                       "Random"};
 
+const char *const g_skin_colours[N_SKIN_COLOURS] = {"Default", "Blue", "Green", "Purple", "Red", "Gold", "Silver",
+                                                  "Pink", "Teal", "Grey", "Random"};
+
 // index of `val` in names (unchanged when it isn't one)
 static void name_index(int *out, const char *const *names, int n, const char *val) {
     for (int i = 0; i < n; i++) if (!strcmp(val, names[i])) *out = i;
@@ -210,6 +213,7 @@ void settings_load(void) {
         else if (!strcmp(key, "hearts")) { for (int i = 0; i < N_HEART_COLOURS; i++) if (!strcmp(val, g_heart_colours[i])) g_settings.hearts = i; }
         else if (!strcmp(key, "hair")) name_index(&g_settings.hair, g_hair_colours, N_HAIR_COLOURS, val);
         else if (!strcmp(key, "shield")) name_index(&g_settings.shield, g_shield_colours, N_SHIELD_COLOURS, val);
+        else if (!strcmp(key, "skin")) name_index(&g_settings.skin, g_skin_colours, N_SKIN_COLOURS, val);
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
@@ -264,6 +268,7 @@ void settings_save(void) {
     fprintf(f, "walk_speed_dungeons = %d\n", g_settings.walk_speed_dungeons);
     fprintf(f, "tunic = %s\nhearts = %s\n", g_tunic_colours[g_settings.tunic], g_heart_colours[g_settings.hearts]);
     fprintf(f, "hair = %s\nshield = %s\n", g_hair_colours[g_settings.hair], g_shield_colours[g_settings.shield]);
+    fprintf(f, "skin = %s\n", g_skin_colours[g_settings.skin]);
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     fclose(f);
