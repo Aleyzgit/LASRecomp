@@ -332,8 +332,9 @@ def fog_actors(template, kind, cell, side, slot, how, room_id):
         n = max(1, int(round(width / 3.0)))
         offs = [(i - (n - 1) / 2.0) * width / n for i in range(n)]
         if kind.startswith('tailor:') and kind.count(':') == 2:  # 'tailor:<entry>:<n>': a veil of n emitters spread
-            # along the doorway (90% of its width), on its edge and just inside (alternately 0 / 0.5 in): past the
-            # edge, a dark room's darkness hid them (Tail Cave 07D)
+            # along the doorway (90% of its width), 1 / 1.5 units inside it (alternately) at 0.4 scale. The plume
+            # rises and drifts: from the edge (0 / 0.5 in) or past it, the doorway's wall and the dark cover of the
+            # cell beyond hid it (Tail Cave 07D showed nothing; the same effect mid-floor there showed fine)
             n = max(1, min(8, int(kind.rsplit(':', 1)[1])))
             offs = [0.0] if n == 1 else [(i / (n - 1) - 0.5) * width * 0.9 for i in range(n)]
     out = []
@@ -351,9 +352,10 @@ def fog_actors(template, kind, cell, side, slot, how, room_id):
             a.type = MAPFIXTURE
             a.parameters = [CLOUD_MODEL.encode(), 0, b'', b'', b'', b'', b'', b'']
         else:
-            d = 0.75 if kind.count(':') < 2 else 0.5 * (i % 2)  # (into the room)
+            dense = kind.count(':') == 2
+            d = 0.75 if not dense else 1.0 + 0.5 * (i % 2)  # (into the room)
             a.posX, a.posY, a.posZ = px + d * ix, 0.0, pz + d * iz
-            a.scaleX = a.scaleY = a.scaleZ = 1.0
+            a.scaleX = a.scaleY = a.scaleZ = 0.4 if dense else 1.0
             if kind == 'woods':
                 a.type = WOODS_FOG
                 a.parameters = [b'', b'', b'', b'', b'', b'', b'', b'']
