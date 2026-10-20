@@ -358,6 +358,54 @@ int renderer_texpatch_of(NvnTexture *t) {
     return b && b->tp > 0 ? b->tp - 1 : -1;
 }
 
+// A scalable render target starts cleared in full (Vulkan: textures.c create_image). Dynamic resolution draws into its
+// top-left part only, and the game's blurs (bloom, depth of field) sample a few texels past that part's edges, where a
+// new texture holds whatever its memory held before - bit patterns that read as NaN / infinity in a float target
+// among them. Pulled into the bloom chain they spread and stayed: a pure green band down the right edge (red and blue
+// NaN), in some runs from the start and in most after a window resize, which reallocates every scalable target
+// (issue #205: switching fullscreen / windowed). Match display and the fixed resolutions draw the whole target, so
+// nothing past it is read. Its own command buffer, committed before the frame's that use the texture.
+// LARECOMP_NEW_TARGET_FILL=<r>,<g>,<b>,<a> (test): that colour instead (depth 1, stencil 0xff); nan,0,nan,0 shows
+// the band every time without this clear's zeros.
+static void clear_new_target(id<MTLTexture> tex) {
+    static int fill = -1;
+    static float fc[4];
+    if (fill < 0)
+        fill = getenv("LARECOMP_NEW_TARGET_FILL") &&
+               sscanf(getenv("LARECOMP_NEW_TARGET_FILL"), "%f,%f,%f,%f", &fc[0], &fc[1], &fc[2], &fc[3]) == 4;
+    MTLPixelFormat pf = tex.pixelFormat;
+    // (the depth / stencil formats mtl_format gives)
+    bool depth = pf == MTLPixelFormatDepth16Unorm || pf == MTLPixelFormatDepth32Float ||
+                 pf == MTLPixelFormatDepth32Float_Stencil8;
+    bool stencil = pf == MTLPixelFormatStencil8 || pf == MTLPixelFormatDepth32Float_Stencil8;
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];
+        for (NSUInteger lv = 0; lv < tex.mipmapLevelCount; lv++) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            if (depth || stencil) {
+                if (depth) {
+                    rp.depthAttachment.texture = tex, rp.depthAttachment.level = lv;
+                    rp.depthAttachment.loadAction = MTLLoadActionClear, rp.depthAttachment.clearDepth = fill ? 1 : 0;
+                    rp.depthAttachment.storeAction = MTLStoreActionStore;
+                }
+                if (stencil) {
+                    rp.stencilAttachment.texture = tex, rp.stencilAttachment.level = lv;
+                    rp.stencilAttachment.loadAction = MTLLoadActionClear, rp.stencilAttachment.clearStencil = fill ? 0xff : 0;
+                    rp.stencilAttachment.storeAction = MTLStoreActionStore;
+                }
+            } else {
+                rp.colorAttachments[0].texture = tex, rp.colorAttachments[0].level = lv;
+                rp.colorAttachments[0].loadAction = MTLLoadActionClear;
+                rp.colorAttachments[0].clearColor = fill ? MTLClearColorMake(fc[0], fc[1], fc[2], fc[3])
+                                                         : MTLClearColorMake(0, 0, 0, 0);
+                rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            }
+            [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+        }
+        [cb commit];
+    }
+}
+
 static void create_backend_texture(NvnTexture *t, TexBackend *b) {
     MtlFormat mf = mtl_format(t->format);
     MTLTextureDescriptor *d = [MTLTextureDescriptor new];
@@ -407,6 +455,7 @@ static void create_backend_texture(NvnTexture *t, TexBackend *b) {
     }
     tex.label = [NSString stringWithFormat:@"%s fmt%#x", t->label[0] ? t->label : "tex", t->format];
     b->tex = tex;
+    if (b->scalable) clear_new_target(tex);
     CFBridgingRetain(tex);
     g_tex_live++;
     g_tex_live_bytes += tex.allocatedSize;

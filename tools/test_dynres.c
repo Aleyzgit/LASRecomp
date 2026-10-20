@@ -29,6 +29,8 @@ typedef struct {
     double wander;      // > 0: the scene's load wanders at random (walking around: +-this typical, over a few seconds)
     double lines;       // the window's height (0: 2160, 4K); the floor depends on it (1080: 0.50, 2160: 1/3)
     double clock_slow;  // > 0: the GPU clocks down while mostly idle (an iGPU): its times x up to this, at under 60% busy
+    double resize_at, lines2;  // > 0: the window's height becomes lines2 then (fullscreen <-> windowed): G's scaling part
+                               // and W follow the window's area
 } Case;
 
 typedef struct {
@@ -38,6 +40,10 @@ typedef struct {
     double back30_t;      // (heavy_until) when it held 30 again after the heavy stretch (0: never)
     double f_min_last60, f_max_last60;
     double hold_t;  // when the held rate last changed (s)
+    // (resize_at) after the window's size changed: the factor 1.5 s later, its changes in the next 8 s, frames slower than
+    // the frame rate before the change in the next 5 s, steps down and holds ended in the next 15 s (a swing)
+    double f_after;
+    int changes_after, slow_after, downs_after;
 } Result;
 
 static int near30(double h) { return fabs(h - 30) < 0.5; }
@@ -49,24 +55,32 @@ static Result run(const Case *c) {
     double back30 = 0;
     double walk = 0;  // (wander: the load's random part, log scale)
     double clk = 1;   // (clock_slow: the GPU's times x this - 1 at full clock)
+    double f_after = -1, p_before = 0;
+    int changes_after = 0, slow_after = 0, downs_after = 0;
     printf("%s\n  t=0s %.2f", c->name, f);
     int col = 0;
     while (now < c->secs) {
         OutScale o;
-        double lines = c->lines > 0 ? c->lines : 2160;
+        double lines0 = c->lines > 0 ? c->lines : 2160;
+        bool resized = c->resize_at > 0 && now > c->resize_at;
+        double lines = resized ? c->lines2 : lines0, area = (lines / lines0) * (lines / lines0);
         output_scale(lines * 16 / 9, lines, false, now, g_prev, w_prev, &o);
         f = output_scale_dynamic_factor();
+        if (resized && f_after < 0 && now > c->resize_at + 1.5) f_after = f;
         if (f != last_f) {
             printf(" | %.0fs %.2f", now, f);
             if (++col % 8 == 0) printf("\n ");
             if (now > c->secs - 60) changes++;
             if (now > 20) settled++;
+            if (resized && now < c->resize_at + 8) changes_after++;
+            if (resized && now > c->resize_at + 0.1 && now < c->resize_at + 15 && f < last_f) downs_after++;  // (not the change at the switch)
             last_f = f;
         }
         double hold = output_scale_dynamic_hold_fps();
         if (hold != last_hold) {
             printf(" | %.0fs hold %.0f", now, hold);
             if (++col % 8 == 0) printf("\n ");
+            if (c->resize_at > 0 && now > c->resize_at && now < c->resize_at + 15 && hold == 0) downs_after++;
             hold_changes++, last_hold = hold, hold_t = now;
             if (c->heavy_until > 0 && now > c->heavy_until && near30(hold) && !back30) back30 = now;
         }
@@ -78,20 +92,29 @@ static Result run(const Case *c) {
             walk += -walk / 3.0 * dt + c->wander * sqrt(2 / 3.0) * sqrt(dt) * gauss;
             scene *= exp(walk);
         }
-        double g = (c->a + c->b * f * f) * scene * (0.98 + 0.04 * rnd()) * clk, w = c->w * (0.99 + 0.02 * rnd()) * clk;
+        double g = (c->a + c->b * f * f * area) * scene * (0.98 + 0.04 * rnd()) * clk, w = c->w * area * (0.99 + 0.02 * rnd()) * clk;
         double gw = g + w, p = c->fifo ? ceil(gw / 16.667 - 1e-9) * 16.667 : gw;
         if (c->clock_slow > 0) {  // under 60% busy: the clock drifts down (times up), over 80%: back up, over ~1 s
             double busy = gw / fmax(p, 16.667), target = busy < 0.6 ? c->clock_slow : busy > 0.8 ? 1.0 : clk;
             clk += (target - clk) * fmin(1.0, p / 1000.0);
         }
         if (p < 16.667) p = 16.667;
+        if (c->resize_at > 0 && now > c->resize_at - 3 && now <= c->resize_at) p_before = fmax(p_before, p);
+        if (resized && now < c->resize_at + 5 && p > p_before + 1) slow_after++;
         g_prev = g, w_prev = w;
         now += p / 1000;
         if (now > c->secs - 10) frames_end++, t_end += p / 1000;
     }
-    Result r = {f, frames_end / t_end, last_hold, changes, hold_changes, f_min, f_max, hold_t, settled, back30};
-    printf("\n  end: factor %.2f, %.1f fps over the last 10 s (holding %.0f), %d change%s in the last 60 s (%.2f-%.2f), %d after 20 s\n\n",
+    Result r = {f, frames_end / t_end, last_hold, changes, hold_changes, f_min, f_max, hold_t, settled, back30, f_after,
+                changes_after, slow_after, downs_after};
+    printf("\n  end: factor %.2f, %.1f fps over the last 10 s (holding %.0f), %d change%s in the last 60 s (%.2f-%.2f), %d after 20 s\n",
            r.f_end, r.fps_end, r.hold_end, changes, changes == 1 ? "" : "s", f_min, f_max, settled);
+    if (c->resize_at > 0)
+        printf("  window %.0f -> %.0f lines at %.0f s: factor %.2f 1.5 s later, %d change%s in 8 s, %d slower frame%s in 5 s, "
+               "%d step%s down / hold%s ended in 15 s\n", c->lines > 0 ? c->lines : 2160, c->lines2, c->resize_at, f_after,
+               changes_after, changes_after == 1 ? "" : "s", slow_after, slow_after == 1 ? "" : "s", downs_after,
+               downs_after == 1 ? "" : "s", downs_after == 1 ? "" : "s");
+    printf("\n");
     return r;
 }
 
@@ -148,6 +171,19 @@ int main(int argc, char **argv) {
         // the 30 fps hold; held, the GPU is half idle and clocks down (times x1.5: G ~15.9, as measured on Windows), so
         // the hold's own measure never shows 60 fitting again (it stayed at 30 for the rest of the run). It must probe 60
         {"1080p iGPU, clock drops while held at 30 (fifo)", 2, 34, 0.3, 1, 0, 300, 0, 100, 1.6, 104, 0, 1080, 1.5},
+        // fullscreen <-> windowed (issue #205): the window's size changes at 90 s. Held at 30 in a 1080p screen (SMAA +
+        // FSR 1, case 3) to a 1600x900 window: the same render height, the hold goes on - no trip to the floor and back
+        {"1080p SMAA + FSR 1 held at 30, to a 900-line window at 90 s (fifo)", 6.5, 10.4, 8.1, 1, 0, 180, 0, 0, 0, 0, 0, 1080,
+         0, 90, 900},
+        // the same with a heavier window step (W 12 at 1080p): 60 is out of reach in the window too - the hold goes on
+        {"1080p heavier window step held at 30, to a 900-line window at 90 s (fifo)", 6.5, 10.4, 12, 1, 0, 180, 0, 0, 0, 0, 0,
+         1080, 0, 90, 900},
+        // a 1080p window at 60 (case 2's GPU) made fullscreen on a 4K display: the factor takes the same render height
+        // at once, the frames stay at 60 (before: 0.7 at 4K, 4x the pixels, until the slow frames stepped it down)
+        {"1080p window at 60 to 4K fullscreen at 90 s (fifo)", 0.3, 25.1, 0.2, 1, 0, 180, 0.05, 0, 0, 0, 0, 1080, 0, 90, 2160},
+        // 4K fullscreen at the floor (case 0) to a 1440-line window: the factor goes up to the same render height at
+        // once (before: it stayed at 0.33 there for the raise wait, 720 lines of a 1440 window)
+        {"4K at the floor to a 1440-line window at 90 s (fifo)", 4.1, 48.8, 0.9, 1, 0, 180, 0, 0, 0, 0, 0, 2160, 0, 90, 1440},
     };
     int n = sizeof cases / sizeof *cases;
     if (argc < 2) { printf("%d\n", n); return 0; }
@@ -177,6 +213,14 @@ int main(int argc, char **argv) {
     case 16: check(r.changes_settled <= 4 && r.fps_end > 58, "edge at 1.00 wandering: a few changes in 6 min"); break;
     case 17: check(r.changes_settled <= 8 && r.fps_end > 58, "edge at 0.80 wandering: a few changes in 6 min"); break;
     case 18: check(r.fps_end > 58 && r.hold_end == 0 && r.hold_t < 150, "iGPU clock lock-in: back to 60 after the heavy stretch"); break;
+    // (held 30 in a smaller window: the hold goes on - or 60 fits at the window's floor now, found by a probe)
+    case 19: check(r.f_after >= 0.55 && r.slow_after == 0 && (near(r.hold_end, 30) ? r.changes_after <= 1 : r.fps_end > 58),
+                   "held 30, to a smaller window: no swing"); break;
+    case 20: check(r.downs_after == 0 && r.f_after >= 0.55 && r.slow_after == 0 && near(r.hold_end, 30),
+                   "held 30 with 60 out of reach, to a smaller window: the hold goes on"); break;
+    case 21: check(r.f_after <= 0.4 && r.slow_after <= 3 && r.fps_end > 58 && r.downs_after == 0,
+                   "1080p window to 4K: the same render height, still 60"); break;
+    case 22: check(r.f_after >= 0.5 && r.fps_end > 58, "4K floor to a 1440 window: the same render height at once"); break;
     }
     // a hold is real: the frames come at least at the rate it says
     if (r.hold_end > 0) check(r.fps_end >= 0.95 * r.hold_end, "the held frame rate is met");

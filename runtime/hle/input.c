@@ -369,6 +369,7 @@ static _Atomic int32_t script_lx, script_ly, script_rx, script_ry;
 // "frame:sdlpad:<button>:frames" / "frame:sdlkey:<key>:frames" hold a controller button / key as real events (down
 //   at frame, up `frames` later): they reach menus and the on-screen keyboard first, as a player's would.
 // "frame:shot:<name>" saves the window (game + menus) to build/<name>.png.
+// "frame:resize:<W>x<H>" resizes the window to W x H points (menu_apply_window_requests: the main thread).
 // LARECOMP_BIND_TEST="frame:pad|key:<input>:<host>,..." starts a rebind capture of <input> (bind_* name: a, zl,
 //   ls_up...) at that frame (the Controls tab shows it waiting) and presses <host> 90 frames later ("esc" cancels,
 //   "wait" lets it time out); "frame:reset:pad|key" resets to the defaults.
@@ -380,9 +381,18 @@ static void push_key(SDL_Scancode sc, SDL_Keymod mod, bool down) {
     e.key.key = SDL_GetKeyFromScancode(sc, mod, false);
     SDL_PushEvent(&e);
 }
+uint32_t g_window_resize_request;  // (W << 16 | H: menu_apply_window_requests applies it)
 static void test_push(uint64_t frame, unsigned long start, unsigned long len, const char *dev, const char *arg) {
     SDL_Event e;
     memset(&e, 0, sizeof e);
+    if (!strcmp(dev, "resize")) {
+        unsigned w = 0, h = 0;
+        if (frame == start && sscanf(arg, "%ux%u", &w, &h) == 2 && w && h && w < 65536 && h < 65536) {
+            LOG("[input] test: window to %ux%u\n", w, h);
+            __atomic_store_n(&g_window_resize_request, w << 16 | h, __ATOMIC_RELAXED);
+        }
+        return;
+    }
     if (!strcmp(dev, "shot")) {
         extern char g_window_shot_request[256];  // runtime/hle/hookshot.c
         if (frame == start) snprintf(g_window_shot_request, sizeof g_window_shot_request, "build/%s.png", arg);
@@ -441,7 +451,8 @@ static void host_test_frame(uint64_t frame) {
             unsigned long start = 0, len = 10;
             char dev[8] = "", name[400] = "";
             if (sscanf(tok, "%lu:%7[a-z]:%399[^:]:%lu", &start, dev, name, &len) < 3) continue;
-            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot")) {
+            if (!strcmp(dev, "type") || !strcmp(dev, "sdlpad") || !strcmp(dev, "sdlkey") || !strcmp(dev, "shot") ||
+                !strcmp(dev, "resize")) {
                 test_push(frame, start, len, dev, name);
                 continue;
             }
