@@ -40,6 +40,7 @@ static void gc_frame(void);
 static uint64_t stat_upload_bytes;
 static uint64_t prof_cb_reused, prof_cb_copied;  // (VK_PROF) lean constant blocks: copies reused, made (cbuf_lean)
 static bool cbuf_lean(void);
+static uint64_t prof_hook_draws, prof_hook_known;  // (VK_PROF) draws through the texture hook pass, with a known texture
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
@@ -1007,6 +1008,10 @@ const char *renderer_stats(void) {
             snprintf(stats_text + n, sizeof stats_text - n, " | const blocks %s: %llu reused %llu copied", cbuf_lean() ? "lean" : "full",
                      (unsigned long long)prof_cb_reused, (unsigned long long)prof_cb_copied);
             prof_cb_reused = prof_cb_copied = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | hook pass %llu draws, %llu with known textures",
+                     (unsigned long long)prof_hook_draws, (unsigned long long)prof_hook_known);
+            prof_hook_draws = prof_hook_known = 0;
         }
         {   // GPU time per frame by part (see gpu_timer_add), CPU waits per frame by place (device.c g_vk_frame_waits)
             static uint64_t lw[4];
@@ -4433,12 +4438,30 @@ static void draw_(CmdRec *r, bool indexed) {
     float *vp = st.viewport[0];
     float zn = st.depth_range[0][0], zf = st.depth_range[0][1];
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
+    // The hooks below look for known textures (texpatch ids, TexBackend.tp > 0) among the fragment textures: one pass
+    // finds the texture objects and whether any is known; the loops only run when one is (most draws have none).
+    // LARECOMP_VK_NO_HOOK_PASS=1: every loop looks its textures up, as before.
+    static int hook_pass = -1;
+    if (hook_pass < 0) hook_pass = getenv("LARECOMP_VK_NO_HOOK_PASS") == NULL;
+    NvnTexture *ftex[64];
+    bool fknown = true;
+    if (hook_pass) {
+        fknown = false;
+        for (int i = 0; i < pr->fi->ntex; i++) {
+            ftex[i] = shader_texture_object(1, &pr->fi->tex[i]);
+            const TexBackend *b = ftex[i] ? (const TexBackend *)ftex[i]->backend : NULL;
+            if (b && b->tp > 0) fknown = true;
+        }
+        prof_hook_draws++;
+        if (fknown) prof_hook_known++;
+    }
+#define FTEX(i) (hook_pass ? ftex[i] : shader_texture_object(1, &pr->fi->tex[i]))
     {   // the Items page's cursor brackets while the cursor is on the companion card (runtime/hle/pets.c)
         extern bool pets_hide_item_cursor(void);
         extern bool texpatch_is_item_cursor(int id);
-        if (pets_hide_item_cursor())
+        if (pets_hide_item_cursor() && fknown)
             for (int i = 0; i < pr->fi->ntex; i++) {
-                NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+                NvnTexture *t = FTEX(i);
                 const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
                 if (b && b->tp > 0 && texpatch_is_item_cursor(b->tp - 1)) { SKIP(SK_HIDDEN); return; }
             }
@@ -4446,8 +4469,8 @@ static void draw_(CmdRec *r, bool indexed) {
     float tint[8] = {0};
     int recol = 0;  // a Cosmetics recolour texture's class (runtime/nvn/recolour.c)
     if (pr->fi->uses_tint) {
-        for (int i = 0; i < pr->fi->ntex; i++) {
-            NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        for (int i = 0; i < pr->fi->ntex && fknown; i++) {
+            NvnTexture *t = FTEX(i);
             const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
             if (b && b->tp > 0) recol = recolour_pick(recol, recolour_class_of(b->tp - 1));
         }
@@ -4464,8 +4487,8 @@ static void draw_(CmdRec *r, bool indexed) {
         extern int texpatch_heart_kind(int id);
         extern void texpatch_heart_tint(int kind, float tint[8]);
         int bottle = 0, heart = 0;
-        for (int i = 0; i < pr->fi->ntex; i++) {
-            NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        for (int i = 0; i < pr->fi->ntex && fknown; i++) {
+            NvnTexture *t = FTEX(i);
             const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
             if (b && b->tp > 0 && !bottle) bottle = texpatch_bottle_kind(b->tp - 1);
             if (b && b->tp > 0 && !heart) heart = texpatch_heart_kind(b->tp - 1);
@@ -4491,7 +4514,8 @@ static void draw_(CmdRec *r, bool indexed) {
         tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
         tex_fr[1][i][0] = fr[0]; tex_fr[1][i][1] = fr[1];
         // the Hint Sheet (runtime/hle/hint_sheet.c): the dungeon map's icon in place of the first bottle's
-        NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        // (tp read after texture_info: its upload check may have identified the texture just now)
+        NvnTexture *t = FTEX(i);
         const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
         extern int texpatch_bottle_kind(int id);
         if (b && b->tp > 0 && texpatch_bottle_kind(b->tp - 1) == 1) {
@@ -4505,6 +4529,7 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
     }
+#undef FTEX
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
     if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
