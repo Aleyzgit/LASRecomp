@@ -67,7 +67,7 @@ sys.modules['PySide6'] = pyside
 sys.modules['PySide6.QtCore'] = qtcore
 
 ARGS = [os.path.abspath(a) for a in sys.argv[1:4]]
-_RERUN = [sys.executable] + ([] if getattr(sys, 'frozen', False) else [os.path.abspath(__file__)]) + sys.argv[1:]  # (retry_layout)
+_RERUN = [sys.executable] + ([] if getattr(sys, 'frozen', False) else [os.path.abspath(__file__)]) + ARGS + sys.argv[4:]  # (retry_layout)
 sys.argv[0] = os.path.join(LAS, 'randomizer.py')  # LAS resolves its data paths from argv[0]
 sys.path.insert(0, LAS)
 os.chdir(LAS)

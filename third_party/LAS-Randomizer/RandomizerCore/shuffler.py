@@ -643,6 +643,7 @@ class ItemShuffler(QtCore.QThread):
             for s in location_pool:
                 free[wing_of(s)] = free.get(wing_of(s), 0) + 1
             placement_tracker = []
+            undos = 0  # (as below: a layout that goes round forever is given up)
             while item_pool and self.thread_active:
                 item = item_pool[0]
                 first_location_tried = location_pool[0]
@@ -660,6 +661,9 @@ class ItemShuffler(QtCore.QThread):
                         if location_pool[0] == first_location_tried:
                             if not placement_tracker:
                                 raise RuntimeError(f"can't place {item} in the Labyrinth: no check is reachable without it")
+                            undos += 1
+                            if undos > 60:
+                                raise RuntimeError(f"can't place the Labyrinth's small keys: {undos} tries")
                             undo_location = placement_tracker.pop(0)
                             location_pool.append(undo_location)
                             locations.append(undo_location)
@@ -718,6 +722,7 @@ class ItemShuffler(QtCore.QThread):
             
             # Keep track of where we placed items. this is necessary to undo placements if we get stuck
             placement_tracker = []
+            undos = 0  # (LAS Recomp: the undo / reshuffle can go round forever - room shuffle gives up the layout)
             
             # Iterate through the dungeon items for that dungeon (inherently in order of nightmare key, small keys, stone beak, compass, map)
             while item_pool and self.thread_active:
@@ -746,6 +751,9 @@ class ItemShuffler(QtCore.QThread):
                                                    "reachable without it" + ''.join(
                                     f"\n  {l}: {self.logic_defs[l].get('condition-basic')}" for l in sorted(location_pool)
                                     if verbose))
+                            undos += 1
+                            if undos > 60 and self.settings.get('dungeon-of'):
+                                raise RuntimeError(f"can't place the items of D{i}: {undos} tries")
                             undo_location = placement_tracker.pop(0)
                             location_pool.append(undo_location)
                             locations.append(undo_location)
