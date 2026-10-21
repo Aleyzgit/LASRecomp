@@ -351,7 +351,11 @@ def wing_title(n, lang, game_title=b'', game_name=b'', glyphs=None):
         m = re.search(r'(\s*\S\s*)$', t[:-len(nm)])
         sep = m.group(1) if m else sep
     for lab, wing in choices:
-        out = lab + wing.format(name=nm.rstrip('\0')) if '{name}' in wing else lab + sep + wing.format(n=n)
+        name = nm.rstrip('\0')
+        if '{name}' in wing:  # (a name with the word in it already - the Color Dungeon, 衣服迷宫 - as it is)
+            out = name if any(w in name for w in ('迷宫', '迷宮')) else lab + wing.format(name=name)
+        else:
+            out = lab + sep + wing.format(n=n)
         if glyphs is None or all(c in glyphs for c in out):
             return out
     return None
