@@ -321,15 +321,16 @@ def main():
         for name, p in pot_locs.items():
             if p['level'] in lv_node:
                 cextra.setdefault(lv_node[p['level']], []).append((name, 'break-pot'))
-        pockets = el.pocket_screens(cdoors)
+        pocket_at = el.pocket_of(cdoors)
 
         def with_caves(cv):
             lg = copy.deepcopy(logic_defs)
             n = el.apply_connector_logic(lg, ed, *cv, cextra) if cv[0] else 0
-            # a bush / dig tile on a pocket's screen may stand in the pocket: needs it
+            # a bush / dig tile in a pocket (its door's screen, or its tiles on the screens beside it) needs it
             for name, b in list(bush_locs.items()) + list(dig_locs.items()):
-                if cv[0] and pockets.get(b['room']) and name in lg:
-                    lg[name]['condition-basic'] = el._and(lg[name].get('condition-basic'), pockets[b['room']])
+                pk = cv[0] and name in lg and pocket_at(b['room'], b.get('tile'))
+                if pk:
+                    lg[name]['condition-basic'] = el._and(lg[name].get('condition-basic'), pk)
             n += el.apply_logic(lg, ent_doors, ent_entry, ent_exit, extra)
             if settings.get('hookshot-anything'):  # (its routes, on conditions the caves' logic replaced)
                 import hookshot_logic
