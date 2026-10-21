@@ -2,6 +2,7 @@
 // pace_frame() on the presenting thread, and the backends pass the game's timing counters through pace_end_counter().
 #include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -35,11 +36,19 @@
 //     backoff up to 4x (a light scene after a heavy one doesn't wait long);
 //   enough: the median under 13.5 ms and at most 4 of the last 60 over 16.2 ms, 150 frames in a row (5 s at 30) times
 //     the backoff.
+// Both count gameplay frames of one scene only (issue #92: a Vega 8 went back to 60 on the pause menu, ~13 passes a
+// frame, then ran gameplay at 40-55 fps - slow motion - for 2-4 s until held again): frames without the world on screen
+// (the pause menu, title, file select: no scene composite, mirror.c) don't count, and a scene change (level, camera
+// zone - a dungeon room -, the menu opening or closing, a load) starts both over. And when the backend times the GPU
+// (pace_gpu_ns), its time per frame must fit too, on average under PACE_GPU_MS: CPU headroom says nothing on a
+// GPU-bound machine. (Held, the game draws once per frame as at 60 - the second world step is CPU work only - so its GPU
+// time per frame is what a frame at 60 would take, or more: a GPU at half load may clock down.)
 // Backoff (issues #70, #40): a machine right at the edge (a handheld on a low power profile) gains headroom at 30 fps
 // just by cooling down, goes back to 60, and doesn't fit again a few seconds later - 60 / 30 flicker. Falling back
 // within 20 s of going back doubles the wait (up to 16x: 80 s for "enough"); a minute at 60 resets it.
 // LARECOMP_PACE=0: off (the game's own choice, flips and all).
 #define PACE_SLOW_NS 20000000ull
+#define PACE_GPU_MS 15.0  // (16.7 ms a frame at 60, less some for the window image and jitter)
 extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked in waits / sleeps
 static bool pace_slow;
 static uint64_t stat_pace_over;
@@ -103,15 +112,33 @@ uint64_t pace_frames_over(void) {
 
 // LARECOMP_SPIKE_MS=<ms> [LARECOMP_SPIKE_EVERY=<frames>, default 60]: the presenting (game) thread sleeps that long
 // every that many frames from frame 2700 on (in play after a scripted load): a CPU-side hitch with the GPU idle
-// (dynamic resolution tests).
+// (dynamic resolution tests). LARECOMP_SPIKE_FROM / LARECOMP_SPIKE_UNTIL=<frame>: other first / last frames (with
+// EVERY=1: a machine too slow for 60 for a while - the 30 fps hold and the way back, frame pacing tests).
 static void spike_test(void) {
-    static long ms = -1, every, frame;
+    static long ms = -1, every, frame, from, until;
     if (ms < 0) {
         ms = getenv("LARECOMP_SPIKE_MS") ? atol(getenv("LARECOMP_SPIKE_MS")) : 0;
         every = getenv("LARECOMP_SPIKE_EVERY") ? atol(getenv("LARECOMP_SPIKE_EVERY")) : 60;
         if (every < 1) every = 60;
+        from = getenv("LARECOMP_SPIKE_FROM") ? atol(getenv("LARECOMP_SPIKE_FROM")) : 2700;
+        until = getenv("LARECOMP_SPIKE_UNTIL") ? atol(getenv("LARECOMP_SPIKE_UNTIL")) : 0;
     }
-    if (ms > 0 && ++frame > 2700 && frame % every == 0) plat_sleep_until_ns(plat_now_ns() + (uint64_t)ms * 1000000);
+    if (ms > 0 && ++frame > from && (!until || frame <= until) && frame % every == 0)
+        plat_sleep_until_ns(plat_now_ns() + (uint64_t)ms * 1000000);
+}
+
+// The scene a frame shows, for the way back to 60 (see above): 0 when it isn't gameplay (no save in play, or no world on
+// screen: the pause menu, title, file select), else the level and camera zone, hashed.
+static uint64_t pace_scene(void) {
+    extern int game_in_play(void);              // hle/warp.c
+    extern bool world_on_screen(void);          // hle/mirror.c
+    extern const char *game_level_name(void);   // hle/widescreen.c
+    extern uint64_t game_camera_zone(void);     // hle/widescreen.c
+    if (!game_in_play() || !world_on_screen()) return 0;
+    uint64_t h = 1469598103934665603ull;  // (FNV-1a)
+    for (const char *c = game_level_name(); *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ull;
+    h = (h ^ game_camera_zone()) * 1099511628211ull;
+    return h ? h : 1;
 }
 
 void pace_frame(void) {
@@ -130,7 +157,22 @@ void pace_frame(void) {
     uint64_t p = now - last, wt = w - last_wait, tc = tcpu - last_tcpu, rc = rcpu - last_rcpu;
     bool first = !last;
     last = now, last_wait = w, last_tcpu = tcpu, last_rcpu = rcpu;
-    if (first || p > 100000000ull) { hold_cadence(hold_30(pace_slow && on)); return; }  // (loading, a hitch: not a pace)
+    // GPU time per frame (pace_gpu_ns: the backend's GPU timer, cumulative; -1 without one), moving average (~20 frames).
+    // (A frame's GPU time is read a few frames late and in bursts: the average smooths that.)
+    extern int64_t pace_gpu_ns(void);
+    static int64_t last_gpu = -1;
+    static double gpu_avg = -1;  // ms (-1: no GPU timer)
+    int64_t gpu = pace_gpu_ns();
+    double gpu_ms = gpu >= 0 && last_gpu >= 0 && gpu >= last_gpu ? (gpu - last_gpu) / 1e6 : -1;
+    last_gpu = gpu;
+    static uint64_t scene;  // the scene clear / calm counted frames of (pace_scene; 0: none)
+    static int gpu_said;    // (logged once per hold: the CPU had headroom but the GPU didn't)
+    static int cpu_clear;   // gameplay frames in a row with clear headroom by CPU time alone
+    if (first || p > 100000000ull) {  // (loading, a hitch: not a pace, and maybe a new scene)
+        clear = calm = cpu_clear = 0, scene = 0;
+        hold_cadence(hold_30(pace_slow && on));
+        return;
+    }
     double busy = (p > wt ? p - wt : 0) / 1e6;
     // What the frame would cost at 60 fps: a frame of the game's 30 fps mode (two vsyncs or more) runs its world twice,
     // and the second step - about half this thread's CPU time then (measured: 3.0 -> 6.0 ms, 4.9 -> 9.3 ms) - is work
@@ -143,6 +185,7 @@ void pace_frame(void) {
     // period can hold more or less than one frame of its work.)
     if (pace_slow && rc / 1e6 > cost && rc < 60000000ull) cost = rc / 1e6;
     avg = avg ? avg + (cost - avg) * 0.05 : cost;
+    if (gpu_ms >= 0) gpu_avg = gpu_avg >= 0 ? gpu_avg + ((gpu_ms < 100 ? gpu_ms : 100) - gpu_avg) * 0.05 : gpu_ms;
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
     extern __thread uint64_t g_rq_wait_ns;  // rqueue.c: waits for the render thread (translation), counted as busy
@@ -154,10 +197,11 @@ void pace_frame(void) {
         extern __thread uint64_t g_rq_lock_ns, g_submit_ns, g_gpu_wait_ns, g_present_ns, g_hooks_ns;
         static uint64_t last_cpu, l_lock, l_sub, l_gpu, l_pres, l_hooks;
         uint64_t cpu = plat_thread_cpu_ns();
-        LOG("[pace] period %.2f blocked %.2f busy %.2f cost %.2f ms (queue wait %.2f, cpu %.2f, render cpu %.2f, gpu wait %.2f, submit %.2f, "
-            "present %.2f, hooks %.2f, lock %.2f)\n", p / 1e6, wt / 1e6, busy, cost, rqw / 1e6, last_cpu ? (cpu - last_cpu) / 1e6 : 0.0,
-            rc / 1e6, (g_gpu_wait_ns - l_gpu) / 1e6, (g_submit_ns - l_sub) / 1e6,
-            (g_present_ns - l_pres) / 1e6, (g_hooks_ns - l_hooks) / 1e6, (g_rq_lock_ns - l_lock) / 1e6);
+        LOG("[pace] period %.2f blocked %.2f busy %.2f cost %.2f ms (queue wait %.2f, cpu %.2f, render cpu %.2f, gpu %.2f, gpu wait %.2f, "
+            "submit %.2f, present %.2f, hooks %.2f, lock %.2f)%s\n", p / 1e6, wt / 1e6, busy, cost, rqw / 1e6,
+            last_cpu ? (cpu - last_cpu) / 1e6 : 0.0, rc / 1e6, gpu_ms, (g_gpu_wait_ns - l_gpu) / 1e6, (g_submit_ns - l_sub) / 1e6,
+            (g_present_ns - l_pres) / 1e6, (g_hooks_ns - l_hooks) / 1e6, (g_rq_lock_ns - l_lock) / 1e6,
+            pace_scene() ? "" : " (no gameplay)");
         last_cpu = cpu;
         l_lock = g_rq_lock_ns, l_sub = g_submit_ns, l_gpu = g_gpu_wait_ns, l_pres = g_present_ns, l_hooks = g_hooks_ns;
     }
@@ -174,19 +218,30 @@ void pace_frame(void) {
         LOG("[pace] a minute at 60: headroom needed back to normal\n");
     }
     if (!pace_slow && nover >= 12 && med >= 13.0f) {
-        pace_slow = true, calm = clear = 0;
+        pace_slow = true, calm = clear = cpu_clear = 0, gpu_said = 0;
         if (back_at && now - back_at < 20000000000ull && backoff < 16) backoff *= 2;  // (flickering: wait longer)
         LOG("[pace] frames don't fit 60 fps (%d of the last 60 over 16.2 ms busy, median %.1f): holding the game's 30 fps mode%s\n",
             nover, med, backoff > 1 ? " (backing off)" : "");
     } else if (pace_slow) {
         float peak = 0;
         for (int i = 0; i < 60; i++) peak = recent[i] > peak ? recent[i] : peak;
-        clear = avg < 11.0 && peak < 14.5f ? clear + 1 : 0;
-        calm = med < 13.5f && nover <= 4 ? calm + 1 : 0;
+        uint64_t sc = pace_scene();
+        if (sc != scene) clear = calm = cpu_clear = 0, scene = sc;  // (a new scene, the menu opening or closing: start over)
+        bool gpu_fits = gpu_avg < PACE_GPU_MS;  // (no GPU timer: -1, CPU only)
         int clear_n = 60 * (backoff < 4 ? backoff : 4);
+        cpu_clear = sc && avg < 11.0 && peak < 14.5f ? cpu_clear + 1 : 0;
+        if (cpu_clear == clear_n && !gpu_fits && !gpu_said++)
+            LOG("[pace] %d gameplay frames with clear CPU headroom (%.1f ms a frame at 60 on average), but the GPU takes %.1f ms "
+                "a frame: staying at 30\n", cpu_clear, avg, gpu_avg);
+        clear = gpu_fits && cpu_clear ? clear + 1 : 0;
+        calm = sc && gpu_fits && med < 13.5f && nover <= 4 ? calm + 1 : 0;
         if (clear >= clear_n || calm >= 150 * backoff) {
-            LOG("[pace] %d frames with %s headroom (%.1f ms a frame at 60 on average, median %.1f, at most %.1f): back to "
-                "the game's own choice\n", clear >= clear_n ? clear : calm, clear >= clear_n ? "clear" : "enough", avg, med, peak);
+            char g[32];
+            if (gpu_avg >= 0) snprintf(g, sizeof g, ", gpu %.1f ms", gpu_avg);
+            else snprintf(g, sizeof g, ", gpu not timed");
+            LOG("[pace] %d frames with %s headroom on gameplay frames (%.1f ms a frame at 60 on average, median %.1f, at most "
+                "%.1f%s): back to the game's own choice\n", clear >= clear_n ? clear : calm, clear >= clear_n ? "clear" : "enough",
+                avg, med, peak, g);
             pace_slow = false, nover = 0, back_at = now;
             memset(over, 0, sizeof over);
             memset(recent, 0, sizeof recent);
