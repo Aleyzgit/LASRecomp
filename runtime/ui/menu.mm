@@ -838,6 +838,20 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
     g_font = f0, g_font_big = f1;
 }
 
+// Whether menu_render draws anything: the menu, the keyboard, an overlay (FPS, inventory, tracker, chaos, race, a
+// pickup card). Asked by the Vulkan backend before menu_render, which records into the window image's command buffer
+// itself: its recorder thread (runtime/nvn/vulkan/record.c) has to be caught up first, and only when there is something
+// to draw.
+static bool render_needed(bool open, bool kbd, bool inv, bool trk, bool trkd, bool chaos, bool race, bool flyin) {
+    return open || kbd || g_settings.show_fps || inv || trk || trkd || chaos || race || flyin;
+}
+bool menu_render_needed(void) {
+    bool open = g_open.load();
+    return render_needed(open, g_kbd.load() == 1, !open && inventory_overlay_wanted(), !open && tracker_overlay_wanted(),
+                         !open && tracker_dungeon_wanted(), !open && chaos_overlay_wanted(), race_overlay_wanted(),
+                         pickup_flyin_wanted() && !open);
+}
+
 #ifdef __APPLE__
 void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> target) {
     const double tw = target.width, th = target.height;
@@ -853,7 +867,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool kbd = g_kbd.load() == 1;
     bool race = race_overlay_wanted();  // (run timer, race seed hash: race_overlay.mm)
     bool flyin = pickup_flyin_wanted() && !open;  // (a silent pickup's card)
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !trkd && !chaos && !race && !flyin) {
+    if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin)) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }

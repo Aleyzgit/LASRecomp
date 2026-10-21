@@ -253,7 +253,7 @@ static void *run(void *arg) {
         case IT_FLUSH: { extern void renderer_flush(void); renderer_flush(); break; }
         }
         backend_pool_pop(pool);
-        uint64_t gs = renderer_submit_seq(), c1 = plat_thread_cpu_ns();
+        uint64_t gs = renderer_issued_seq(), c1 = plat_thread_cpu_ns();  // (its last submission; renderer_wait_seq waits for it)
         atomic_store_explicit(&render_cpu_ns, c1, memory_order_relaxed);  // (LARECOMP_LOG_PACE: pace.c)
         if (stats) {
             static uint64_t n[5], wall[5], cpu[5], items;
@@ -363,7 +363,7 @@ uint64_t rq_wait_item(uint64_t q) {
     lock_timed();
     if (q > q_enq) q = q_enq;
     wait_until(&cv_done, item_done, q, true, "fence (its list not translated yet)");
-    gs = q_done >= q ? gpu_seq_of[q % RQ_HIST] : renderer_submit_seq();  // (gave up: whatever is submitted)
+    gs = q_done >= q ? gpu_seq_of[q % RQ_HIST] : renderer_issued_seq();  // (gave up: whatever is queued)
     pthread_mutex_unlock(&lock);
     g_rq_wait_ns += plat_now_ns() - t0;
     return gs;
