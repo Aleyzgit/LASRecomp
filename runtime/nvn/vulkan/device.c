@@ -320,6 +320,8 @@ static void create_device(void) {
     g_fault_ext = fault;
     bool budget = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);  // (real per-heap budgets: vk_log_memory)
     if (budget) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+    // dynamic vertex input (exec.c): fewer pipelines
+    bool vids_ext = has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
 #ifdef __linux__
     // the guest heap as driver memory mapped at HEAP_BASE (exec.c backend_guest_heap_prepare)
     g_vk.dmabuf = has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
@@ -343,7 +345,18 @@ static void create_device(void) {
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT have_placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
     if (placed_ext) have12.pNext = &have_placed;
 #endif
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT have_vids = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    if (vids_ext) have_vids.pNext = have.pNext, have.pNext = &have_vids;
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    {   // dynamic vertex input (exec.c): fewer pipelines; LARECOMP_VK_DYN_VERTEX=0 keeps the layout in each pipeline
+        const char *e = getenv("LARECOMP_VK_DYN_VERTEX");
+        bool off = e && !atoi(e);
+        g_vk.vids = vids_ext && have_vids.vertexInputDynamicState && !off;
+        if (g_vk.vids) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+        else LOG("[vk] vertex input: in each pipeline (%s)\n", off ? "LARECOMP_VK_DYN_VERTEX=0" :
+                 !vids_ext ? "no VK_EXT_vertex_input_dynamic_state" : "vertexInputDynamicState not supported");
+    }
 #if defined(__linux__) && defined(VK_EXT_map_memory_placed)
     have12.pNext = NULL;
     g_vk.map_placed = placed_ext && have_placed.memoryMapPlaced;
@@ -383,6 +396,9 @@ static void create_device(void) {
                                                          .pNext = f.pNext};
     if (g_vk.map_placed) f.pNext = &placed;
 #endif
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT en_vids = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, .vertexInputDynamicState = VK_TRUE};
+    if (g_vk.vids) en_vids.pNext = f.pNext, f.pNext = &en_vids;
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
@@ -409,6 +425,12 @@ static void create_device(void) {
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    if (g_vk.vids) {
+        g_vk.set_vertex_input = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
+        if (!g_vk.set_vertex_input) g_vk.vids = false;
+        LOG("[vk] vertex input: %s\n", g_vk.vids ? "dynamic (VK_EXT_vertex_input_dynamic_state)" :
+            "in each pipeline (vkCmdSetVertexInputEXT missing)");
+    }
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
                                  .vulkanApiVersion = VK_API_VERSION_1_3,

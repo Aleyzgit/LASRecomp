@@ -1068,6 +1068,14 @@ static VkFormat pass_color[8], pass_depth, pass_stencil;
 static uint32_t pass_ncolor, pass_samples = 1, pass_w, pass_h;
 static int debug_pass_no;
 
+// A draw's vertex layout. Without dynamic vertex input it is copied into the PipeKey (each layout its own pipeline);
+// with it (g_vk.vids) the key leaves it out and draw_ sets it (vkCmdSetVertexInputEXT) when it changes.
+typedef struct {
+    uint32_t attr_mask, used_streams;
+    uint32_t attr_fmt[32], attr_off[32], attr_bind[32];
+    uint32_t stride[17], divisor[17];  // divisor 0: per vertex; else per instance
+} VtxLayout;
+
 // Redundant-state filter: what draw() last set in the current command buffer, so unchanged pipeline binds, dynamic
 // state and vertex / index buffer binds are not recorded again (a draw used to issue ~20 vkCmd* calls; most repeat the
 // previous draw's). Forgotten (ss_forget) whenever something else may have recorded state: a new command buffer, a new
@@ -1077,7 +1085,7 @@ static int debug_pass_no;
 // LARECOMP_VK_STATE_FILTER=0: every draw sets everything, as before.
 enum { SS_PIPE = 1 << 0, SS_DT = 1 << 1, SS_DW = 1 << 2, SS_DOP = 1 << 3, SS_STEN = 1 << 4, SS_SFACE0 = 1 << 5, SS_SFACE1 = 1 << 6,
        SS_BC = 1 << 7, SS_CULL = 1 << 8, SS_FF = 1 << 9, SS_TOPO = 1 << 10, SS_PRE = 1 << 11, SS_DBE = 1 << 12, SS_DB = 1 << 13,
-       SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16 };
+       SS_VP = 1 << 14, SS_SC = 1 << 15, SS_IB = 1 << 16, SS_VI = 1 << 17 };
 static struct {
     uint32_t known;  // SS_* bits: the value below is what the command buffer has
     uint32_t vb_known;  // per vertex binding
@@ -1093,6 +1101,7 @@ static struct {
     VkRect2D sc;
     VkBuffer ib; VkDeviceSize io; VkIndexType it;
     VkBuffer vb[17]; VkDeviceSize vo[17];
+    VtxLayout vi;  // (dynamic vertex input)
 } ss;
 static int ss_on = -1;
 static void ss_forget(void) { ss.known = 0; ss.vb_known = 0; }
@@ -1959,8 +1968,9 @@ typedef struct {
     uint8_t a2c, topo_class, poly_fill;
 } PipeIn;
 
+// vl (optional): the vertex layout, also when the key leaves it out (dynamic vertex input)
 static void pipe_key_fill(PipeKey *k, Prog *pr, const PipeIn *in, const VkFormat color[8], uint32_t ncolor, VkFormat depth,
-                          VkFormat stencil, uint32_t samples) {
+                          VkFormat stencil, uint32_t samples, VtxLayout *vl) {
     memset(k, 0, sizeof *k);
     k->prog = pr;
     k->ncolor = ncolor;
@@ -1970,27 +1980,38 @@ static void pipe_key_fill(PipeKey *k, Prog *pr, const PipeIn *in, const VkFormat
     k->depth = depth;
     k->stencil = stencil;
     k->samples = samples;
+    VtxLayout l_, *l = vl ? vl : &l_;
+    memset(l, 0, sizeof *l);
     for (int i = 0; i < 32; i++) {
         if (!(pr->vi->attr_mask & (1u << i))) continue;
-        k->attr_mask |= 1u << i;
+        l->attr_mask |= 1u << i;
         uint32_t a = i < in->nattrib ? in->attrib[i] : 0x2E;
         uint32_t fmt = a & 0xFF, stream = (a >> 8) & 0x1F, off = a >> 13;
         if (i >= in->nattrib || fmt == 0 || stream >= 16) {  // unbound attribute: (0, 0, 0, 1) from a constant stream
-            k->attr_fmt[i] = VK_FORMAT_R32G32B32A32_SFLOAT;
-            k->attr_bind[i] = ZERO_BINDING;
-            k->used_streams |= 1u << ZERO_BINDING;
+            l->attr_fmt[i] = VK_FORMAT_R32G32B32A32_SFLOAT;
+            l->attr_bind[i] = ZERO_BINDING;
+            l->used_streams |= 1u << ZERO_BINDING;
             continue;
         }
-        k->attr_fmt[i] = vertex_format_supported(vertex_format(fmt));
-        k->attr_off[i] = off;
-        k->attr_bind[i] = stream;
-        k->used_streams |= 1u << stream;
+        l->attr_fmt[i] = vertex_format_supported(vertex_format(fmt));
+        l->attr_off[i] = off;
+        l->attr_bind[i] = stream;
+        l->used_streams |= 1u << stream;
     }
     for (int s = 0; s < 16; s++) {
-        if (!(k->used_streams & (1u << s))) continue;
-        k->stride[s] = s < in->nstream ? in->stream[s][0] : 0;
-        k->divisor[s] = s < in->nstream && k->stride[s] ? in->stream[s][1] : 0;
-        if (k->divisor[s] > 1 && !g_vk.divisor) k->divisor[s] = 1;
+        if (!(l->used_streams & (1u << s))) continue;
+        l->stride[s] = s < in->nstream ? in->stream[s][0] : 0;
+        l->divisor[s] = s < in->nstream && l->stride[s] ? in->stream[s][1] : 0;
+        if (l->divisor[s] > 1 && !g_vk.divisor) l->divisor[s] = 1;
+    }
+    k->attr_mask = l->attr_mask;  // (the program's: the same with either path)
+    if (!g_vk.vids) {             // the layout is part of the pipeline
+        memcpy(k->attr_fmt, l->attr_fmt, sizeof k->attr_fmt);
+        memcpy(k->attr_off, l->attr_off, sizeof k->attr_off);
+        memcpy(k->attr_bind, l->attr_bind, sizeof k->attr_bind);
+        memcpy(k->stride, l->stride, sizeof k->stride);
+        memcpy(k->divisor, l->divisor, sizeof k->divisor);
+        k->used_streams = l->used_streams;
     }
     for (uint32_t i = 0; i < k->ncolor && i < 8; i++) {
         if (!in->rt_fmt[i] || k->color[i] == VK_FORMAT_UNDEFINED) continue;
@@ -2055,15 +2076,18 @@ static void build_pipeline(void *arg) {
     }
     VkPipelineColorBlendStateCreateInfo cb = {.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
                                               .attachmentCount = k->ncolor, .pAttachments = cba};
+    VkDynamicState dyn[NDYN + 1];  // (+ the vertex layout with dynamic vertex input: draw_ sets it)
+    memcpy(dyn, DYN, sizeof DYN);
+    if (g_vk.vids) dyn[NDYN] = VK_DYNAMIC_STATE_VERTEX_INPUT_EXT;
     VkPipelineDynamicStateCreateInfo dy = {.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-                                           .dynamicStateCount = NDYN, .pDynamicStates = DYN};
+                                           .dynamicStateCount = NDYN + g_vk.vids, .pDynamicStates = dyn};
     VkPipelineRenderingCreateInfo ri = {.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .colorAttachmentCount = k->ncolor,
                                         .pColorAttachmentFormats = k->color, .depthAttachmentFormat = k->depth,
                                         .stencilAttachmentFormat = k->stencil};
     VkGraphicsPipelineCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = &ri, .stageCount = 2,
-                                       .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
-                                       .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
-                                       .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout};
+                                       .pStages = stages, .pVertexInputState = g_vk.vids ? NULL : &vi, .pInputAssemblyState = &ia,
+                                       .pViewportState = &vs, .pRasterizationState = &rs, .pMultisampleState = &ms,
+                                       .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy, .layout = k->prog->layout};
     uint64_t t0 = SDL_GetTicksNS();
     int bs = build_begin("pipeline vs/fs", k->prog->code[0] ? k->prog->code[0] : k->prog->prep_vh,
                          k->prog->code[1] ? k->prog->code[1] : k->prog->prep_fh);
@@ -2078,6 +2102,25 @@ static void build_pipeline(void *arg) {
     atomic_fetch_add(&stat_compiles, 1);
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
     slow_build(t0, "pipeline vs/fs", k->prog->code[0], k->prog->code[1]);
+}
+
+// Dynamic vertex input (g_vk.vids): the draw's layout, as build_pipeline would bake it in
+static void set_vertex_input(VkCommandBuffer cb, const VtxLayout *l) {
+    VkVertexInputAttributeDescription2EXT va[32];
+    VkVertexInputBindingDescription2EXT vb[17];
+    uint32_t na = 0, nb = 0;
+    for (int i = 0; i < 32; i++)
+        if (l->attr_mask & (1u << i))
+            va[na++] = (VkVertexInputAttributeDescription2EXT){.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT,
+                .location = (uint32_t)i, .binding = l->attr_bind[i], .format = l->attr_fmt[i], .offset = l->attr_off[i]};
+    for (uint32_t s = 0; s < 17; s++) {
+        if (!(l->used_streams & (1u << s))) continue;
+        bool inst = l->divisor[s] != 0;
+        vb[nb++] = (VkVertexInputBindingDescription2EXT){.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT,
+            .binding = s, .stride = l->stride[s], .inputRate = inst ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX,
+            .divisor = inst ? l->divisor[s] : 1};
+    }
+    g_vk.set_vertex_input(cb, nb, vb, na, va);
 }
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
@@ -3871,9 +3914,21 @@ static void prep_job(void (*fn)(void *), void *arg) {
     run_job(prep_job_run, j);
 }
 
+static _Atomic int prep_pipe_dups;  // records whose pipeline another record already made
 bool renderer_prepare_begin(void) { return g_vk.dev != VK_NULL_HANDLE; }
 int renderer_prepare_pending(void) { return prep_pending; }
-void renderer_prepare_end(void) { vk_pipeline_cache_save(); }  // (otherwise only kept at exit)
+void renderer_prepare_end(void) {
+    vk_pipeline_cache_save();  // (otherwise only kept at exit)
+    static bool logged;        // (the counts: once per process, the background preparation runs once)
+    if (!logged) {
+        logged = true;
+        pthread_mutex_lock(&prep_lock);
+        size_t n = prep_pipes_n;
+        pthread_mutex_unlock(&prep_lock);
+        LOG("[vk] prepared %zu pipelines (%d records shared one, vertex input %s)\n", n, atomic_load(&prep_pipe_dups),
+            g_vk.vids ? "dynamic" : "in each pipeline");
+    }
+}
 
 typedef struct { Pipe *pp; ShaderRec r; } PrepPipe;
 static void prep_pipeline(void *arg) {
@@ -3900,12 +3955,18 @@ static void prep_pipeline(void *arg) {
     }
     const PipeIn in = {r->attrib, r->nattrib, r->stream, r->nstream, r->color, r->channel_mask, r->blend_on, r->blend,
                        r->a2c, r->topo, r->poly_fill};
-    pipe_key_fill(&a->pp->k, pr, &in, color, ncolor, depth, stencil, r->samples ? r->samples : 1);
+    pipe_key_fill(&a->pp->k, pr, &in, color, ncolor, depth, stencil, r->samples ? r->samples : 1, NULL);
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &a->pp->k, sizeof a->pp->k);
     if (!ph) ph = 1;
-    if (PREP_GET(prep_pipes, ph)) { free(a->pp); free(a); return; }  // (another record makes the same pipeline)
+    // Another record makes the same pipeline (with dynamic vertex input: every record differing only in its vertex
+    // layout): built once. Claimed before the build, so records on other worker threads at the same time see it too
+    // (the game skips a draw whose prepared pipeline is still building or failed, as with one it builds itself).
+    pthread_mutex_lock(&prep_lock);
+    bool dup = prep_get(prep_pipes, prep_pipes_cap, ph) != NULL;
+    if (!dup) prep_put(&prep_pipes, &prep_pipes_cap, &prep_pipes_n, ph, a->pp);
+    pthread_mutex_unlock(&prep_lock);
+    if (dup) { atomic_fetch_add(&prep_pipe_dups, 1); free(a->pp); free(a); return; }
     build_pipeline(a->pp);
-    if (atomic_load(&a->pp->state) == 1) PREP_PUT(prep_pipes, ph, a->pp);
     free(a);
 }
 
@@ -4233,7 +4294,8 @@ static void draw_(CmdRec *r, bool indexed) {
     const PipeIn in = {st.attrib, st.nattrib, (const uint32_t (*)[2])st.stream, st.nstream, rt_fmt, st.channel_mask,
                        st.color_state[0], (const uint8_t (*)[8])st.blend, st.ms[0xC] != 0, cls, st.poly[2] != 1};
     PipeKey k;
-    pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples);
+    VtxLayout vl;
+    pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &vl);
     uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
     if (!ph) ph = 1;
     uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
@@ -4265,6 +4327,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (atomic_load(&pp->state) != 1) { SKIP(atomic_load(&pp->state) == 2 ? SK_PIPE_FAILED : SK_PIPE_BUILDING); return; }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
+    if (g_vk.vids && ss_need(SS_VI, !memcmp(&ss.vi, &vl, sizeof vl))) { ss.vi = vl; set_vertex_input(cb, &vl); }
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
@@ -4531,7 +4594,7 @@ static void draw_(CmdRec *r, bool indexed) {
 
     // ---- vertex streams: the range this draw can read, copied once per submission
     for (int s = 0; s < 17; s++) {
-        if (!(k.used_streams & (1u << s))) continue;
+        if (!(vl.used_streams & (1u << s))) continue;
         VkSpan sp;
         if (s == ZERO_BINDING) {
             static const float zero[4] = {0, 0, 0, 1};
@@ -4553,9 +4616,9 @@ static void draw_(CmdRec *r, bool indexed) {
                 if (base_vertex > 0) max_index += (uint32_t)base_vertex;
                 scan_src = NULL;
             }
-            uint64_t stride = k.stride[s], need;
+            uint64_t stride = vl.stride[s], need;
             if (!stride) need = 256;
-            else if (k.divisor[s]) need = ((uint64_t)base_inst + inst + k.divisor[s] - 1) / k.divisor[s] * stride + 256;
+            else if (vl.divisor[s]) need = ((uint64_t)base_inst + inst + vl.divisor[s] - 1) / vl.divisor[s] * stride + 256;
             else need = (uint64_t)max_index * stride + 256;
             if (v.size && need > v.size) need = v.size;
             if (!v.addr) { static const uint8_t zero[256]; sp = vk_transient_copy(zero, 256, 16); }
