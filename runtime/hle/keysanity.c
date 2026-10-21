@@ -69,6 +69,8 @@ void rt_powder_flag_tick(void) {
 
 // x0 item, x1 count, x2 index: returns 1 when handled (AddItem then returns at once)
 int rt_add_item(Cpu *c) {
+    extern void rt_silent_add(Cpu *);  // silent_pickups.c: a silent pickup's index back to the real one (+ its fly-in)
+    rt_silent_add(c);
     int item = (int)(int32_t)c->x[0], count = (int)(int32_t)c->x[1], index = (int)(int32_t)c->x[2];
     extern int triforce_add_item(int item, int index);  // triforce.c: a Triforce piece (Triforce hunt)
     if (triforce_add_item(item, index)) return 1;
