@@ -115,6 +115,8 @@ static void raise_open_file_limit(void) {
         }
     }
     getrlimit(RLIMIT_NOFILE, &rl);
-    fprintf(stderr, "[fd] open-file limit %llu (was %llu, hard limit %llu)\n", (unsigned long long)rl.rlim_cur,
-            (unsigned long long)before, (unsigned long long)rl.rlim_max);
+    char hard[32] = "unlimited";
+    if (rl.rlim_max != RLIM_INFINITY) snprintf(hard, sizeof hard, "%llu", (unsigned long long)rl.rlim_max);
+    fprintf(stderr, "[fd] open-file limit %llu (was %llu, hard limit %s)\n", (unsigned long long)rl.rlim_cur,
+            (unsigned long long)before, hard);
 }
