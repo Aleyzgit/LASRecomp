@@ -868,7 +868,7 @@ void backend_guest_memory_reset(void) {
 
 // The window goes black while the game is down (instead of holding its last frame).
 void backend_clear_window(void) {
-    if (!layer || !dev) return;
+    if (!layer || !dev || rq_stopping()) return;
     rq_drain();
     @autoreleasepool {
         id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -1232,6 +1232,7 @@ void backend_represent(void) {
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
 void backend_present_now(NvnTexture *t, uint64_t frame) {
+    if (rq_stopping()) return;  // quitting: no drawable after the window closed (#40, as Vulkan)
     extern void renderer_submit(void);
     extern void renderer_texture_will_read(NvnTexture *t);
     renderer_texture_will_read(t);  // (a recorded clear of the image becomes its pass first)
@@ -1521,6 +1522,20 @@ SDL_Window *ui_window(void) { return window; }
 void *ui_metal_layer(void) { return (__bridge void *)layer; }
 void *ui_metal_device(void) { return (__bridge void *)dev; }
 
+// Quitting, before exit() (the window closed): the render thread stops between items (no nextDrawable / present
+// any more), then the GPU finishes what it was given - before exit()'s handlers and destructors run under it.
+void backend_quit(void) {
+    static atomic_flag once = ATOMIC_FLAG_INIT;
+    if (atomic_flag_test_and_set(&once)) return;
+    rq_stop();
+    if (!queue) return;
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];  // (one queue, in order: done when everything before it is)
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+}
+
 int ui_run(void) {
     // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
     // otherwise stretches 16ms sleeps to ~100ms whenever the window isn't frontmost.
@@ -1536,7 +1551,7 @@ int ui_run(void) {
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             input_rumble_poll();
-            if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); input_led_stop(); LOG("window closed\n"); exit(0); }
+            if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); input_led_stop(); LOG("window closed\n"); backend_quit(); exit(0); }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
             input_cursor_event(&e);
             if (menu_handle_event(&e)) continue;
