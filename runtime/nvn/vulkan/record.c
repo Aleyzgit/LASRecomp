@@ -321,12 +321,18 @@ static bool alloc_sets(Pools *s, VkDescriptorSetLayout layout, uint32_t count, V
                 if (count > 1) return false;  // (the caller asks for one)
                 FATAL("descriptor pools exhausted\n");
             }
-            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+            // exec.c's set reuse moves most uniform buffers to the dynamic type: the pool then holds 8192 static + 16384
+            // dynamic instead of 32768 static. Without it (LARECOMP_VK_NO_SET_REUSE=1), the pool is as in beta_5: no
+            // dynamic descriptors (a pool's size costs on some drivers: the Intel UHD 770's Windows driver spent ~0.4 ms
+            // more a frame with 32768 more of them). A pool that runs out of a type is followed by another.
+            static int dynp = -1;
+            if (dynp < 0) dynp = getenv("LARECOMP_VK_NO_SET_REUSE") == NULL;  // (as exec.c set_reuse_on)
+            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, dynp ? 8192 : 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
                                             {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
-                                            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32768}};  // (exec.c stage_set: set reuse)
+                                            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16384}};  // (exec.c stage_set: set reuse)
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 6, .pPoolSizes = sizes};
+                                             .poolSizeCount = dynp ? 6 : 5, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,

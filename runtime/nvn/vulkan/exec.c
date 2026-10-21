@@ -45,6 +45,7 @@ static uint64_t prof_prog_memo, prof_pipe_memo, prof_key_draws;  // (VK_PROF) ke
 static bool key_memo_on(void);
 static uint64_t prof_sets_reused, prof_sets_new;  // (VK_PROF) set reuse (allocations: record.c RecStats)
 static bool set_reuse_on(void);
+static uint64_t prof_slot_wait;  // (VK_PROF) sub(): ring slot waits (ns; GPU waits, inside "pre" when begin_pass starts a submission)
 static uint64_t prof_hook_draws, prof_hook_known;  // (VK_PROF) draws through the texture hook pass, with a known texture
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
@@ -272,7 +273,9 @@ static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
     if (s->seq != submit_seq + 1) {  // slot reused: its previous submission must be done
         wait_why = "ring slot";
+        uint64_t tw = prof ? SDL_GetTicksNS() : 0;
         vk_wait_seq(s->seq);
+        if (prof) prof_slot_wait += SDL_GetTicksNS() - tw;
         cq_resolve_done(s->seq);
         if (s->ts) {  // GPU time of that submission
             uint64_t t[3];
@@ -1021,6 +1024,9 @@ const char *renderer_stats(void) {
                      set_reuse_on() ? "on" : "off", rec_set_batch() ? "on" : "off", (unsigned long long)prof_sets_reused,
                      (unsigned long long)prof_sets_new, (unsigned long long)rs.set_allocs, (unsigned long long)rs.set_calls);
             prof_sets_reused = prof_sets_new = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | slot wait %.1f ms", prof_slot_wait / 1e6);
+            prof_slot_wait = 0;
             n = strlen(stats_text);
             // the recorder thread (record.c): packets queued, the translating thread's time queuing them, the recorder's
             // time making the calls, and the waits on it (drain: ImGui / idle waits; seq: GPU waits that had to wait for a
