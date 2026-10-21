@@ -44,7 +44,10 @@ static void log_to_file_in_app(void) {
     session_log_open(dir, g_log_path, sizeof g_log_path);
 }
 
-void plat_init(void) { log_to_file_in_app(); }
+void plat_init(void) {
+    log_to_file_in_app();
+    raise_open_file_limit();
+}
 
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     // Everything readable/writable: macOS pages are 16K but the guest maps at 4K granularity.
