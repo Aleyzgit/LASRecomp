@@ -14,7 +14,7 @@ usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir
 --miniboss-freq F: every random mix randomizes enemies with mini-boss frequency F (0 - 3: Normal, 2x, 3x, All), enemy
 mode Seeded or Random; --full: each seed is also generated in full (game files, enemies and all) and must finish -
 including its room-link check (room_links.py: every actor link within each room sound, else the game crashes there).
---labyrinth: every random mix is a Labyrinth (tools/rando/labyrinth.py): room shuffle cycled Coherent / Chaos / Madness
+--labyrinth: every random mix is a Labyrinth (tools/rando/labyrinth.py): room shuffle cycled Coupled / Decoupled
 (unless --rooms), keysanity off / on alternating; its statistics (cross-wing links, wings only another wing leads to,
 planning time) and a key-count sanity check are printed per seed.
 Exit status 1 if any seed fails either check. Run it with the LAS venv's Python (third_party/LAS-Randomizer/venv).
@@ -46,6 +46,7 @@ FLAGS = ['bomb_bag', 'powder_bag', 'environments', 'pets_in_dungeons', 'skip_sto
          'pots', 'no_buffs', 'bushes', 'pet_rooster', 'pet_ghost', 'pet_marin', 'trendsanity', 'boss_souls',
          'hookshot_any', 'digs', 'miniboss_souls', 'no_start_sword', 'no_start_shield', 'no_start_ocarina',
          'tunic_upgrades', 'shellsanity', 'race', 'random_cosmetics', 'labyrinth']
+ROOM_IDS = {'off': 0, 'coupled': 2, 'decoupled': 3}  # room_shuffle in the ID (1: the retired Coherent)
 BITS = 150  # (v5: 30 characters; v4 IDs had 125 - decode reads both)
 TIMEOUT = 900  # (seconds per seed)
 
@@ -79,6 +80,8 @@ def decode(text):
     pos[0] = n - 10
     o['steal_needs_sword'], o['no_stealing'] = bool(get(1)), bool(get(1))
     o['enemy_mode'], o['miniboss_freq'] = get(1), get(2)
+    if o['room_shuffle'] == 1:  # (retired Coherent: Coupled, as rando_tab.mm decodes it)
+        o['room_shuffle'] = 2
     return o
 
 
@@ -131,7 +134,7 @@ def request(sid, o, logic='basic'):
         'tunic-color': 'default', 'enemy-minibosses': mini, 'miniboss-frequency': o['miniboss_freq'] if mini else 0,
         'enemy-mode': 'random' if o['randomize_enemies'] and o['enemy_mode'] else 'seeded',
         'keysanity': ['off', 'keys', 'keys+nk', 'all'][o['keysanity']],
-        'dungeon-room-shuffle': ['off', 'coherent', 'chaos', 'madness'][o['room_shuffle']],
+        'dungeon-room-shuffle': ['off', 'coupled', 'coupled', 'decoupled'][o['room_shuffle']],  # (1: retired Coherent)
         'dungeon-labyrinth': bool(o.get('labyrinth')) and o['room_shuffle'] != 0,
         'shopsanity': ['off', 'vanilla', 'random'][o['shopsanity']], 'trendsanity': o['trendsanity'],
         'stealing': stealing(o),
@@ -154,7 +157,7 @@ def random_options(rng):
     o.update({k: 0 for k, _ in FIELDS}, rng=rng.getrandbits(36), enemy_mode=0, miniboss_freq=0)
     o.update(digs=True, skip_story=True, fast_songs=True, spoiler=True, seashells=rng.randrange(6),
              dungeon_items=rng.randrange(4), keysanity=rng.randrange(4), traps=rng.randrange(5),
-             entrances=rng.choice([0, 0, 1, 2, 2]), room_shuffle=rng.choice([0, 0, 0, 1, 2]),
+             entrances=rng.choice([0, 0, 1, 2, 2]), room_shuffle=rng.choice([0, 0, 0, 2, 3]),
              shopsanity=rng.randrange(3), steal_needs_sword=rng.random() < 0.5, no_stealing=rng.random() < 0.3)
     for k in ('bomb_bag', 'powder_bag', 'bushes', 'pots', 'open_mabe', 'decoupled', 'pet_rooster', 'pet_ghost',
               'pet_marin', 'trendsanity', 'boss_souls', 'miniboss_souls', 'hookshot_any', 'no_start_sword',
@@ -388,8 +391,8 @@ def main():
                     '(extra pieces cycled: none / +25%% / +50%%)')
     ap.add_argument('--labyrinth', action='store_true', help='every random mix a Labyrinth (room shuffle cycled, '
                     'keysanity off / on alternating)')
-    ap.add_argument('--rooms', type=int, choices=[0, 1, 2, 3], action='append',
-                    help='dungeon room shuffle of the random mixes (off / coherent / chaos / madness; repeat: cycled)')
+    ap.add_argument('--rooms', choices=list(ROOM_IDS), action='append',
+                    help='dungeon room shuffle of the random mixes (repeat: cycled)')
     args = ap.parse_args()
     romfs = os.path.abspath(args.romfs)
     if args.keep:
@@ -410,12 +413,12 @@ def main():
         if args.triforce:
             o['triforce_needed'], o['triforce_extra'] = args.triforce, i % 3
         if args.rooms:
-            o['room_shuffle'] = args.rooms[(i // len(levels)) % len(args.rooms)]  # (not in step with the levels)
+            o['room_shuffle'] = ROOM_IDS[args.rooms[(i // len(levels)) % len(args.rooms)]]  # (not in step with the levels)
         if args.labyrinth:
             o['labyrinth'] = True
             if not args.rooms:
-                o['room_shuffle'] = 1 + i % 3
-            o['keysanity'] = 0 if (i // 3) % 2 == 0 else rng.choice([1, 2, 3])
+                o['room_shuffle'] = 2 + i % 2  # (Coupled / Decoupled)
+            o['keysanity'] = 0 if (i // 2) % 2 == 0 else rng.choice([1, 2, 3])
         if args.stealing:
             o['no_stealing'], o['steal_needs_sword'] = args.stealing == 'never', args.stealing == 'normal'
             if args.stealing == 'never' and not o['shopsanity']:
@@ -440,7 +443,7 @@ def main():
             bad += res != 'ok'
     print(f'{len(jobs) - bad}/{len(jobs)} seeds beatable')
     if stats:
-        for mode in ('coherent', 'chaos', 'madness'):
+        for mode in ('coupled', 'decoupled'):
             st = [x for x in stats if x['mode'] == mode]
             if st:
                 avg = lambda k: sum(x[k] for x in st) / len(st)

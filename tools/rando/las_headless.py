@@ -104,7 +104,7 @@ def default_settings(seed):
         'digs': False,  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
         'shellsanity': False,  # every Secret Seashell spot is a check (tools/rando/seashell_spots.py); off: vanilla
         'hookshot-anything': False,  # the hookshot latches onto anything (tools/rando/hookshot_logic.py)
-        'dungeon-room-shuffle': 'off',  # off / coherent / chaos / madness (tools/rando/dungeon_gen.py)
+        'dungeon-room-shuffle': 'off',  # off / coupled / decoupled (tools/rando/dungeon_gen.py; ROOM_MODES)
         'dungeon-labyrinth': False,  # with room shuffle: every dungeon a wing of one Labyrinth (tools/rando/labyrinth.py)
         'pet-rooster': False, 'pet-ghost': False, 'open-desert': True,  # pets (tools/rando/pets.py)
         'shopsanity': 'off', 'trendsanity': False,  # tools/rando/shopsanity.py (off / vanilla / random prices), trendsanity.py
@@ -112,6 +112,12 @@ def default_settings(seed):
         'starting-items': ['sword', 'shield', 'ocarina', 'song-mambo'], 'starting-rupees': 0,
         'excluded-locations': excluded,
     }
+
+
+# dungeon-room-shuffle values: Coupled = two-way doorway pairs, Decoupled = one-way doorways. The older names still
+# work: chaos / madness are the same modes, and the retired Coherent mode becomes Coupled.
+ROOM_MODES = {'off': 'off', 'coupled': 'coupled', 'decoupled': 'decoupled',
+              'chaos': 'coupled', 'madness': 'decoupled', 'coherent': 'coupled'}
 
 
 import time as _time
@@ -124,7 +130,7 @@ def stage(label, frac):
 
 
 def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps, lab=None):
-    """Dungeon room shuffle (Coherent / Chaos, tools/rando/dungeon_gen.py) on top of the seed: the generator reads
+    """Dungeon room shuffle (Coupled / Decoupled, tools/rando/dungeon_gen.py) on top of the seed: the generator reads
     rooms from an overlay romfs where the seed's own room files (LAS chests, pots, bushes, entrances) replace the
     game's - as copies, since it writes the seed's rooms while still reading others."""
     import shutil
@@ -170,7 +176,7 @@ def shuffle_dungeon_rooms(romfs, out_dir, mode, layouts, jumps, lab=None):
                 os.remove(os.path.join(dst, f))
             shutil.copyfile(os.path.join(seed_lv, f), os.path.join(dst, f))
     try:
-        dungeon_gen.write_all(overlay, out_romfs, layouts, jumps, lab=lab)  # (jumps None: Coherent)
+        dungeon_gen.write_all(overlay, out_romfs, layouts, jumps, lab=lab)
     finally:
         shutil.rmtree(overlay, ignore_errors=True)
     return f"{mode}, {len(layouts)} dungeons, {sum(sum(1 for k, v in L.items() if k != v) for L in layouts.values())} rooms moved"
@@ -192,6 +198,9 @@ def main():
     settings['excluded-locations'] = set(settings['excluded-locations'])
     if settings['stealing'] not in rd.STEALING_REQUIREMENTS:
         raise SystemExit(f"bad stealing setting {settings['stealing']!r}")
+    if settings['dungeon-room-shuffle'] not in ROOM_MODES:
+        raise SystemExit(f"bad dungeon-room-shuffle setting {settings['dungeon-room-shuffle']!r}")
+    settings['dungeon-room-shuffle'] = ROOM_MODES[settings['dungeon-room-shuffle']]
     # optional location groups (Randomizer tab): included = real checks with logic instead of junk
     groups = {'include-fishing': rd.FISHING_REWARDS, 'include-rapids': rd.RAPIDS_REWARDS,
               'include-dampe': rd.DAMPE_REWARDS, 'include-trade-gifts': rd.TRADE_GIFT_LOCATIONS,
@@ -345,18 +354,17 @@ def main():
         ent = (ent_doors + cave[0], {**ent_entry, **cave[1]}, {**ent_exit, **cave[2]})
         print('entrances:', len(ent_entry), 'doors +', len(cave[1]), 'cave doors shuffled,', moved, 'locations moved', flush=True)
 
-    # ---- Dungeon room shuffle (Coherent / Chaos): the layouts are planned first, the item logic follows them
+    # ---- Dungeon room shuffle (Coupled / Decoupled): the layouts are planned first, the item logic follows them
     # (tools/rando/room_logic.py), the same layouts are written into the seed after LAS's files
-    room_mode = settings.get('dungeon-room-shuffle', 'off')
+    room_mode = settings['dungeon-room-shuffle']
     room_plan = None
     room_attempt = 0
-    lab_on = room_mode in ('coherent', 'chaos', 'madness') and bool(settings.get('dungeon-labyrinth'))
+    lab_on = room_mode != 'off' and bool(settings.get('dungeon-labyrinth'))
     settings['dungeon-labyrinth'] = lab_on
     lab_info = None
     if lab_on and settings.get('shuffle-dungeons'):  # (the Labyrinth decides where each dungeon door leads)
         print('labyrinth: dungeon entrance shuffle off (the Labyrinth picks where each dungeon door leads)', flush=True)
-        settings['shuffle-dungeons'] = False
-    if room_mode in ('coherent', 'chaos', 'madness'):
+    if room_mode != 'off':
         stage('Planning dungeon rooms', 0.03)
         import dungeon_gen
         import room_logic
@@ -382,21 +390,14 @@ def main():
                 logic_rows = jumps
                 lab = {'arrivals': {k: tuple(v[:2]) for k, v in lab_info['arrivals'].items()},
                        'et_locks': base[1]['key-D7']['quantity']}
-            elif room_mode in ('chaos', 'madness'):  # (Madness: Chaos with one-way doorways)
-                try:
-                    layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'madness',
+            else:
+                try:  # (Decoupled: Coupled with one-way doorways)
+                    layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'decoupled',
                                                                   settings=settings)
                 except RuntimeError as e:  # (no round left every dungeon room for its keys and items: next one)
                     print('room layout:', e, '- planning another', flush=True)
                     continue
                 logic_rows = jumps
-            else:
-                try:
-                    layouts, jumps = dungeon_gen.plan_all(cat, sub, romfs), None
-                except RuntimeError as e:  # (as Chaos: this round's plan failed - the next one)
-                    print('room layout:', e, '- planning another', flush=True)
-                    continue
-                logic_rows = [row for lv, L in layouts.items() for row in dungeon_gen._jumps(cat, lv, L)]
             logic_defs, item_defs, settings = (copy.deepcopy(x) for x in base)
             print('room logic:', room_logic.apply(cat, romfs, layouts, logic_rows, logic_defs, item_defs, settings, extra,
                                                   lab=lab), flush=True)
@@ -674,6 +675,9 @@ def main():
         with open(os.path.join(out_dir, f'entrances_{settings["seed"]}.txt'), 'w') as f:
             f.write(el.spoiler(*ent) + '\n')
         print('entrance rooms edited:', n, flush=True)
+        from RandomizerCore.Tools import event_tools
+        if el.raft_shop_to_dock(ent[2], out_dir, romfs, event_tools):
+            print('raft shop: a paid ride starts at the dock', flush=True)
 
     if room_plan:
         stage('Building the shuffled dungeons', 0.975)

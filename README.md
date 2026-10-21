@@ -62,7 +62,7 @@ Known issues and their status are on the [GitHub issues page](https://github.com
 - Optional run timer in the corner: real time from the start of gameplay to the ending (set it before starting a
   save), and LiveSplit support through its Server component: auto-start, a split for each instrument and the ending.
 - Apple MetalFX upscaler on macOS (the default there).
-- Internal resolution adjustments: raise or lower the resolution in steps, match the display, or use dynamic resolution. Combined with the MetalFX upscaler, even a MacBook Air should handle this easily with the right settings. Bilinear upscaling is the only option on Windows currently.
+- Internal resolution adjustments: raise or lower the resolution in steps, match the display, or use dynamic resolution. Combined with the MetalFX upscaler, even a MacBook Air should handle this easily with the right settings. On Windows and Linux the AMD FSR 1 upscaler is available.
 
 **Randomizer**
 - In-game seed generator.
@@ -100,13 +100,11 @@ Known issues and their status are on the [GitHub issues page](https://github.com
 - Triforce hunt - collect Triforce pieces (3, 12, 24 or any number up to 50, optionally with extra pieces hidden) instead
   of waking the Wind Fish; the last one needed rolls the credits.
 - Entrance Randomizer - shuffles dungeon entrances, houses and caves, and connector caves. Includes a decoupled option.
-- Dungeon Room Shuffler - shuffles all dungeon rooms, creating unique custom dungeons every seed. Three modes:
-  - Coherent: dungeon rooms are shuffled but connecting rooms are lined up. To keep this workable in logic, dungeons
-    sometimes use duplicate rooms (as few as possible).
-  - Chaos: dungeon rooms are shuffled but don't need to make sense. Walking north may lead you to a door from another
-    direction.
-  - Madness: dungeon rooms are shuffled in a way that doesn't need to make sense AND the doors are decoupled, creating
-    nightmares to navigate.
+- Dungeon Room Shuffler - shuffles all dungeon rooms, creating unique custom dungeons every seed. Any doorway can
+  lead to any doorway of its dungeon (walking north may bring you out of a door on another side). Two modes:
+  - Coupled: doorways are linked in pairs, so going back through a door takes you back where you came from.
+  - Decoupled: doorways are one-way, so going back through a door takes you somewhere else, creating nightmares to
+    navigate.
   - Labyrinth (planned): an option for all dungeon room shuffles where doors in dungeons can lead into other dungeons,
     essentially making one giant dungeon with numerous wings.
   - Optionally the map shows what's connected to what as you explore, or in full once you find the dungeon's map.

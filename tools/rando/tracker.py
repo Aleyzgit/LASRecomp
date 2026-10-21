@@ -500,7 +500,8 @@ def build(seed_dir, romfs):
             f.write(f'S\t{k}\n')
         for k in out['off']:
             f.write(f'F\t{k}\n')
-        f.write(f"O\tdungeon-room-shuffle\t{settings.get('dungeon-room-shuffle') or 'off'}\n")
+        rs = settings.get('dungeon-room-shuffle') or 'off'  # (las_headless.ROOM_MODES: older names read as the new)
+        f.write(f"O\tdungeon-room-shuffle\t{ {'chaos': 'coupled', 'madness': 'decoupled'}.get(rs, rs)}\n")
         if lab:  # (runtime/ui/tracker_overlay.mm: wings, one shared small-key count)
             f.write('O\tlabyrinth\t1\n')
         for n in nodes:

@@ -4,13 +4,11 @@
 Every dungeon becomes a wing of one big shuffled dungeon: the Color Dungeon is wing 0, dungeons 1-8 wings 1-8. It's
 not a mode of its own - it interconnects the dungeons, each room shuffle mode keeps its rules:
 
-  Coherent   doorways pair sensibly (north with south, west with east), two ways
-  Chaos      any doorway with any doorway, two ways
-  Madness    one-way: every doorway leads out somewhere and is where some other doorway leads in
+  Coupled    any doorway with any doorway, two ways (was Chaos)
+  Decoupled  one-way: every doorway leads out somewhere and is where some other doorway leads in (was Madness)
 
-  wings      each level is built by the Chaos placer (dungeon_gen.chaos_place: rooms joined physically where their
-             doorways line up, every other doorway free) - Coherent's own placer closes every doorway and would leave
-             nothing to link across wings. The free doorways of ALL wings are then paired together: a spanning tree
+  wings      each level is built by the Coupled placer (dungeon_gen.chaos_place: rooms joined physically where their
+             doorways line up, every other doorway free). The free doorways of ALL wings are then paired together: a spanning tree
              through every piece of every wing (pieces of one wing link to each other, a share CROSS to another wing;
              the first piece of each wing always links to another wing), the rest within the wing, a share across.
              A doorway paired into another level is a level load (runtime: stage 2): its rows carry the target level
@@ -101,22 +99,14 @@ def with_followers(cat, layouts, romfs, follow, links):
 
 
 # ---------------------------------------------------------------- pairing
-def _pair_list(stubs, rng, coherent):
-    """Pairs within a list (Coherent: north-south / west-east only) -> (pairs, leftovers)."""
-    if not coherent:
-        pairs = [(stubs[i], stubs[i + 1]) for i in range(0, len(stubs) - 1, 2)]
-        return pairs, stubs[len(pairs) * 2:]
-    pairs, left = [], []
-    for a, b in (('N', 'S'), ('W', 'E')):
-        xs, ys = [s for s in stubs if s[2] == a], [s for s in stubs if s[2] == b]
-        k = min(len(xs), len(ys))
-        pairs += list(zip(xs[:k], ys[:k]))
-        left += xs[k:] + ys[k:]
-    return pairs, left
+def _pair_list(stubs):
+    """Pairs within a list -> (pairs, leftovers)."""
+    pairs = [(stubs[i], stubs[i + 1]) for i in range(0, len(stubs) - 1, 2)]
+    return pairs, stubs[len(pairs) * 2:]
 
 
-def pair_two_way(pieces, rng, coherent):
-    """Coherent / Chaos: {piece: [stubs]} -> [(stub, stub)] (a stub paired with itself: a wall), or None."""
+def pair_two_way(pieces, rng):
+    """Coupled: {piece: [stubs]} -> [(stub, stub)] (a stub paired with itself: a wall), or None."""
     keys = sorted(pieces, key=str)
     rng.shuffle(keys)
     keys.sort(key=lambda k: -len(pieces[k]))
@@ -131,10 +121,7 @@ def pair_two_way(pieces, rng, coherent):
         other = [q for q in cand if q[0] != k[0]]
         groups = [other, same] if not same or rng.random() < CROSS else [same, other]
         for g in groups:
-            if coherent:
-                opts = [(q, a, b) for q in g for a in pieces[q] for b in pieces[k] if OPP[a[2]] == b[2]]
-            else:
-                opts = [(q, pieces[q][-1], pieces[k][-1]) for q in g]
+            opts = [(q, pieces[q][-1], pieces[k][-1]) for q in g]
             if not opts:
                 continue
             most = max(len(pieces[o[0]]) for o in opts)
@@ -154,13 +141,13 @@ def pair_two_way(pieces, rng, coherent):
     for x in rest:
         (across if rng.random() < CROSS / 2 else by_level.setdefault(level_of(x), [])).append(x)
     for lv in sorted(by_level):
-        p, left = _pair_list(by_level[lv], rng, coherent)
+        p, left = _pair_list(by_level[lv])
         pairs += p
         across += left
     rng.shuffle(across)
-    p, left = _pair_list(across, rng, coherent)
+    p, left = _pair_list(across)
     pairs += p
-    # a room never leads into itself: swap partners between the extra pairs (sides kept: Coherent stays sensible)
+    # a room never leads into itself: swap partners between the extra pairs (sides kept)
     for i in range(tree, len(pairs)):
         a, b = pairs[i]
         if a[1] != b[1]:
@@ -175,8 +162,8 @@ def pair_two_way(pieces, rng, coherent):
     return pairs + [(x, x) for x in left]  # (odd ones out: back into their own doorway - a wall)
 
 
-def pair_madness(pieces, rng):
-    """Madness: {stub: target stub}, a permutation of the free doorways. A ring through every piece (wing by wing,
+def pair_decoupled(pieces, rng):
+    """Decoupled: {stub: target stub}, a permutation of the free doorways. A ring through every piece (wing by wing,
     the wings in random order) keeps the Labyrinth reachable and escapable everywhere; the rest at random, within the
     wing mostly, never into the room it leaves."""
     by_wing = {}
@@ -409,10 +396,10 @@ def plan(cat, seed, romfs, mode, settings=None, et_locks=0, rounds=None):
         found = None
         for attempt in range(40):
             p = {k: list(v) for k, v in pieces.items()}
-            if mode == 'madness':
-                link = pair_madness(p, rng)
+            if mode == 'decoupled':
+                link = pair_decoupled(p, rng)
             else:
-                pairs = pair_two_way(p, rng, mode == 'coherent')
+                pairs = pair_two_way(p, rng)
                 link = None
                 if pairs is not None:
                     link = {}
@@ -466,7 +453,7 @@ def plan(cat, seed, romfs, mode, settings=None, et_locks=0, rounds=None):
 def stats(cat, layouts, rows, arrivals, link, edges, starts, mode):
     """labyrinth.json: the doors' arrivals, the cross-wing links, which wings only another wing leads into."""
     cross = sorted({tuple(sorted(((level_of(a), short(a[1]), a[2], a[3]), (level_of(b), short(b[1]), b[2], b[3]))))
-                    if mode != 'madness' else ((level_of(a), short(a[1]), a[2], a[3]), (level_of(b), short(b[1]), b[2], b[3]))
+                    if mode != 'decoupled' else ((level_of(a), short(a[1]), a[2], a[3]), (level_of(b), short(b[1]), b[2], b[3]))
                     for a, b in link.items() if level_of(a) != level_of(b)})
     door_wings = {v[0] for v in arrivals.values()} | {ET}
     only = sorted(wing(lv) for lv in list(layouts) + [ET] if lv not in door_wings)

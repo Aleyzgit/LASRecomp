@@ -1446,7 +1446,9 @@ static void present_hooks(void) {
     input_frame(total_frames);
     static long slow_ms = -1;  // LARECOMP_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
     if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
-    if (slow_ms > 0 && total_frames > 2600) usleep((useconds_t)slow_ms * 1000);
+    static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
+    if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
+    if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) usleep((useconds_t)slow_ms * 1000);
     extern void fnprof_frame(uint64_t frame);
     fnprof_frame(total_frames);
     extern void warp_frame(uint64_t frame);

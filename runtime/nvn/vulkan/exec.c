@@ -1129,6 +1129,7 @@ static int content_extent(int e, bool scalable, float sc, float al) {
     return c < 1 ? 1 : c > e ? e : c;
 }
 
+static bool heap_whole_userptr(void);
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     vk_end_pass();
@@ -1140,14 +1141,25 @@ static void begin_pass(void) {
         // the translation left the game thread but came back as that wait. LARECOMP_CHUNK_PASSES=<n>: a submission
         // every n render passes (0 = one per list). Default 8 with the render thread (RTX 3080 Ti + i9, Field_11C:
         // gpu wait 0.6 -> 0.25 ms, game thread busy 3.4-3.5 ms vs 4.9 without the render thread); without it,
-        // off (chunks cost that thread 0.1-0.3 ms there).
+        // off (chunks cost that thread 0.1-0.3 ms there). Also off by default while the whole heap is one userptr
+        // import (heap_whole_userptr): amdgpu checks all of its pages again on every submission, ~5 ms each for the
+        // 3.2 GB heap, so ten chunks a frame cost ~50 ms (issue #92: RX 6800 XT, 12 fps at the title screen, where
+        // 0c26936 - one submission per list - got 29-41).
         static int chunk = -1;
+        static bool chunk_env;
         if (chunk < 0) {
             extern bool rq_on(void);
             const char *e = getenv("LARECOMP_CHUNK_PASSES");
+            chunk_env = e != NULL;
             chunk = e ? atoi(e) : rq_on() ? 8 : 0;
         }
-        if (chunk > 0 && ++passes_in_sub >= chunk) renderer_submit();
+        int c = chunk;
+        if (c > 0 && !chunk_env && heap_whole_userptr()) {  // (decided at boot: asked here, not cached before it)
+            static bool logged;
+            if (!logged) { logged = true; LOG("[vk] submission chunks off: the guest heap is one userptr import (AMD)\n"); }
+            c = 0;
+        }
+        if (c > 0 && ++passes_in_sub >= c) renderer_submit();
     }
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
@@ -2555,11 +2567,63 @@ static bool gmem_import(uint64_t size) {
 // window's reset unmaps it, so the next boot gets fresh zeroed memory. Costs: the whole HEAP_MAX is committed once the
 // GPU first uses it, and Linux write tracking can't watch this mapping (the heap is then re-checked like on Beta 4).
 // Nothing writes the heap before boot (the start screen doesn't use guest memory): the mapping replaces it unseen.
-// Default on for RADV; LARECOMP_VK_HEAP_DMABUF=0 off, =1 on any Linux driver with dma-buf export.
+// The mapping: where the driver has VK_EXT_map_memory_placed (RADV, Mesa 24.1+), it maps the memory at HEAP_BASE
+// itself, through its own DRM file as for any vkMapMemory. Else the memory is exported as a dma-buf and that is
+// mmapped there - which some systems refuse (issue #92: RX 6800 XT, Mesa 25.0.7, "Permission denied"), and then
+// the whole heap was a userptr import again.
+// Default on for RADV; LARECOMP_VK_HEAP_DMABUF=0 off, =1 on any Linux driver with dma-buf export or placed maps.
+// LARECOMP_VK_HEAP_PLACED=0: the dma-buf mapping even where placed maps exist (tests).
 #ifdef __linux__
-static bool gmem_dmabuf;  // the heap is the driver's memory (dma-buf) mapped at HEAP_BASE
+static bool gmem_dmabuf;  // the heap is the driver's memory mapped at HEAP_BASE
+static bool gmem_placed;  // ... by the driver (vkMapMemory2KHR, placed): unmapped through it at a reboot
+
+// The driver maps `mem` (HEAP_MAX, one allocation) at HEAP_BASE. NULL, or why not; HEAP_BASE is ordinary guest
+// memory again after a failure.
+static const char *heap_map_placed(VkDeviceMemory mem) {
+#ifndef VK_EXT_map_memory_placed
+    (void)mem;
+    return "built without VK_EXT_map_memory_placed";  // (g_vk.map_placed is never set then)
+#else
+    PFN_vkMapMemory2KHR map2 = (PFN_vkMapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkMapMemory2KHR");
+    PFN_vkUnmapMemory2KHR unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkUnmapMemory2KHR");
+    if (!map2 || !unmap2) return "no vkMapMemory2KHR";
+    // First mapped anywhere, to know the driver can map it at all: a placed map replaces what's at HEAP_BASE before
+    // the driver's own mmap can fail
+    VkMemoryMapInfoKHR mi = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE};
+    VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .memory = mem};
+    void *p = NULL;
+    if (map2(g_vk.dev, &mi, &p) != VK_SUCCESS || !p) return "the driver can't map it";
+    unmap2(g_vk.dev, &ui);
+    VkMemoryMapPlacedInfoEXT pl = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = (void *)(uintptr_t)HEAP_BASE};
+    mi.flags = VK_MEMORY_MAP_PLACED_BIT_EXT;
+    mi.pNext = &pl;
+    p = NULL;
+    VkResult r = map2(g_vk.dev, &mi, &p);
+    if (r == VK_SUCCESS && p == (void *)(uintptr_t)HEAP_BASE) return NULL;
+    if (r == VK_SUCCESS) unmap2(g_vk.dev, &ui);
+    // (the old mapping may be gone: plain zeroed memory again, registered for write tracking like a reboot's)
+    if (!plat_reset_guest(HEAP_BASE, HEAP_BASE + HEAP_MAX)) FATAL("cannot restore the guest heap mapping\n");
+    return "the driver's placed mapping failed";
+#endif
+}
+
+// The driver memory heap at a reboot (vk_exec_reset, GPU idle, guest threads stopped): the driver's mapping is left
+// as a reserved range (or unmapped), then HEAP_BASE gets fresh zeroed guest memory at once, so no hole is left in the
+// guest window until the window's reset.
+static void heap_unmap_placed(void) {
+    if (!gmem_placed) return;
+    PFN_vkUnmapMemory2KHR unmap2 = (PFN_vkUnmapMemory2KHR)vkGetDeviceProcAddr(g_vk.dev, "vkUnmapMemory2KHR");
+    VkMemoryUnmapInfoKHR ui = {.sType = VK_STRUCTURE_TYPE_MEMORY_UNMAP_INFO_KHR, .memory = gmem_mem,
+                               .flags = 0};
+#ifdef VK_EXT_map_memory_placed
+    if (g_vk.unmap_reserve) ui.flags = VK_MEMORY_UNMAP_RESERVE_BIT_EXT;
+#endif
+    if (unmap2) unmap2(g_vk.dev, &ui);
+    gmem_placed = false;
+}
+
 static bool guest_heap_dmabuf(void) {
-    if (gmem_buf || !g_vk.dev || !g_vk.dmabuf || getenv("LARECOMP_VK_NO_GMEM")) return false;
+    if (gmem_buf || !g_vk.dev || !(g_vk.dmabuf || g_vk.map_placed) || getenv("LARECOMP_VK_NO_GMEM")) return false;
     const char *e = getenv("LARECOMP_VK_HEAP_DMABUF");
     if (e ? !atoi(e) : !strstr(g_vk.props.deviceName, "RADV")) return false;
     const uint64_t size = HEAP_MAX;
@@ -2587,6 +2651,10 @@ static bool guest_heap_dmabuf(void) {
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT};
+    const char *pe = getenv("LARECOMP_VK_HEAP_PLACED");
+    bool placed = g_vk.map_placed && (!pe || atoi(pe));
+    if (!placed && !g_vk.dmabuf) { LOG("[vk] heap as driver memory: no way to map it here\n"); return false; }
+    bi.pNext = placed ? NULL : &eb;  // (an exportable buffer only for the dma-buf mapping)
     VkBuffer buf;
     if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) { LOG("[vk] heap as driver memory: buffer failed\n"); return false; }
     VkMemoryRequirements req;
@@ -2596,19 +2664,37 @@ static bool guest_heap_dmabuf(void) {
         vkDestroyBuffer(g_vk.dev, buf, NULL);
         return false;
     }
+    if (req.size != size) {  // (the mapping must cover exactly the heap: guest memory follows it)
+        LOG("[vk] heap as driver memory: the allocation would be %llu bytes, not %llu\n", (unsigned long long)req.size,
+            (unsigned long long)size);
+        vkDestroyBuffer(g_vk.dev, buf, NULL);
+        return false;
+    }
     VkMemoryDedicatedAllocateInfo ded = {.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO, .buffer = buf};
     VkExportMemoryAllocateInfo ex = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, .pNext = &ded,
                                      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
-    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ex, .allocationSize = req.size,
-                               .memoryTypeIndex = (uint32_t)type};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = placed ? (void *)&ded : (void *)&ex,
+                               .allocationSize = req.size, .memoryTypeIndex = (uint32_t)type};
     VkDeviceMemory mem;
     VkResult r = vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
     if (r != VK_SUCCESS) { LOG("[vk] heap as driver memory: allocation failed (%d)\n", r); vkDestroyBuffer(g_vk.dev, buf, NULL); return false; }
+    const char *why = NULL;
+    if (placed) {
+        why = vkBindBufferMemory(g_vk.dev, buf, mem, 0) != VK_SUCCESS ? "binding failed" : heap_map_placed(mem);
+        if (why) {
+            LOG("[vk] heap as driver memory: placed mapping at %llx failed (%s): the heap is shared as before\n",
+                (unsigned long long)HEAP_BASE, why);
+            vkDestroyBuffer(g_vk.dev, buf, NULL);
+            vkFreeMemory(g_vk.dev, mem, NULL);
+            return false;
+        }
+        gmem_placed = true;
+        goto mapped;
+    }
     PFN_vkGetMemoryFdKHR get_fd = (PFN_vkGetMemoryFdKHR)vkGetDeviceProcAddr(g_vk.dev, "vkGetMemoryFdKHR");
     VkMemoryGetFdInfoKHR fi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = mem,
                                .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT};
     int fd = -1;
-    const char *why = NULL;
     if (!get_fd || get_fd(g_vk.dev, &fi, &fd) != VK_SUCCESS || fd < 0) why = "no dma-buf for it";
     // First mapped anywhere, to know the driver lets it be mapped at all: MAP_FIXED unmaps what's at HEAP_BASE before
     // the driver is asked, so a refusal there would leave the heap unmapped (review of 2c27f3d)
@@ -2616,6 +2702,7 @@ static bool guest_heap_dmabuf(void) {
         void *probe = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
         if (probe == MAP_FAILED) why = strerror(errno);
         else munmap(probe, size);
+        if (probe == MAP_FAILED) LOG("[vk] heap as driver memory: the dma-buf can't be mapped (%s)\n", why);
     }
     if (!why && mmap((void *)(uintptr_t)HEAP_BASE, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) !=
                     (void *)(uintptr_t)HEAP_BASE) {
@@ -2636,6 +2723,7 @@ static bool guest_heap_dmabuf(void) {
         vkFreeMemory(g_vk.dev, mem, NULL);
         return false;
     }
+mapped:;
     // the game expects a zeroed heap; the kernel hands out zeroed pages, but 8 spread pages are checked to be sure
     static const uint8_t zero_page[4096];
     for (int i = 0; i < 8; i++)
@@ -2648,8 +2736,8 @@ static bool guest_heap_dmabuf(void) {
     gmem_mem = mem;
     gmem_size = size;
     gmem_dmabuf = true;
-    LOG("[vk] guest heap as driver memory (dma-buf, memory type %d): %llu MB at %llx - all of it is held in system memory "
-        "once the GPU first uses it\n", type, (unsigned long long)(size >> 20), (unsigned long long)HEAP_BASE);
+    LOG("[vk] guest heap as driver memory (%s, memory type %d): %llu MB at %llx - all of it is held in system memory "
+        "once the GPU first uses it\n", gmem_placed ? "placed map" : "dma-buf", type, (unsigned long long)(size >> 20), (unsigned long long)HEAP_BASE);
     return true;
 }
 #endif
@@ -2666,6 +2754,8 @@ static bool guest_heap_dmabuf(void) {
 // the pages instead and keeps it. Decided here, at boot, before any query protected a page. LARECOMP_WRITE_TRACKING=1:
 // on anyway.
 static bool gmem_userptr;  // the heap is imported by host pointer: userptr (vertex cache default, vcache_lookup)
+// The whole heap as one userptr import (not chunks) on AMD: each submission has amdgpu check all of its pages
+static bool heap_whole_userptr(void) { return gmem_userptr && !gc_lazy && g_vk.props.vendorID == 0x1002; }
 
 void backend_guest_heap_prepare(void) {
     gmem_userptr = false;
@@ -2675,7 +2765,10 @@ void backend_guest_heap_prepare(void) {
     if (!g_vk.dev) return;
     gmem_chunk_shift();  // (the chunk / lazy decision, before the first draw binds anything)
 #ifdef __linux__
-    if (gmem_dmabuf || !g_vk.host_import || getenv("LARECOMP_VK_NO_GMEM") || g_vk.props.vendorID == 0x10DE) return;
+    // driver memory: write tracking can't watch that mapping (its queries over the heap would fail; PAGEMAP_SCAN
+    // refuses a range without userfaultfd write protection), so it's off there too
+    if (gmem_dmabuf) { plat_write_tracking_off("the guest heap is driver memory"); return; }
+    if (!g_vk.host_import || getenv("LARECOMP_VK_NO_GMEM") || g_vk.props.vendorID == 0x10DE) return;
     gmem_userptr = true;
     plat_write_tracking_off(gc_lazy ? "the guest heap is imported in userptr chunks" : "the guest heap is a userptr import");
 #endif
@@ -3488,11 +3581,16 @@ void vk_exec_reset(void) {
     g_cs_n = 0;
     gcopy_gen++;
     if (gmem_buf) {
+#ifdef __linux__
+        bool placed = gmem_placed;
+        heap_unmap_placed();
+#endif
         vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
         vkFreeMemory(g_vk.dev, gmem_mem, NULL);
         gmem_buf = VK_NULL_HANDLE;
         gmem_mem = VK_NULL_HANDLE;
 #ifdef __linux__
+        if (placed && !plat_reset_guest(HEAP_BASE, HEAP_BASE + HEAP_MAX)) FATAL("cannot restore the guest heap mapping\n");
         gmem_dmabuf = false;  // (the next boot decides again)
 #endif
     }
