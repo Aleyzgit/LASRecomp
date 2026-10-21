@@ -169,8 +169,32 @@ static void boot(const char *root) {
     kernel_run_main(t, t->handle, 0, init_fn, fini_fn);  // nn::init::Start(thread_handle, args_region, init, fini)
 }
 
+// The log's first line after the log's own: this build and the machine, for bug reports. Nothing that identifies the
+// player (platform.h plat_system_info). Once per session: a restart of this process (the start screen re-executing
+// itself for the game) appends to the same log and inherits LASRECOMP_INFO_LOGGED.
+static void log_startup_info(void) {
+    if (getenv("LASRECOMP_INFO_LOGGED")) return;
+    setenv("LASRECOMP_INFO_LOGGED", "1", 1);
+    extern const char *larecomp_version(void);  // runtime/ui/launcher.mm
+    PlatSysInfo si = {0};
+    plat_system_info(&si);
+    char cores[96] = "";
+    if (si.cores > 0) {
+        int n = snprintf(cores, sizeof cores, " %d cores", si.cores);
+        if (si.cores_detail[0]) n += snprintf(cores + n, sizeof cores - n, " (%s)", si.cores_detail);
+        if (si.threads > si.cores) snprintf(cores + n, sizeof cores - n, " / %d threads", si.threads);
+    } else if (si.threads > 0) snprintf(cores, sizeof cores, " %d threads", si.threads);
+    unsigned long long tenths = (si.ram * 10 + (1ull << 29)) >> 30;  // (GB to a tenth; whole when it is: 64 GB, 14.5 GB)
+    char ram[32] = "RAM unknown";
+    if (si.ram && tenths % 10) snprintf(ram, sizeof ram, "%llu.%llu GB RAM", tenths / 10, tenths % 10);
+    else if (si.ram) snprintf(ram, sizeof ram, "%llu GB RAM", tenths / 10);
+    fprintf(stderr, "[info] LAS Recomp %s, %s, %s%s, %s%s%s\n", larecomp_version(), si.os[0] ? si.os : "unknown OS",
+            si.cpu[0] ? si.cpu : "unknown CPU", cores, ram, si.package ? ", " : "", si.package ? si.package : "");
+}
+
 int main(int argc, char **argv) {
     plat_init();
+    log_startup_info();
 #ifdef _WIN32
     setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering
 #else
