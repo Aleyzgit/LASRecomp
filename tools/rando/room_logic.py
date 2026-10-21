@@ -968,6 +968,8 @@ def keyed_terms(edges, starts, kc, total):
     for st, bases in starts.items():
         req[st] = [(frozenset([b]), 0) for b in bases]
     queue, inq = deque(starts), set(starts)
+    dropped = {}  # node -> terms cut by MAX_TERMS: never added again (they came back and went round for ever: the
+    # Labyrinth sweep's generator timeouts, seeds 5P29M- / 5Y0BF-)
     while queue:
         a = queue.popleft()
         inq.discard(a)
@@ -975,11 +977,13 @@ def keyed_terms(edges, starts, kc, total):
             changed = False
             for ta, tk in list(req[a]):
                 na, nk = ta | ea, max(tk, ek)
-                if any(oa <= na and ok <= nk for oa, ok in req[b]):
+                if any(oa <= na and ok <= nk for oa, ok in req[b]) or (na, nk) in dropped.get(b, ()):
                     continue
                 req[b] = [(oa, ok) for oa, ok in req[b] if not (na <= oa and nk <= ok)] + [(na, nk)]
                 if len(req[b]) > MAX_TERMS:  # (keep the cheapest: stricter, never weaker)
-                    req[b] = sorted(req[b], key=lambda t: (len(t[0]), t[1], sorted(t[0])))[:MAX_TERMS]
+                    req[b] = sorted(req[b], key=lambda t: (len(t[0]), t[1], sorted(t[0])))
+                    dropped.setdefault(b, set()).update(req[b][MAX_TERMS:])
+                    req[b] = req[b][:MAX_TERMS]
                 changed = True
             if changed and b not in inq:
                 inq.add(b)
