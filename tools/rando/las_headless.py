@@ -67,6 +67,7 @@ sys.modules['PySide6'] = pyside
 sys.modules['PySide6.QtCore'] = qtcore
 
 ARGS = [os.path.abspath(a) for a in sys.argv[1:4]]
+_RERUN = [sys.executable] + ([] if getattr(sys, 'frozen', False) else [os.path.abspath(__file__)]) + sys.argv[1:]  # (retry_layout)
 sys.argv[0] = os.path.join(LAS, 'randomizer.py')  # LAS resolves its data paths from argv[0]
 sys.path.insert(0, LAS)
 os.chdir(LAS)
@@ -348,6 +349,7 @@ def main():
     # (tools/rando/room_logic.py), the same layouts are written into the seed after LAS's files
     room_mode = settings.get('dungeon-room-shuffle', 'off')
     room_plan = None
+    room_attempt = 0
     lab_on = room_mode in ('coherent', 'chaos', 'madness') and bool(settings.get('dungeon-labyrinth'))
     settings['dungeon-labyrinth'] = lab_on
     lab_info = None
@@ -362,7 +364,9 @@ def main():
         extra = {name: p['room'] for name, p in pot_locs.items() if p.get('room')}
         base = (copy.deepcopy(logic_defs), copy.deepcopy(item_defs), copy.deepcopy(settings))
         layouts = jumps = None
-        for attempt in range(40):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
+        # a layout whose dungeons can't be filled: the next one (same seed ID, same result); LARECOMP_ROOM_ATTEMPT: the
+        # first layout to try (retry_layout below: the item shuffle failed on the ones before)
+        for attempt in range(int(os.environ.get('LARECOMP_ROOM_ATTEMPT', 0)), 40):
             sub = settings['seed'] if attempt == 0 else f"{settings['seed']}~{attempt}"
             lab = None
             if lab_on:  # (Labyrinth: one shuffled dungeon of every dungeon, each mode keeping its pairing rules)
@@ -405,6 +409,7 @@ def main():
         if layouts is None:
             raise RuntimeError('no dungeon room layout for this seed')
         room_plan = (layouts, jumps, lab_info)
+        room_attempt = attempt
         if lab_info:  # (the doors' arrivals, the cross-wing links, statistics: read by stage 2 and seed_sweep.py)
             lab_info['planning-attempts'] = attempt + 1
             lab_info.update({'small-keys': item_defs['key-D1']['quantity'], 'spare-keys': room_logic.SPARE_KEYS,
@@ -424,6 +429,15 @@ def main():
         print('mini-boss souls on vanilla dungeons:', souls_mod.vanilla_gate(
             soul_cat, romfs, logic_defs, vanilla, {n: p['room'] for n, p in pot_locs.items() if p.get('room')}),
             'conditions', flush=True)
+
+    def retry_layout(why):
+        """Dungeon room shuffle: the items can't be placed in this layout (or the seed came out unbeatable) - the
+        next layout of the same seed ID, in a fresh run (deterministic: a seed ID never fails while one is left)."""
+        if not room_plan or room_attempt + 1 >= 40:
+            return
+        print(f'room layout {room_attempt + 1}: {why} - planning another', flush=True)
+        import subprocess
+        sys.exit(subprocess.run(_RERUN, env=dict(os.environ, LARECOMP_ROOM_ATTEMPT=str(room_attempt + 1))).returncode)
 
     result = {}
     errors = []
@@ -490,6 +504,8 @@ def main():
             m = re.search(r'RuntimeError: (Triforce hunt: .*)', str(e))
             if m:
                 print('error ' + m.group(1), flush=True)
+        if not any('Triforce hunt' in str(e) for e in errors):
+            retry_layout('the items can\'t be placed')
         print('SHUFFLE ERROR', errors, file=sys.stderr)
         sys.exit(1)
     print('placements ready', flush=True)
@@ -559,6 +575,7 @@ def main():
             json.dump({'placements': {k: v for k, v in pl.items() if isinstance(v, str)},
                        'access': {k: 1 for k, v in settings.items() if v is True}}, f)
     if missing:
+        retry_layout(f'unbeatable ({", ".join(missing[:3])})')
         print('SHUFFLE ERROR unbeatable seed', missing, file=sys.stderr)
         sys.exit(3)
     if os.environ.get('LARECOMP_CHECK_ONLY'):
