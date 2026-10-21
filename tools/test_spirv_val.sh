@@ -23,7 +23,7 @@ for src in "$OUT"/glsl/*.vert "$OUT"/glsl/*.frag "$OUT"/glsl/*.comp; do
   total=$((total + 1))
   base=$(basename "$src")
   id=${base%.*}
-  name=$(grep "^${id}_${base##*.} " "$OUT/glsl/names.txt" | cut -d' ' -f2-)
+  name=$(grep "^${id} " "$OUT/glsl/names.txt" | cut -d' ' -f2-)
   spv="$OUT/spv/$base.spv"
   if ! glslc --target-env=vulkan1.3 -o "$spv" "$src" > "$OUT/spv/$base.log" 2>&1; then
     failed="$failed
