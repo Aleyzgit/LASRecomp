@@ -671,17 +671,33 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, seq; VkSpan span; uint64_t scanned; } gcopy[GCOPY_TAB];  // (scanned: heap size then, 0 not)
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static void guest_copy_flush(void) { gcopy_gen++; }
-static VkSpan guest_copy(uint64_t addr, uint64_t size) {
+// scan: (lazy heap chunks, a uniform buffer of a shader with global memory) the range is also scanned for heap
+// pointers (gc_scan_pointers), once per shared copy: its contents can't change while the copy is shared (again if the
+// heap grew since: pointers past its end were passed over).
+static bool gc_scan_needed(void);
+static uint64_t prof_scan_calls, prof_scan_bytes, prof_scan_skipped;  // (VK_PROF, lazy chunks) pointer scans
+static VkSpan guest_copy_ex(uint64_t addr, uint64_t size, bool scan) {
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
-    if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size) return gcopy[slot].span;
+    bool hit = gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size;
+    uint64_t heap = 0;
+    if (scan) {
+        heap = gmem_heap_size();
+        if ((!hit || gcopy[slot].scanned != heap) && gc_scan_needed()) gc_scan_pointers((const uint32_t *)(uintptr_t)addr, size);
+        else prof_scan_skipped++;
+    }
+    if (hit) {
+        if (scan) gcopy[slot].scanned = heap;
+        return gcopy[slot].span;
+    }
     VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
-    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
+    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s; gcopy[slot].scanned = heap;
     return s;
 }
+static VkSpan guest_copy(uint64_t addr, uint64_t size) { return guest_copy_ex(addr, size, false); }
 
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
@@ -966,6 +982,12 @@ const char *renderer_stats(void) {
             snprintf(stats_text + n, sizeof stats_text - n, " | heap chunks %d imported (%llu MB), %llu misses", gc_imported,
                      (unsigned long long)gc_imported_bytes >> 20, (unsigned long long)stat_gc_misses);
             n = strlen(stats_text);
+            if (gc_lazy) {
+                snprintf(stats_text + n, sizeof stats_text - n, ", pointer scans %llu (%.2f MB), %llu skipped",
+                         (unsigned long long)prof_scan_calls, prof_scan_bytes / 1048576.0, (unsigned long long)prof_scan_skipped);
+                n = strlen(stats_text);
+            }
+            prof_scan_calls = prof_scan_bytes = prof_scan_skipped = 0;
         }
         snprintf(stats_text + n, sizeof stats_text - n, " | views created %llu | counters gpu %llu | pace %s, %llu frames over", (unsigned long long)prof_views_created,
                  (unsigned long long)stat_counters_gpu, pace_is_slow() ? "30" : "60", (unsigned long long)pace_frames_over());
@@ -2495,6 +2517,11 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
+    // (lazy heap chunks) pointers in it import their chunks: scanned once per shared copy (LARECOMP_VK_NO_SCAN_ONCE=1:
+    // at every draw, as before)
+    static int scan_once = -1;
+    if (scan_once < 0) scan_once = getenv("LARECOMP_VK_NO_SCAN_ONCE") == NULL;
+    if (gc_lazy && si->uses_gmem && scan_once) return ubo_span(guest_copy_ex(r.addr, size, true), size);
     if (gc_lazy && si->uses_gmem) gc_scan_pointers((const uint32_t *)(uintptr_t)r.addr, size);
     return ubo_span(guest_copy(r.addr, size), size);
 }
@@ -3043,16 +3070,18 @@ static bool gc_import(int k) {
 // read 0 (chunk 47 at +752 MB at every scene entry, chunk 50 at the first grass cut: 576 misses over a tour). An
 // 8-byte-aligned word pair that happens to look like a heap address imports a chunk for nothing: bounded, and logged.
 #define GC_SCAN_MAX 48
+static int gc_scan_warned;
 static void gc_scan_pointers(const uint32_t *w, uint64_t bytes) {
     uint64_t heap = gmem_heap_size();
+    prof_scan_calls++;
+    prof_scan_bytes += bytes;
     for (uint64_t i = 0; i + 1 < bytes / 4; i += 2) {
         uint64_t v = (uint64_t)w[i] | (uint64_t)w[i + 1] << 32;
         if (v < HEAP_BASE || v - HEAP_BASE >= heap) continue;
         int k = (int)((v - HEAP_BASE) >> gc_shift);
         if (k >= gc_n || gc[k].buf) continue;
         if (gc_scanned >= GC_SCAN_MAX) {
-            static int warned;
-            if (!warned++) LOG("[vk] guest heap: %d chunks imported for pointers in uniform buffers: no more\n", gc_scanned);
+            if (!gc_scan_warned++) LOG("[vk] guest heap: %d chunks imported for pointers in uniform buffers: no more\n", gc_scanned);
             return;
         }
         if (gc_import(k)) {
@@ -3062,6 +3091,26 @@ static void gc_scan_pointers(const uint32_t *w, uint64_t bytes) {
                 (unsigned long long)((uint64_t)k << gc_shift) >> 20, (unsigned long long)v);
         }
     }
+}
+
+// Whether a pointer scan can still import anything: some chunk of the heap mapped so far isn't imported (and the
+// scan's import limit isn't used up). Once every chunk is in, the scans are skipped (guest_copy_ex).
+static bool gc_scan_needed(void) {
+    static uint64_t c_heap;
+    static uint32_t c_gen;
+    static int c_scanned = -1, c_warned;
+    static bool c_need = true;
+    uint64_t heap = gmem_heap_size();
+    if (heap != c_heap || gc_gen != c_gen || gc_scanned != c_scanned || gc_scan_warned != c_warned) {
+        c_heap = heap; c_gen = gc_gen; c_scanned = gc_scanned; c_warned = gc_scan_warned;
+        c_need = false;
+        if (gc_scanned < GC_SCAN_MAX || !gc_scan_warned) {
+            int n = (int)((heap + (1ull << gc_shift) - 1) >> gc_shift);
+            if (n > gc_n) n = gc_n;
+            for (int k = 0; k < n && !c_need; k++) c_need = !gc[k].buf;
+        }
+    }
+    return c_need;
 }
 
 // A heap range a draw or dispatch binds: its chunks get imported (lazy mode), and the chunk after it as well - the
