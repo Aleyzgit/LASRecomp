@@ -567,6 +567,8 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
     }
+    extern void slow_note_full_hash(void), slow_note_upload(uint64_t bytes);  // (slowframe.h)
+    slow_note_full_hash();
     uint64_t h = hash_full(mem, total);
     b->full_frame = g_frame_counter;
     b->sample_hash = fnv_sample(mem, total);
@@ -578,6 +580,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
+    slow_note_upload(total);
     // callers without an encoder get a private upload command buffer, created only when needed
     id<MTLCommandBuffer> own_cb = nil;
     if (!blit) { own_cb = [queue commandBuffer]; blit = [own_cb blitCommandEncoder]; }
@@ -1448,8 +1451,8 @@ static void present_hooks(void) {
     pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
-    static long slow_ms = -1;  // LARECOMP_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    static long slow_ms = -1;  // LARECOMP_SIM_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
+    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SIM_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SIM_SLOW_FRAME_MS")) : 0;
     static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
     if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
     if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) usleep((useconds_t)slow_ms * 1000);
