@@ -44,6 +44,7 @@ static uint64_t prof_prog_memo, prof_pipe_memo, prof_key_draws;  // (VK_PROF) ke
 static bool key_memo_on(void);
 static uint64_t prof_sets_reused, prof_sets_new, prof_set_allocs, prof_set_calls;  // (VK_PROF) set reuse / batches
 static int set_batch = -1;  // (vk_alloc_set) LARECOMP_VK_NO_SET_BATCH
+static uint64_t prof_slot_wait, prof_pool_reset, prof_pool_resets;  // (VK_PROF) sub(): ring slot waits, descriptor pool resets (ns, count)
 static bool set_reuse_on(void);
 static uint64_t prof_hook_draws, prof_hook_known;  // (VK_PROF) draws through the texture hook pass, with a known texture
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
@@ -264,7 +265,9 @@ static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
     if (s->seq != submit_seq + 1) {  // slot reused: its previous submission must be done
         wait_why = "ring slot";
+        uint64_t tw = prof ? SDL_GetTicksNS() : 0;
         vk_wait_seq(s->seq);
+        if (prof) prof_slot_wait += SDL_GetTicksNS() - tw;
         cq_resolve_done(s->seq);
         if (s->ts) {  // GPU time of that submission
             uint64_t t[3];
@@ -273,7 +276,9 @@ static Sub *sub(void) {
                 gpu_timer_add(t, s->ts_skip, s->ts_win);
             s->ts = s->ts_skip = s->ts_win = false;
         }
+        uint64_t tr = prof ? SDL_GetTicksNS() : 0;
         for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
+        if (prof) prof_pool_reset += SDL_GetTicksNS() - tr, prof_pool_resets += (uint64_t)s->npools;
         s->cur_pool = 0;
         for (int i = 0; i < s->nspare_used; i++) s->spare[s->spare_used[i]].layout = VK_NULL_HANDLE;  // (their sets went with the pools)
         s->nspare_used = 0;
@@ -523,12 +528,17 @@ static bool alloc_sets(Sub *s, VkDescriptorSetLayout layout, uint32_t count, VkD
                 if (count > 1) return false;  // (the caller asks for one)
                 FATAL("descriptor pools exhausted\n");
             }
-            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+            // Set reuse moves most uniform buffers to the dynamic type: the pool then holds 8192 static + 16384 dynamic
+            // instead of 32768 static. Without it, the pool is as before: no dynamic descriptors (a pool's size costs
+            // on some drivers: the Intel UHD 770's Windows driver spent ~0.4 ms more a frame with 32768 more of them,
+            // apparently in vkResetDescriptorPool). A pool that runs out of a type is followed by another.
+            bool dynp = set_reuse_on();
+            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, dynp ? 8192 : 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
                                             {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
-                                            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32768}};  // (stage_set: set reuse)
+                                            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16384}};  // (stage_set: set reuse)
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 6, .pPoolSizes = sizes};
+                                             .poolSizeCount = dynp ? 6 : 5, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1077,6 +1087,10 @@ const char *renderer_stats(void) {
                      set_reuse_on() ? "on" : "off", set_batch > 0 ? "on" : "off", (unsigned long long)prof_sets_reused,
                      (unsigned long long)prof_sets_new, (unsigned long long)prof_set_allocs, (unsigned long long)prof_set_calls);
             prof_sets_reused = prof_sets_new = prof_set_allocs = prof_set_calls = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | slot wait %.1f ms, pool resets %llu %.2f ms",
+                     prof_slot_wait / 1e6, (unsigned long long)prof_pool_resets, prof_pool_reset / 1e6);
+            prof_slot_wait = prof_pool_reset = prof_pool_resets = 0;
         }
         {   // GPU time per frame by part (see gpu_timer_add), CPU waits per frame by place (device.c g_vk_frame_waits)
             static uint64_t lw[4];
