@@ -20,17 +20,24 @@
 // fps, issue #40), also while the counters below reported slow frames.
 // So each presented frame's busy time is measured (present to present, minus the time the presenting thread was
 // blocked in kernel waits, sleeps and the window's image: idle); when frames don't fit 60 (12 of the last 60 over
-// 16.2 ms), the game is held in its 30 fps mode: its least extra vsyncs becomes 1, and the counters report a frame of at
-// least PACE_SLOW_NS as before (its own dynamic resolution, which read them too, is off: tools/patches.py
-// GAME_DYNRES_SITE). It can't flip back on a quick frame then; we let it go back on headroom:
-//   clear: frames that would cost under 11 ms at 60 on average and none of the last 60 over 14.5 ms, 60 frames in a
-//     row (2 s at 30) - right away, whatever the backoff (a light scene after a heavy one doesn't wait);
-//   enough: under 13.5 ms on average and at most 1 of the last 60 over 16.2 ms, 150 frames in a row (5 s at 30) times
+// 16.2 ms, and the median frame within ~3 ms of that: a few hitches or spikes in frames that otherwise fit don't count),
+// the game is held in its 30 fps mode: its least extra vsyncs becomes 1, and the counters report a frame of at least
+// PACE_SLOW_NS as before (its own dynamic resolution, which read them too, is off: tools/patches.py GAME_DYNRES_SITE).
+// Its 30 fps mode is two world steps a frame (+0x4e0 counts the extra one down) and a present interval of 2 (+0x4e1 + 1,
+// to nvnWindowSetPresentInterval). On the Switch the display waits out that interval; here nothing did, so a held
+// frame that fit in one vsync was still shown after one: the game asked for interval 2 the whole hold, yet a Steam
+// Deck's held frames were half 16.7 ms apart (35-45 fps, issue #40) and a Mac's with headroom 9 in 10. So while held,
+// the presenting thread waits out the interval itself (hold_cadence): two vsyncs a frame.
+// It can't flip back on a quick frame then; we let it go back on headroom, by what a frame would cost at 60: the game
+// thread's busy time less its second world step, or the render thread's CPU time for the frame when that's more (at 30
+// a render-bound machine's game thread barely waits for it: its busy time alone would look like headroom):
+//   clear: under 11 ms on average and none of the last 60 over 14.5 ms, 60 frames in a row (2 s at 30) times the
+//     backoff up to 4x (a light scene after a heavy one doesn't wait long);
+//   enough: the median under 13.5 ms and at most 4 of the last 60 over 16.2 ms, 150 frames in a row (5 s at 30) times
 //     the backoff.
-// (A 30 fps frame's cost at 60: its busy time less its second world step, see `cost` below.)
 // Backoff (issues #70, #40): a machine right at the edge (a handheld on a low power profile) gains headroom at 30 fps
 // just by cooling down, goes back to 60, and doesn't fit again a few seconds later - 60 / 30 flicker. Falling back
-// within 20 s of going back doubles the wait for "enough" (up to 16x: 80 s); a minute at 60 resets it.
+// within 20 s of going back doubles the wait (up to 16x: 80 s for "enough"); a minute at 60 resets it.
 // LARECOMP_PACE=0: off (the game's own choice, flips and all).
 #define PACE_SLOW_NS 20000000ull
 extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked in waits / sleeps
@@ -39,12 +46,13 @@ static uint64_t stat_pace_over;
 
 // Holds the game in its 30 fps mode (see above): the least number of extra vsyncs its frame controller may choose
 // (game manager +0x4e2, normally 0) is 1 while slow, the game's own value again after. Re-asserted every frame while held.
+// Returns whether the game is held (not when it allows no 30 fps mode itself: its most, +0x4e3, is 0).
 #define FW_MIN_EXTRA_VSYNCS 0x4e2  // (+0x4e3: the most, 1 - its 30 fps mode; +0x4e0 / +0x4e1: the current choice)
-static void hold_30(bool on) {
+static bool hold_30(bool on) {
     static bool held;
     static uint8_t saved;
     uint64_t fw = *(volatile uint64_t *)(uintptr_t)GA_GAME_MGR;
-    if (!fw) { held = false; return; }  // (between boots / before the game set up)
+    if (!fw) return held = false;  // (between boots / before the game set up)
     volatile uint8_t *min = (volatile uint8_t *)(uintptr_t)(fw + FW_MIN_EXTRA_VSYNCS), *max = min + 1;
     if (on && *max >= 1) {
         if (!held) saved = *min, held = true;
@@ -52,6 +60,38 @@ static void hold_30(bool on) {
     } else if (held) {
         *min = saved, held = false;
     }
+    return held;
+}
+
+// The held 30 fps mode's present interval (see above): called last in each frame's pace_frame, after its present. The
+// game then waits for the next vsync (a frame that took 20 ms is shown 33 ms after the one before it: the wait is
+// for the next vsync, not one already passed). Held, a frame that started after vsync S may not let the game start
+// the next one before S + 2: if vsync S + 1 hasn't come yet, wait for it here. (The time counts as blocked: idle.)
+extern volatile uint64_t g_vsync_count, g_vsync_ns;  // runtime/hle/vi.c
+static void hold_cadence(bool held) {
+    static uint64_t v_exit;  // the vsync count when the game last went on from here (its next frame: from the vsync after)
+    if (held && v_exit) {
+        uint64_t target = v_exit + 2, t0 = plat_now_ns(), n;
+        // (bounded: a stalled vsync timer must not stall the game - two vsyncs and a bit at most)
+        for (;;) {
+            uint64_t vt = __atomic_load_n(&g_vsync_ns, __ATOMIC_ACQUIRE);  // (first: the count is then at least its vsync's,
+            n = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);          // so a vsync in between only wakes us early)
+            if (n >= target || plat_now_ns() - t0 > 40000000ull) break;
+            uint64_t at = vt + (target - n) * 16666667ull + 250000ull;
+            uint64_t now = plat_now_ns();
+            plat_sleep_until_ns(at > now + 100000ull ? at : now + 100000ull);
+        }
+        g_blocked_ns += plat_now_ns() - t0;
+    }
+    v_exit = __atomic_load_n(&g_vsync_count, __ATOMIC_ACQUIRE);
+}
+
+static float median60(const float *v) {
+    float s[60];
+    memcpy(s, v, sizeof s);
+    for (int i = 1; i < 60; i++)  // (insertion sort: 60 floats a frame)
+        for (int j = i; j > 0 && s[j - 1] > s[j]; j--) { float t = s[j]; s[j] = s[j - 1], s[j - 1] = t; }
+    return (s[29] + s[30]) / 2;
 }
 
 bool pace_is_slow(void) { return pace_slow; }
@@ -84,12 +124,13 @@ void pace_frame(void) {
     static int idx, nover, calm, clear, backoff = 1;
     static uint64_t back_at;  // when frame pacing last went back to 60 (0: not yet)
     static double avg;  // cost (ms at 60 fps), moving average (~20 frames)
-    static uint64_t last_tcpu;
-    uint64_t now = plat_now_ns(), w = g_blocked_ns, tcpu = plat_thread_cpu_ns();
-    uint64_t p = now - last, wt = w - last_wait, tc = tcpu - last_tcpu;
+    static uint64_t last_tcpu, last_rcpu;
+    extern uint64_t rq_render_cpu_ns(void);  // rqueue.c: the render thread's CPU time so far (0: no render thread)
+    uint64_t now = plat_now_ns(), w = g_blocked_ns, tcpu = plat_thread_cpu_ns(), rcpu = rq_render_cpu_ns();
+    uint64_t p = now - last, wt = w - last_wait, tc = tcpu - last_tcpu, rc = rcpu - last_rcpu;
     bool first = !last;
-    last = now, last_wait = w, last_tcpu = tcpu;
-    if (first || p > 100000000ull) return;  // (loading, a hitch: not a pace)
+    last = now, last_wait = w, last_tcpu = tcpu, last_rcpu = rcpu;
+    if (first || p > 100000000ull) { hold_cadence(hold_30(pace_slow && on)); return; }  // (loading, a hitch: not a pace)
     double busy = (p > wt ? p - wt : 0) / 1e6;
     // What the frame would cost at 60 fps: a frame of the game's 30 fps mode (two vsyncs or more) runs its world twice,
     // and the second step - about half this thread's CPU time then (measured: 3.0 -> 6.0 ms, 4.9 -> 9.3 ms) - is work
@@ -97,6 +138,10 @@ void pace_frame(void) {
     // and the way back needed far more headroom than it should.
     double step2 = tc / 2e6 < busy / 2 ? tc / 2e6 : busy / 2;  // (at most half: a coarse thread clock can't take it all)
     double cost = p > 25000000ull ? busy - step2 : busy;
+    // Held, the render thread has two vsyncs a frame and the game thread hardly waits for it: its CPU time for the frame
+    // is what the frame would cost it at 60. (Not when free: there waiting for it is already in the busy time, and a
+    // period can hold more or less than one frame of its work.)
+    if (pace_slow && rc / 1e6 > cost && rc < 60000000ull) cost = rc / 1e6;
     avg = avg ? avg + (cost - avg) * 0.05 : cost;
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
@@ -106,16 +151,14 @@ void pace_frame(void) {
     last_rq = g_rq_wait_ns;
     if (log) {  // (plus this thread's CPU time per frame and the render thread's: work, independent of waits; and where
                 // this thread's frame went in the renderer's frontend - rqueue.h)
-        extern uint64_t rq_render_cpu_ns(void);
         extern __thread uint64_t g_rq_lock_ns, g_submit_ns, g_gpu_wait_ns, g_present_ns, g_hooks_ns;
-        static uint64_t last_cpu, last_rcpu, l_lock, l_sub, l_gpu, l_pres, l_hooks;
-        uint64_t cpu = plat_thread_cpu_ns(), rcpu = rq_render_cpu_ns();
+        static uint64_t last_cpu, l_lock, l_sub, l_gpu, l_pres, l_hooks;
+        uint64_t cpu = plat_thread_cpu_ns();
         LOG("[pace] period %.2f blocked %.2f busy %.2f cost %.2f ms (queue wait %.2f, cpu %.2f, render cpu %.2f, gpu wait %.2f, submit %.2f, "
             "present %.2f, hooks %.2f, lock %.2f)\n", p / 1e6, wt / 1e6, busy, cost, rqw / 1e6, last_cpu ? (cpu - last_cpu) / 1e6 : 0.0,
-            last_rcpu ? (rcpu - last_rcpu) / 1e6 : 0.0, (g_gpu_wait_ns - l_gpu) / 1e6, (g_submit_ns - l_sub) / 1e6,
+            rc / 1e6, (g_gpu_wait_ns - l_gpu) / 1e6, (g_submit_ns - l_sub) / 1e6,
             (g_present_ns - l_pres) / 1e6, (g_hooks_ns - l_hooks) / 1e6, (g_rq_lock_ns - l_lock) / 1e6);
         last_cpu = cpu;
-        last_rcpu = rcpu;
         l_lock = g_rq_lock_ns, l_sub = g_submit_ns, l_gpu = g_gpu_wait_ns, l_pres = g_present_ns, l_hooks = g_hooks_ns;
     }
     int o = cost > 16.2;
@@ -125,29 +168,31 @@ void pace_frame(void) {
     recent[idx] = (float)cost;
     idx = (idx + 1) % 60;
     if (!on) return;  // (measured and counted all the same: LARECOMP_LOG_PACE, the stats)
+    float med = median60(recent);
     if (!pace_slow && back_at && backoff > 1 && now - back_at > 60000000000ull) {
         backoff = 1;
         LOG("[pace] a minute at 60: headroom needed back to normal\n");
     }
-    if (!pace_slow && nover >= 12) {
+    if (!pace_slow && nover >= 12 && med >= 13.0f) {
         pace_slow = true, calm = clear = 0;
         if (back_at && now - back_at < 20000000000ull && backoff < 16) backoff *= 2;  // (flickering: wait longer)
-        LOG("[pace] frames don't fit 60 fps (%d of the last 60 over 16.2 ms busy): holding the game's 30 fps mode%s\n", nover,
-            backoff > 1 ? " (backing off)" : "");
+        LOG("[pace] frames don't fit 60 fps (%d of the last 60 over 16.2 ms busy, median %.1f): holding the game's 30 fps mode%s\n",
+            nover, med, backoff > 1 ? " (backing off)" : "");
     } else if (pace_slow) {
         float peak = 0;
         for (int i = 0; i < 60; i++) peak = recent[i] > peak ? recent[i] : peak;
         clear = avg < 11.0 && peak < 14.5f ? clear + 1 : 0;
-        calm = avg < 13.5 && nover <= 1 ? calm + 1 : 0;
-        if (clear >= 60 || calm >= 150 * backoff) {
-            LOG("[pace] %d frames with %s headroom (%.1f ms a frame at 60 on average, at most %.1f): back to the game's own choice\n",
-                clear >= 60 ? clear : calm, clear >= 60 ? "clear" : "enough", avg, peak);
+        calm = med < 13.5f && nover <= 4 ? calm + 1 : 0;
+        int clear_n = 60 * (backoff < 4 ? backoff : 4);
+        if (clear >= clear_n || calm >= 150 * backoff) {
+            LOG("[pace] %d frames with %s headroom (%.1f ms a frame at 60 on average, median %.1f, at most %.1f): back to "
+                "the game's own choice\n", clear >= clear_n ? clear : calm, clear >= clear_n ? "clear" : "enough", avg, med, peak);
             pace_slow = false, nover = 0, back_at = now;
             memset(over, 0, sizeof over);
             memset(recent, 0, sizeof recent);
         }
     }
-    hold_30(pace_slow);
+    hold_cadence(hold_30(pace_slow));
 }
 
 uint64_t pace_end_counter(const uint64_t *start_entry, const uint64_t *entry, uint64_t value) {
