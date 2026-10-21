@@ -38,6 +38,8 @@ static uint64_t gc_imported_bytes, stat_gc_misses;
 static uint64_t gmem_heap_size(void);
 static void gc_frame(void);
 static uint64_t stat_upload_bytes;
+static uint64_t prof_cb_reused, prof_cb_copied;  // (VK_PROF) lean constant blocks: copies reused, made (cbuf_lean)
+static bool cbuf_lean(void);
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
@@ -979,6 +981,10 @@ const char *renderer_stats(void) {
             n = strlen(stats_text);
             snprintf(stats_text + n, sizeof stats_text - n, " | tex unwritten %llu", (unsigned long long)prof_tex_watch_skips);
             prof_tex_watch_skips = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | const blocks %s: %llu reused %llu copied", cbuf_lean() ? "lean" : "full",
+                     (unsigned long long)prof_cb_reused, (unsigned long long)prof_cb_copied);
+            prof_cb_reused = prof_cb_copied = 0;
         }
         {   // GPU time per frame by part (see gpu_timer_add), CPU waits per frame by place (device.c g_vk_frame_waits)
             static uint64_t lw[4];
@@ -2388,10 +2394,69 @@ static VkDescriptorBufferInfo ubo_span(VkSpan s, uint64_t size) {
     return (VkDescriptorBufferInfo){s.buf, s.off, size > max ? max : size};
 }
 
+// Lean constant blocks: the scale table (66 rows, 1 KB) and the driver constants (up to 2 KB) were zero-filled in
+// full and compared in full per stage and draw, although only a few rows / entries carry anything. These build and
+// compare only those (the scale table's rows 0..ntex and 65; the driver constants' storage buffer entries below the
+// size the shader reads) and write the same bytes as before. LARECOMP_VK_NO_CBUF_LEAN=1: the full blocks, as before.
+static int cbuf_lean_v = -1;
+static bool cbuf_lean(void) {
+    if (cbuf_lean_v < 0) cbuf_lean_v = getenv("LARECOMP_VK_NO_CBUF_LEAN") == NULL;
+    return cbuf_lean_v;
+}
+// The scale table of a graphics stage: rows 0..nt and 65 of rs are set, the rows between are zero (not read from rs).
+static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
+    static struct { uint64_t seq; int nt; float r[66][4]; VkSpan span; } last[2];
+    uint64_t seq = vk_pending_seq();
+    size_t used = (size_t)(nt + 1) * 16;
+    if (last[sg].seq == seq && last[sg].nt == nt && !memcmp(last[sg].r, rs, used) && !memcmp(last[sg].r[65], rs[65], 16)) {
+        prof_cb_reused++;
+        return last[sg].span;
+    }
+    VkSpan s = vk_transient(66 * 16, 256);
+    memcpy(s.ptr, rs, used);
+    if (nt < 64) memset((uint8_t *)s.ptr + used, 0, (size_t)(64 - nt) * 16);
+    memcpy((uint8_t *)s.ptr + 65 * 16, rs[65], 16);
+    last[sg].seq = seq; last[sg].nt = nt; memcpy(last[sg].r, rs, used); memcpy(last[sg].r[65], rs[65], 16); last[sg].span = s;
+    prof_cb_copied++;
+    return s;
+}
+// The driver constants of a graphics stage (cbuf 0, size bytes): zero but for the stage's storage buffer table at
+// base (16 bytes an entry: address low, high, size). Compared by the entries within size.
+static VkSpan drv_dedupe(int stage, uint64_t size) {
+    static struct { uint64_t seq, size; int stage; Range sb[16]; VkSpan span; } last[2];
+    int slot = stage == 1;
+    uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
+    int ne = size > base ? (int)((size - base + 15) / 16) : 0;
+    if (ne > 16) ne = 16;
+    uint64_t seq = vk_pending_seq();
+    if (last[slot].seq == seq && last[slot].size == size && last[slot].stage == stage &&
+        !memcmp(last[slot].sb, st.sbuf[stage], (size_t)ne * sizeof(Range))) {
+        prof_cb_reused++;
+        return last[slot].span;
+    }
+    uint32_t drv[0x800 / 4];
+    memset(drv, 0, size);
+    for (int i = 0; i < ne; i++) {  // (an entry may run past size: drv is 0x800 bytes, only size of them are copied)
+        uint32_t *e = &drv[(base + 16 * i) / 4];
+        e[0] = (uint32_t)st.sbuf[stage][i].addr;
+        e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
+        e[2] = (uint32_t)st.sbuf[stage][i].size;
+    }
+    VkSpan s = vk_transient_copy(drv, size, 256);
+    last[slot].seq = seq; last[slot].size = size; last[slot].stage = stage; last[slot].span = s;
+    memcpy(last[slot].sb, st.sbuf[stage], (size_t)ne * sizeof(Range));
+    prof_cb_copied++;
+    return s;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
     if (k == 0) {
+        if (stage != 5 && cbuf_lean()) {  // (the size as below)
+            uint64_t size = si->cbuf_size[0] > 0x800 ? 0x800 : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
+            return ubo_span(drv_dedupe(stage, size), size);
+        }
         uint32_t drv[0x800 / 4] = {0};
         if (stage == 5) {
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
@@ -3675,9 +3740,12 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     VkDescriptorImageInfo ii[MAX_BIND];
     int n = 0;
     int sg = stage == 1 ? 1 : 0;
-    float rs[66][4] = {{1, 1, 0, 0}};  // ([65]: mirror mode, renderer.m)
+    bool lean = cbuf_lean();
+    float rs[66][4];  // ([65]: mirror mode, renderer.m) (lean: only rows 0, 1..ntex and 65 are set and read)
+    if (!lean) memset(rs, 0, sizeof rs);
+    rs[0][0] = rs[0][1] = 1; rs[0][2] = rs[0][3] = 0;
     if (rscale_row0) memcpy(rs[0], rscale_row0, 16);
-    rs[65][0] = g_mirror_w;
+    rs[65][0] = g_mirror_w; rs[65][1] = rs[65][2] = rs[65][3] = 0;
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set) continue;
@@ -3721,7 +3789,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             for (int t = 0; t < si->ntex && t < 64; t++) {  // scale x, y, content part x, y
                 rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; rs[1 + t][2] = tex_fr[sg][t][0]; rs[1 + t][3] = tex_fr[sg][t][1];
             }
-            bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
+            if (lean) bi[n] = ubo_span(rscale_dedupe(sg, (const float (*)[4])rs, si->ntex < 64 ? si->ntex : 64), sizeof rs);
+            else bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
         } else {
             float zero[8] = {0};
             bi[n] = ubo_span(copy_dedupe(DEDUPE_TINT, tint ? tint : zero, 32, 256), 32);
