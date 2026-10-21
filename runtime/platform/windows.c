@@ -488,6 +488,55 @@ bool plat_module_name(uint64_t pc, char *out, size_t n) {
     return GetModuleFileNameA(m, out, (DWORD)n) > 0;
 }
 
+// RtlGetVersion (ntdll): the real version - GetVersionEx answers with the manifest's idea of it
+typedef LONG(WINAPI *RtlGetVersionFn)(OSVERSIONINFOW *);
+void plat_system_info(PlatSysInfo *si) {
+    OSVERSIONINFOW v = {.dwOSVersionInfoSize = sizeof v};
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    RtlGetVersionFn rtl = ntdll ? (RtlGetVersionFn)(void *)GetProcAddress(ntdll, "RtlGetVersion") : NULL;
+    if (!rtl || rtl(&v) != 0) v.dwMajorVersion = 0;
+    SYSTEM_INFO sys;
+    GetNativeSystemInfo(&sys);
+    const char *arch = sys.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ? "x64"
+                     : sys.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64 ? "arm64" : "?";
+    const char *name = v.dwMajorVersion != 10 ? "Windows" : v.dwBuildNumber >= 22000 ? "Windows 11" : "Windows 10";
+    if (v.dwMajorVersion)  // (Windows 11 still says 10.0: build 22000 and later)
+        snprintf(si->os, sizeof si->os, "%s (%lu.%lu.%lu, %s)", name, v.dwMajorVersion, v.dwMinorVersion,
+                 v.dwBuildNumber, arch);
+    else snprintf(si->os, sizeof si->os, "Windows (%s)", arch);
+    // the CPU's name: the registry's (what Task Manager shows), else the CPUID brand string
+    DWORD len = sizeof si->cpu;
+    if (RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0", "ProcessorNameString",
+                     RRF_RT_REG_SZ, NULL, si->cpu, &len) != ERROR_SUCCESS) {
+        si->cpu[0] = 0;
+#if defined(__x86_64__) || defined(__i386__)
+        unsigned r[12];
+        for (unsigned i = 0; i < 3; i++)
+            __asm__ volatile("cpuid" : "=a"(r[i * 4]), "=b"(r[i * 4 + 1]), "=c"(r[i * 4 + 2]), "=d"(r[i * 4 + 3]) : "a"(0x80000002u + i), "c"(0));
+        memcpy(si->cpu, r, sizeof r);
+        si->cpu[sizeof r] = 0;
+#endif
+    }
+    char *c = si->cpu;  // (both pad the name with spaces)
+    while (*c == ' ') c++;
+    memmove(si->cpu, c, strlen(c) + 1);
+    for (size_t l = strlen(si->cpu); l && si->cpu[l - 1] == ' '; l--) si->cpu[l - 1] = 0;
+    // cores: one RelationProcessorCore record each; threads: every processor group's
+    DWORD bytes = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, NULL, &bytes);
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *info = bytes ? malloc(bytes) : NULL;
+    if (info && GetLogicalProcessorInformationEx(RelationProcessorCore, info, &bytes))
+        for (char *p = (char *)info; p < (char *)info + bytes; p += ((SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX *)p)->Size)
+            si->cores++;
+    free(info);
+    si->threads = (int)GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
+    MEMORYSTATUSEX m = {.dwLength = sizeof m};
+    if (GlobalMemoryStatusEx(&m)) si->ram = m.ullTotalPhys;
+#ifdef LARECOMP_ZIP_BUILD
+    si->package = "zip";  // (make dist: the release zip)
+#endif
+}
+
 void plat_init(void) {
     // abort() (rt_fatal_trace, after the crash dialog) without the C runtime's own "Microsoft Visual C++ Runtime
     // Library - abort() has been called" box and the Windows error report: the player sees only LAS Recomp's dialog
