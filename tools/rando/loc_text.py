@@ -239,6 +239,16 @@ T = {
         'fr_us': 'Aile {n} du labyrinthe', 'es': 'Ala {n} del laberinto', 'es_us': 'Ala {n} del laberinto',
         'it': 'Ala {n} del labirinto', 'nl': 'Vleugel {n} van het labyrint', 'ru': 'Крыло {n} лабиринта',
         'ja': '迷宮の 第{n}区画', 'ko': '미궁의 제{n}구역', 'zh_cn': '迷宫第{n}区', 'zh_tw': '迷宮第{n}區'},
+    # the Labyrinth: a wing's title (dungeon map, the title on entering): '<labyrinth> - <wing>'. The title font
+    # (ui/jpn_heading.bffnt) has few glyphs in Japanese / Chinese: the first choice it can draw is taken, none: the
+    # game's own title stays (Chinese: no digit but 1-3 in it)
+    'wing_title': {
+        'en': [('Labyrinth', 'Wing {n}')], 'de': [('Labyrinth', 'Flügel {n}')], 'fr': [('Labyrinthe', 'Aile {n}')],
+        'es': [('Laberinto', 'Ala {n}')], 'it': [('Labirinto', 'Ala {n}')], 'nl': [('Labyrint', 'Vleugel {n}')],
+        'ru': [('Лабиринт', 'Крыло {n}')],
+        'ja': [('迷宮', '第{n}区画'), ('ラビリンス', '{n}')],
+        'ko': [('미궁', '제{n}구역'), ('미로', '구간 {n}')],
+        'zh_cn': [('迷宫', '第{n}区')], 'zh_tw': [('迷宮', '第{n}區')]},
 }
 # hint details (where an item lies inside a place)
 DETAIL = {
@@ -322,3 +332,71 @@ def tr(table, lang):
 
 def wing_name(n, lang):
     return (tr(T['wing'], lang) or T['wing']['en']).format(n=n)
+
+
+# the wings' title labels in Place.msbt (wing n: the level it is built in - Color Dungeon = wing 0)
+TITLE_LABELS = {0: ('ClothesDungeon', 'ClothesDungeon_map'), **{n: (f'Lv{n}Dungeon', f'Lv{n}Dungeon_map')
+                                                                for n in range(1, 9)}}
+
+
+def wing_title(n, lang, game_title=b'', game_name=b'', glyphs=None):
+    """A wing's title as the game shows a dungeon's ('Level 2 - Bottle Grotto' -> 'Labyrinth - Wing 2'): the game's
+    own separator where its title is '<level> <sep> <name>' (English), else ' - '; glyphs: the characters the title
+    font has (the language's place names) - the first wording made of those."""
+    choices = tr(T['wing_title'], lang) or T['wing_title']['en']
+    t, nm = _clean(game_title).decode('utf-8', 'replace'), _clean(game_name).decode('utf-8', 'replace')
+    sep = ' - '
+    if nm and t.endswith(nm) and t != nm:
+        m = re.search(r'(\s*\S\s*)$', t[:-len(nm)])
+        sep = m.group(1) if m else sep
+    for lab, wing in choices:
+        out = lab + sep + wing.format(n=n)
+        if glyphs is None or all(c in glyphs for c in out):
+            return out
+    return None
+
+
+def font_glyphs(path):
+    """The characters a .bffnt font has (its CMAP blocks: direct, table, scan)."""
+    import struct
+    d = open(path, 'rb').read()
+    out, i = set(), d.find(b'CMAP')
+    while i >= 0:
+        size, b, e, m = struct.unpack_from('<IIIH', d, i + 4)
+        if m == 0:
+            out |= {chr(c) for c in range(b, e + 1)}
+        elif m == 1:
+            out |= {chr(c) for k, c in enumerate(range(b, e + 1))
+                    if struct.unpack_from('<H', d, i + 24 + 2 * k)[0] != 0xFFFF}
+        elif m == 2:
+            n, = struct.unpack_from('<H', d, i + 24)
+            out |= {chr(struct.unpack_from('<I', d, i + 28 + 8 * k)[0]) for k in range(n)}
+        i = d.find(b'CMAP', i + 4)
+    return out
+
+
+def labyrinth_titles(out_dir, romfs):
+    """Labyrinth seeds: every language's Place.msbt dungeon titles (Lv<n>Dungeon, ClothesDungeon: the dungeon map's
+    title, the title on entering) name the wing instead ('Labyrinth - Wing 2'). -> files written"""
+    import glob
+    n = 0
+    for p in sorted(glob.glob(os.path.join(romfs, 'region*', '*', 'message', 'Place.msbt'))):
+        rel = os.path.relpath(p, romfs)
+        m = Msbt(kt._read(out_dir, romfs, rel))
+        game = Msbt(open(p, 'rb').read()).texts  # (the game's own titles)
+        lang = lang_of(rel)
+        region, folder = rel.replace('\\', '/').split('/')[:2]
+        font = os.path.join(romfs, region, folder.replace('_Validation', ''), 'ui', 'jpn_heading.bffnt')
+        if not os.path.exists(font):
+            font = os.path.join(romfs, 'region_common', 'ui', 'jpn_heading.bffnt')
+        glyphs = font_glyphs(font) if os.path.exists(font) else None
+        for w, (label, name) in TITLE_LABELS.items():
+            t = wing_title(w, lang, game[label], game.get(name, b''), glyphs) if label in game else None
+            if t:
+                m.set(label, t.encode() + b'\0')
+        out = os.path.join(out_dir, 'romfs', rel)
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        with open(out, 'wb') as f:
+            f.write(m.pack())
+        n += 1
+    return n

@@ -699,6 +699,9 @@ def main():
           flush=True)
     import keysanity_text  # (after every flow edit, digs / underwater too) a dungeon item outside its dungeon names it
     keysanity_text.apply(out_dir, romfs, result['placements'], labyrinth=settings.get('dungeon-labyrinth'))
+    if settings.get('dungeon-labyrinth'):  # (the dungeon map's title / the title on entering: 'Labyrinth - Wing 2')
+        import loc_text
+        print('labyrinth titles:', loc_text.labyrinth_titles(out_dir, romfs), 'message files', flush=True)
     if settings.get('enemy-minibosses'):  # the Field's walls for roaming mini-bosses (tools/rando/roam.py)
         import roam
         print('roam:', roam.write(out_dir, _uw_leb, romfs), flush=True)
