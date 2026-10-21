@@ -30,6 +30,8 @@
 #define GA_ACTOR_KILL                       UINT64_C(0x7000fabf70)
 #define GA_ACTOR_REGISTRY                   UINT64_C(0x7001cb2d00)
 #define GA_ADD_ITEM                         UINT64_C(0x70007e18b0)
+#define GA_PLAY_SYSTEM_SE                   UINT64_C(0x70000a57e0)
+#define GA_SINKING_SWORD_VTABLE             UINT64_C(0x7001c0e4e0)
 #define GA_AREA_EVENT_TRIGGER               UINT64_C(0x7000029520)
 #define GA_SAVE_SCAN_BEGIN                  UINT64_C(0x7001c00000)
 #define GA_SAVE_SCAN_END                    UINT64_C(0x7001d00000)
