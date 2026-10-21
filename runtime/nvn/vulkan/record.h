@@ -33,7 +33,8 @@ bool rec_present_recreate(void);  // (and clears it) the last present asked for 
 // rec_* (never passed to the driver by the caller), and only before slot's pools are reset again.
 VkDescriptorSet rec_alloc_set(int slot, VkDescriptorSetLayout layout);
 void rec_reset_pools(int slot);  // the slot's submission is done (exec.c sub()): its sets go
-bool rec_set_batch(void);        // sets are allocated in batches (LARECOMP_VK_NO_SET_BATCH=1: one per call)
+bool rec_set_batch(void);          // sets are allocated in batches (LARECOMP_VK_NO_SET_BATCH=1: one per call)
+bool rec_set_recycle(void);        // a slot's sets are handed out again instead of resetting its pools (LARECOMP_VK_NO_SET_RECYCLE=1: off)
 // n writes, each of one descriptor (buffer or image info), to sets from rec_alloc_set or real ones
 void rec_UpdateDescriptorSets(uint32_t n, const VkWriteDescriptorSet *w);
 
@@ -65,6 +66,8 @@ typedef struct {
     uint64_t present_waits, present_wait_ns;      // rec_wait_presents waits that had to wait
     uint64_t full_waits, full_ns;                 // the ring was full
     uint64_t set_allocs, set_calls;               // descriptor sets allocated, vkAllocateDescriptorSets calls
+    uint64_t sets_fresh;                          // of those, new from the pools (the rest recycled: LARECOMP_VK_NO_SET_RECYCLE)
+    uint64_t pool_resets, pool_reset_ns;          // vkResetDescriptorPool calls and their time (on the recorder when it is on)
     uint64_t pipe_waits, pipe_wait_ns;            // binds that waited for a pipeline build (WAIT_PIPES)
     uint64_t draws_dropped;                       // draws dropped after a failed pipeline (WAIT_PIPES)
 } RecStats;

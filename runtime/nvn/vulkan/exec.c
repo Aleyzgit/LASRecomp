@@ -1020,9 +1020,12 @@ const char *renderer_stats(void) {
                      (unsigned long long)prof_prog_memo, (unsigned long long)prof_pipe_memo, (unsigned long long)prof_key_draws);
             prof_prog_memo = prof_pipe_memo = prof_key_draws = 0;
             n = strlen(stats_text);
-            snprintf(stats_text + n, sizeof stats_text - n, " | sets (reuse %s, batch %s): %llu reused %llu written, %llu allocated in %llu calls",
-                     set_reuse_on() ? "on" : "off", rec_set_batch() ? "on" : "off", (unsigned long long)prof_sets_reused,
-                     (unsigned long long)prof_sets_new, (unsigned long long)rs.set_allocs, (unsigned long long)rs.set_calls);
+            snprintf(stats_text + n, sizeof stats_text - n, " | sets (reuse %s, batch %s, recycle %s): %llu reused %llu written, %llu allocated"
+                     " (%llu new from the pools in %llu calls), pool resets %llu %.2f ms%s",
+                     set_reuse_on() ? "on" : "off", rec_set_batch() ? "on" : "off", rec_set_recycle() ? "on" : "off",
+                     (unsigned long long)prof_sets_reused, (unsigned long long)prof_sets_new, (unsigned long long)rs.set_allocs,
+                     (unsigned long long)rs.sets_fresh, (unsigned long long)rs.set_calls, (unsigned long long)rs.pool_resets,
+                     rs.pool_reset_ns / 1e6, rec_on() ? " (on the recorder)" : "");
             prof_sets_reused = prof_sets_new = 0;
             n = strlen(stats_text);
             snprintf(stats_text + n, sizeof stats_text - n, " | slot wait %.1f ms", prof_slot_wait / 1e6);
