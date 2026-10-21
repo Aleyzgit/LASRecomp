@@ -1534,6 +1534,7 @@ int ui_run(void) {
             input_rumble_poll();
             if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); input_led_stop(); LOG("window closed\n"); exit(0); }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
+            input_cursor_event(&e);
             if (menu_handle_event(&e)) continue;
             input_handle_event(&e);
         }
