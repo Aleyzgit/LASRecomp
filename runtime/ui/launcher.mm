@@ -626,6 +626,8 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
 void menu_tabs_focus(bool first_tab);
 extern int g_tab_request_ext;
 extern "C" void menu_apply_window_requests(void *sdl_window);
+extern "C" void input_cursor_event(const SDL_Event *e);  // runtime/hle/input.c
+extern "C" bool input_cursor_hidden(void);
 extern "C" int g_start_screen;  // runtime/hle/warp.c: the start screen is up (no game loaded: don't read its memory)
 // The Randomizer tab's Play / Play Now on the start screen (rando_tab.mm): start the game with that seed
 static std::string g_play_seed;
@@ -1243,6 +1245,7 @@ extern "C" void launcher_run(const char *root) {
         }
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
+            input_cursor_event(&e);  // (pad / key: the cursor hides; ImGui's backend leaves it so, below)
             if (page == SETTINGS && bind_capture_event(&e)) continue;  // (waiting for a new binding: controls_ui.mm)
             if (!launcher_pad_event(e)) ImGui_ImplSDL3_ProcessEvent(&e);
             if (e.type == SDL_EVENT_QUIT) exit(0);
@@ -1290,6 +1293,8 @@ extern "C" void launcher_run(const char *root) {
             if (!vk_frame_begin(clear_col)) { SDL_Delay(16); continue; }
             ImGui_ImplVulkan_NewFrame();
 #endif
+            if (input_cursor_hidden()) io.ConfigFlags |= ImGuiConfigFlags_NoMouseCursorChange;
+            else io.ConfigFlags &= ~ImGuiConfigFlags_NoMouseCursorChange;
             ImGui_ImplSDL3_NewFrame();
             // the backend (manual mode, no gamepads of its own) clears HasGamepad every frame, and ImGui then drops the
             // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
