@@ -849,6 +849,12 @@ OWNER_CALL_NOTIFY_SITE = A.OWNER_CALL_NOTIFY_SITE
 # skip goes to its return.
 SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
 
+# Shadow Link's own music: once he is up and Link is in range, his code calls the chamber manager's start
+# (main+0xce8ce0: BGM_PANEL_SHADOW_LINK, the level's music held until his defeat calls main+0xce8f00). Dampe's chamber is
+# the only place he has in the game; in seeds, everywhere else (the Field, dungeons, caves, houses) the call is skipped
+# and the area's own music plays on (runtime/hle/miniboss.c rt_shadow_link_bgm).
+SHADOW_LINK_BGM_SITE = A.SHADOW_LINK_BGM_SITE
+
 
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
@@ -864,6 +870,7 @@ HOOKS = {
     MSTALFOS_BODY_SITE: (0x320003e8, (), 'mov w8, #1: Master Stalfos body collision flag, off on the Field'),
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
     SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
+    SHADOW_LINK_BGM_SITE: (0x97ff5eac, (), 'bl main+0xce8ce0: Shadow Link starts his chamber music, not outside it'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
     HOLE_CAP_SITES[0]: (0xf101451f, (), 'cmp x8, #0x51: dug-hole limit (digs.c)'),
