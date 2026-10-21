@@ -241,14 +241,15 @@ T = {
         'ja': '迷宮の 第{n}区画', 'ko': '미궁의 제{n}구역', 'zh_cn': '迷宫第{n}区', 'zh_tw': '迷宮第{n}區'},
     # the Labyrinth: a wing's title (dungeon map, the title on entering): '<labyrinth> - <wing>'. The title font
     # (ui/jpn_heading.bffnt) has few glyphs in Japanese / Chinese: the first choice it can draw is taken, none: the
-    # game's own title stays (Chinese: no digit but 1-3 in it)
+    # game's own title stays. Chinese: no number (that font has no digit but 1-3) - '迷宫' + the dungeon's own name
+    # ('{name}': no separator; user 2026-10-20)
     'wing_title': {
         'en': [('Labyrinth', 'Wing {n}')], 'de': [('Labyrinth', 'Flügel {n}')], 'fr': [('Labyrinthe', 'Aile {n}')],
         'es': [('Laberinto', 'Ala {n}')], 'it': [('Labirinto', 'Ala {n}')], 'nl': [('Labyrint', 'Vleugel {n}')],
         'ru': [('Лабиринт', 'Крыло {n}')],
         'ja': [('迷宮', '第{n}区画'), ('ラビリンス', '{n}')],
         'ko': [('미궁', '제{n}구역'), ('미로', '구간 {n}')],
-        'zh_cn': [('迷宫', '第{n}区')], 'zh_tw': [('迷宮', '第{n}區')]},
+        'zh_cn': [('迷宫', '{name}')], 'zh_tw': [('迷宮', '{name}'), ('迷宫', '{name}')]},
 }
 # hint details (where an item lies inside a place)
 DETAIL = {
@@ -350,7 +351,7 @@ def wing_title(n, lang, game_title=b'', game_name=b'', glyphs=None):
         m = re.search(r'(\s*\S\s*)$', t[:-len(nm)])
         sep = m.group(1) if m else sep
     for lab, wing in choices:
-        out = lab + sep + wing.format(n=n)
+        out = lab + wing.format(name=nm.rstrip('\0')) if '{name}' in wing else lab + sep + wing.format(n=n)
         if glyphs is None or all(c in glyphs for c in out):
             return out
     return None
