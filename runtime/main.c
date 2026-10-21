@@ -98,11 +98,12 @@ __attribute__((section(".rst$z"), used)) static const ResetFn __stop_resets[1];
 void backend_reset(void);             // renderer: GPU idle, game textures and address-keyed caches dropped
 void backend_guest_memory_reset(void);  // renderer: guest memory was replaced (re-wrap the heap)
 void backend_clear_window(void);      // a black frame while the game is down
+void backend_quit(void);              // quitting: the render thread stopped, the GPU idle, caches kept (before exit())
 
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
     SDL_Event e;
     while (SDL_PollEvent(&e))
-        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
+        if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); backend_quit(); exit(0); }
 }
 
 static void teardown(void) {
