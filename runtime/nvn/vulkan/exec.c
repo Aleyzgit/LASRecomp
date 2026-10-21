@@ -44,6 +44,8 @@ static uint64_t prof_prog_memo, prof_pipe_memo, prof_key_draws;  // (VK_PROF) ke
 static bool key_memo_on(void);
 static uint64_t prof_sets_reused, prof_sets_new, prof_set_allocs, prof_set_calls;  // (VK_PROF) set reuse / batches
 static int set_batch = -1;  // (vk_alloc_set) LARECOMP_VK_NO_SET_BATCH
+static int set_recycle = -1;  // (vk_alloc_set) LARECOMP_VK_NO_SET_RECYCLE
+static uint64_t prof_sets_fresh;  // (VK_PROF) sets allocated from the pools (the rest handed out again from the stock)
 static uint64_t prof_slot_wait, prof_pool_reset, prof_pool_resets;  // (VK_PROF) sub(): ring slot waits, descriptor pool resets (ns, count)
 static bool set_reuse_on(void);
 static uint64_t prof_hook_draws, prof_hook_known;  // (VK_PROF) draws through the texture hook pass, with a known texture
@@ -68,9 +70,10 @@ void vk_collect_dead(void);
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
 #define SUBS 8
-#define SPARE_TAB 256  // (vk_alloc_set) layouts with spare sets per submission
+#define STOCK_TAB 1024  // (vk_alloc_set) layouts with sets in a slot's stock
 #define SET_BATCH 32
-struct SetSpare { VkDescriptorSetLayout layout; uint32_t n, total; VkDescriptorSet set[SET_BATCH]; };
+// A layout's sets in a slot: sets[0..count) allocated from the slot's pools, [0..next) handed out this submission
+struct SetStock { VkDescriptorSetLayout layout; uint32_t next, count, cap; VkDescriptorSet *sets; };
 typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (the GPU timer)
@@ -79,10 +82,12 @@ typedef struct {
     uint64_t seq;
     VkDescriptorPool pools[16];
     int npools, cur_pool;
-    struct SetSpare *spare;  // (vk_alloc_set) sets allocated ahead per layout, this submission (NULL: none yet)
-    uint16_t spare_used[SPARE_TAB];  // (its entries in use: cleared with the pools)
-    int nspare_used;
+    struct SetStock *stock;  // (vk_alloc_set) the slot's sets per layout (NULL: none yet)
+    uint16_t stock_used[STOCK_TAB];  // (its entries in use)
+    int nstock_used;
+    bool sets_allocated, sets_untracked;  // since the pools' last reset: any set allocated, any outside the stock
 } Sub;
+static void sets_release(Sub *s);
 static Sub subs[SUBS];
 static int cur_sub;
 static void ss_forget(void);
@@ -276,12 +281,7 @@ static Sub *sub(void) {
                 gpu_timer_add(t, s->ts_skip, s->ts_win);
             s->ts = s->ts_skip = s->ts_win = false;
         }
-        uint64_t tr = prof ? SDL_GetTicksNS() : 0;
-        for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
-        if (prof) prof_pool_reset += SDL_GetTicksNS() - tr, prof_pool_resets += (uint64_t)s->npools;
-        s->cur_pool = 0;
-        for (int i = 0; i < s->nspare_used; i++) s->spare[s->spare_used[i]].layout = VK_NULL_HANDLE;  // (their sets went with the pools)
-        s->nspare_used = 0;
+        sets_release(s);
         pthread_mutex_lock(&seq_lock);
         s->main_begun = s->upload_begun = false;
         s->seq = submit_seq + 1;
@@ -515,9 +515,34 @@ void renderer_wait_seq(uint64_t seq) {
 }
 
 // Sets are allocated in batches per layout (LARECOMP_VK_NO_SET_BATCH=1: one per call, as before): a layout's batch
-// grows with the sets it took in this submission so far (1, 1, 2, 4 ... 32 a call), so at most about half of what a
-// layout allocates goes unused, and at most 31 sets once it allocates 32 at a time. Spares live until the slot's
-// pools are reset (sub()).
+// grows with the sets it holds so far (1, 1, 2, 4 ... 32 a call), so at most about half goes unused, at most 31 sets
+// once it allocates 32 at a time.
+// Set recycling (LARECOMP_VK_NO_SET_RECYCLE=1: off): resetting a slot's pools at every submission cost the Intel UHD
+// 770's Windows driver ~0.2 ms each (6-7 a frame). Once the slot's previous submission is done, its sets are handed out
+// again instead (every set is written in full before it is bound, as a new one), and the pools are reset only when
+// the stock outgrew the slot's first pool, a layout's set couldn't be kept (table full), or the table is 3/4 full.
+// Without recycling, the pools are reset only if a set was allocated since the last reset.
+static void sets_release(Sub *s) {  // (sub(): the slot's previous submission is done)
+    if (set_recycle < 0) set_recycle = getenv("LARECOMP_VK_NO_SET_RECYCLE") == NULL;
+    bool full = !set_recycle || s->cur_pool > 0 || s->sets_untracked || s->nstock_used > STOCK_TAB * 3 / 4;
+    if (!full) {
+        for (int i = 0; i < s->nstock_used; i++) s->stock[s->stock_used[i]].next = 0;
+        return;
+    }
+    if (s->sets_allocated) {
+        uint64_t tr = prof ? SDL_GetTicksNS() : 0;
+        int np = s->cur_pool < s->npools ? s->cur_pool + 1 : s->npools;  // (the pools sets came from: up to cur_pool)
+        for (int i = 0; i < np; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
+        if (prof) prof_pool_reset += SDL_GetTicksNS() - tr, prof_pool_resets += (uint64_t)np;
+    }
+    s->cur_pool = 0;
+    s->sets_allocated = s->sets_untracked = false;
+    for (int i = 0; i < s->nstock_used; i++) {  // (their sets went with the pools; the arrays are kept)
+        struct SetStock *e = &s->stock[s->stock_used[i]];
+        e->layout = VK_NULL_HANDLE; e->next = e->count = 0;
+    }
+    s->nstock_used = 0;
+}
 
 static bool alloc_sets(Sub *s, VkDescriptorSetLayout layout, uint32_t count, VkDescriptorSet *out) {
     VkDescriptorSetLayout ls[SET_BATCH];
@@ -545,7 +570,7 @@ static bool alloc_sets(Sub *s, VkDescriptorSetLayout layout, uint32_t count, VkD
                                           .descriptorPool = s->pools[s->cur_pool], .descriptorSetCount = count, .pSetLayouts = ls};
         prof_set_calls++;
         VkResult r = vkAllocateDescriptorSets(g_vk.dev, &ai, out);
-        if (r == VK_SUCCESS) return true;
+        if (r == VK_SUCCESS) { s->sets_allocated = true; prof_sets_fresh += count; return true; }
         s->cur_pool++;
     }
 }
@@ -553,31 +578,38 @@ static bool alloc_sets(Sub *s, VkDescriptorSetLayout layout, uint32_t count, VkD
 VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
     Sub *s = sub();
     if (set_batch < 0) set_batch = getenv("LARECOMP_VK_NO_SET_BATCH") == NULL;
+    if (set_recycle < 0) set_recycle = getenv("LARECOMP_VK_NO_SET_RECYCLE") == NULL;
     prof_set_allocs++;
-    struct SetSpare *e = NULL;
-    if (set_batch) {
-        if (!s->spare) s->spare = calloc(SPARE_TAB, sizeof *s->spare);
+    struct SetStock *e = NULL;
+    if (set_batch || set_recycle) {
+        if (!s->stock) s->stock = calloc(STOCK_TAB, sizeof *s->stock);
         uintptr_t h = (uintptr_t)layout;
         h ^= h >> 17;
         h *= 0x9E3779B97F4A7C15ull;
-        for (uint32_t i = 0, j = (uint32_t)(h >> 40) & (SPARE_TAB - 1); i < SPARE_TAB; i++, j = (j + 1) & (SPARE_TAB - 1))
-            if (s->spare[j].layout == layout || !s->spare[j].layout) { e = &s->spare[j]; break; }
+        for (uint32_t i = 0, j = (uint32_t)(h >> 40) & (STOCK_TAB - 1); i < STOCK_TAB; i++, j = (j + 1) & (STOCK_TAB - 1))
+            if (s->stock[j].layout == layout || !s->stock[j].layout) { e = &s->stock[j]; break; }
     }
-    if (e) {  // (table full: one at a time)
+    if (e) {
         if (!e->layout) {
-            e->layout = layout; e->n = e->total = 0;
-            s->spare_used[s->nspare_used++] = (uint16_t)(e - s->spare);
+            e->layout = layout; e->next = e->count = 0;
+            s->stock_used[s->nstock_used++] = (uint16_t)(e - s->stock);
         }
-        if (e->n) return e->set[--e->n];
-        uint32_t want = e->total < 1 ? 1 : e->total > SET_BATCH ? SET_BATCH : e->total;
-        VkDescriptorSet got[SET_BATCH];
-        if (want > 1 && alloc_sets(s, layout, want, got)) {
-            e->total += want;
-            for (uint32_t i = 1; i < want; i++) e->set[e->n++] = got[want - i];  // (handed out in allocation order)
-            return got[0];
+        if (e->next < e->count) return e->sets[e->next++];
+        uint32_t want = !set_batch ? 1 : e->count < 1 ? 1 : e->count > SET_BATCH ? SET_BATCH : e->count;
+        if (e->count + want > e->cap) {
+            uint32_t nc = e->cap ? e->cap * 2 : 32;
+            while (nc < e->count + want) nc *= 2;
+            e->sets = realloc(e->sets, nc * sizeof *e->sets);
+            e->cap = nc;
         }
-        e->total++;
+        if (!alloc_sets(s, layout, want, e->sets + e->count)) {  // (pools exhausted for a batch: one)
+            want = 1;
+            alloc_sets(s, layout, 1, e->sets + e->count);
+        }
+        e->count += want;
+        return e->sets[e->next++];
     }
+    s->sets_untracked = true;  // (table full, or neither batches nor recycling)
     VkDescriptorSet set;
     alloc_sets(s, layout, 1, &set);
     return set;
@@ -1083,10 +1115,12 @@ const char *renderer_stats(void) {
                      (unsigned long long)prof_prog_memo, (unsigned long long)prof_pipe_memo, (unsigned long long)prof_key_draws);
             prof_prog_memo = prof_pipe_memo = prof_key_draws = 0;
             n = strlen(stats_text);
-            snprintf(stats_text + n, sizeof stats_text - n, " | sets (reuse %s, batch %s): %llu reused %llu written, %llu allocated in %llu calls",
-                     set_reuse_on() ? "on" : "off", set_batch > 0 ? "on" : "off", (unsigned long long)prof_sets_reused,
-                     (unsigned long long)prof_sets_new, (unsigned long long)prof_set_allocs, (unsigned long long)prof_set_calls);
-            prof_sets_reused = prof_sets_new = prof_set_allocs = prof_set_calls = 0;
+            snprintf(stats_text + n, sizeof stats_text - n, " | sets (reuse %s, batch %s, recycle %s): %llu reused %llu written, %llu allocated"
+                     " (%llu new from the pools in %llu calls)",
+                     set_reuse_on() ? "on" : "off", set_batch > 0 ? "on" : "off", set_recycle > 0 ? "on" : "off", (unsigned long long)prof_sets_reused,
+                     (unsigned long long)prof_sets_new, (unsigned long long)prof_set_allocs, (unsigned long long)prof_sets_fresh,
+                     (unsigned long long)prof_set_calls);
+            prof_sets_reused = prof_sets_new = prof_set_allocs = prof_set_calls = prof_sets_fresh = 0;
             n = strlen(stats_text);
             snprintf(stats_text + n, sizeof stats_text - n, " | slot wait %.1f ms, pool resets %llu %.2f ms",
                      prof_slot_wait / 1e6, (unsigned long long)prof_pool_resets, prof_pool_reset / 1e6);
