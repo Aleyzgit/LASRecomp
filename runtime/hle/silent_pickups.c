@@ -1,6 +1,7 @@
-// Silent pickups (prototype): minor items picked up outside the dungeons skip the item-get cutscene
-// (tools/rando/silent_pickups.py takes Link.GenericItemGetSequenceByKey out of their SinkingSword.bfevfl chains).
-// The items that get a fly-in instead (runtime/ui/pickup_flyin.mm) are added with index SILENT_BASE + 1 + their index:
+// Silent pickups (prototype): minor items picked up from the ground skip the item-get cutscene, in dungeons too
+// (tools/rando/silent_pickups.py takes Link.GenericItemGetSequenceByKey out of their SinkingSword.bfevfl chains and plays
+// a short pickup sound of the game's own instead). Heart pieces, Heart Containers and Secret Seashells get a card
+// (runtime/ui/pickup_flyin.mm); rupees and recovery hearts none. The card items are added with index SILENT_BASE + 1 + their index:
 // the AddItem hook (keysanity.c rt_add_item) calls rt_silent_add first, which gives the game back the real index (the
 // add itself is the game's own, unchanged) and queues the fly-in. The game's own Secret Seashell actors (buried on a
 // digsanity tile, at a Seashell spot, vanilla shells) get theirs through ItemCommon.bfevfl, which the generator gives a
@@ -101,12 +102,13 @@ int silent_seashell_total(void) {
 }
 
 // game thread, every frame (warp.c give_item_tick): a silent Heart Container's refill.
-// LARECOMP_FLYIN_SHOTS=<from>:<every>:<count> (test): window shots (game + overlays) into build/frames/flyin_<frame>.png
+// Dev mode only (a source checkout: rt_dev_mode): LARECOMP_FLYIN_SHOTS=<from>:<every>:<count> (test): window shots (game + overlays) into build/frames/flyin_<frame>.png
 void silent_pickups_tick(uint64_t frame) {
     static long from = -2, every, count;
     if (from == -2) {
         from = -1;
-        const char *e = ENV("LARECOMP_FLYIN_SHOTS");
+        extern bool rt_dev_mode(void);
+        const char *e = rt_dev_mode() ? ENV("LARECOMP_FLYIN_SHOTS") : NULL;
         if (e && sscanf(e, "%ld:%ld:%ld", &from, &every, &count) != 3) from = -1;
         if (from >= 0) mkdir("build/frames", 0755);
     }
@@ -114,8 +116,11 @@ void silent_pickups_tick(uint64_t frame) {
         extern char g_window_shot_request[256];  // (runtime/nvn/metal.m: saved with the next frame)
         snprintf(g_window_shot_request, sizeof g_window_shot_request, "build/frames/flyin_%05llu.png", (unsigned long long)frame);
     }
-    static long dump_at = -2;  // LARECOMP_SILENT_DUMP_AT=<frame>[:<flag>,...] (test): what the save holds then
-    if (dump_at == -2) dump_at = ENV("LARECOMP_SILENT_DUMP_AT") ? atol(ENV("LARECOMP_SILENT_DUMP_AT")) : -1;
+    static long dump_at = -2;  // LARECOMP_SILENT_DUMP_AT=<frame>[:<flag>,...] (test, dev mode): what the save holds then
+    if (dump_at == -2) {
+        extern bool rt_dev_mode(void);
+        dump_at = rt_dev_mode() && ENV("LARECOMP_SILENT_DUMP_AT") ? atol(ENV("LARECOMP_SILENT_DUMP_AT")) : -1;
+    }
     if (dump_at >= 0 && (long)frame == dump_at) {
         extern bool flags_ext_get(int idx);
         LOG("[silent] save: pieces %#llx (%d) shells %#llx (%d) containers %#x rupees %u health %d / %d\n",

@@ -695,8 +695,8 @@ def main():
     print('bomb bag text:', bomb_bag_text.apply(out_dir, romfs, settings), flush=True)
     import powder_bag_text  # (same) found powder: "You found your Powder Bag!"
     print('powder bag text:', powder_bag_text.apply(out_dir, romfs, settings), flush=True)
-    import silent_pickups  # (the last flow edit) minor items outside the dungeons: no item-get cutscene, a fly-in
-    print('silent pickups: %d gets, %d chains copied, %d native get flows' % silent_pickups.apply(out_dir, romfs), flush=True)
+    import silent_pickups  # (the last flow edit) minor ground items: no item-get cutscene, a sound and a card instead
+    print('silent pickups: %d gives, %d native get flows' % silent_pickups.apply(out_dir, romfs), flush=True)
     import room_links  # (every room edit done: actors' links within each room must still be sound)
     problems = room_links.check(out_dir, _uw_leb, romfs)
     if problems:

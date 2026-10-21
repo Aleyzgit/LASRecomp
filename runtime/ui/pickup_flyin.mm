@@ -1,12 +1,12 @@
-// Silent pickups' fly-in (prototype; runtime/hle/silent_pickups.c): a minor item picked up outside the dungeons comes
-// in without the item-get cutscene, and a small card slides in from the left edge for ~2 s instead, below the HUD's
+// Silent pickups' fly-in (prototype; runtime/hle/silent_pickups.c): a heart piece, Heart Container or Secret Seashell
+// picked up from the ground comes in without the item-get cutscene, and a small card slides in from the left edge for ~2 s instead, below the HUD's
 // hearts (the HUD sits in a 16:9 box centred in the window: the card lines up with its left edge, so ultrawide
 // windows show it beside the hearts too). Drawn by menu.mm under the menu, in the tracker / timer's parchment style
 // with the game's own icons (texpatch_ui_rgba_list, from the player's game files; nothing of the game ships):
 //   Piece of Heart     the heart filling in quarters, "2 / 4"   (4 / 4: "+1 Heart")
 //   Heart Container    a full heart, "+1 Heart"
 //   Secret Seashell    the seashell, "23 / 50" (the seed's own total)
-//   rupees             the rupee, "+20" (rupees in a row add up on one card)
+// (rupees and recovery hearts: no card - the HUD shows them)
 #include <chrono>
 #include <float.h>
 #include <math.h>
@@ -33,24 +33,12 @@ uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
 #endif
 }
 
-enum { IT_SEASHELL = 22, IT_HEART_PIECE = 58, IT_HEART_CONTAINER = 59, IT_RUPEE1 = 101, IT_RUPEE300 = 108 };
-static int rupee_value(int item) {
-    switch (item) {
-    case 101: return 1;
-    case 102: return 5;
-    case 104: return 20;
-    case 105: return 50;
-    case 106: return 100;
-    case 108: return 300;
-    default: return 0;
-    }
-}
+enum { IT_SEASHELL = 22, IT_HEART_PIECE = 58, IT_HEART_CONTAINER = 59 };
 
 // ---- icons (the game's own UI textures, made once): the HUD's full / empty heart, the status screen's Heart Container,
-// the Secret Seashell, the rupee (and a grey copy of it, tinted to each rupee's colour)
-enum { IC_HEART, IC_HEART_EMPTY, IC_CONTAINER, IC_SHELL, IC_RUPEE, IC_RUPEE_GREY, IC_N };
-static const char *const kIconTex[IC_RUPEE_GREY] = {"Hp_01^w", "Hp_00^w", "StHeartContainer_01^q", "CollectSecretSeashell_00^w",
-                                                    "Rupy_00^w"};
+// the Secret Seashell
+enum { IC_HEART, IC_HEART_EMPTY, IC_CONTAINER, IC_SHELL, IC_N };
+static const char *const kIconTex[IC_N] = {"Hp_01^w", "Hp_00^w", "StHeartContainer_01^q", "CollectSecretSeashell_00^w"};
 struct Icon { ImTextureID id; int w, h; ImVec2 uv0, uv1; };  // uv: the drawn part (transparent margins cut)
 static Icon g_icon[IC_N];
 static int g_icons_state;  // 0 not loaded, 1 loaded (one missing: drawn shapes / left out)
@@ -86,26 +74,18 @@ static void make_icon(Icon &ic, const uint8_t *px, int w, int h, bool crop) {
 static void load_icons(void) {
     if (g_icons_state) return;
     g_icons_state = 1;
-    uint8_t *px[IC_RUPEE_GREY];
-    int w[IC_RUPEE_GREY], h[IC_RUPEE_GREY];
-    texpatch_ui_rgba_list(kIconTex, IC_RUPEE_GREY, px, w, h);
-    for (int i = 0; i < IC_RUPEE_GREY; i++) {
+    uint8_t *px[IC_N];
+    int w[IC_N], h[IC_N];
+    texpatch_ui_rgba_list(kIconTex, IC_N, px, w, h);
+    for (int i = 0; i < IC_N; i++) {
         if (!px[i]) continue;
         make_icon(g_icon[i], px[i], w[i], h[i], i >= IC_CONTAINER);
-        if (i == IC_RUPEE) {  // the grey copy: brightness only, lifted so a tint keeps its colour
-            for (int k = 0; k < w[i] * h[i]; k++) {
-                uint8_t *p = px[i] + 4 * k;
-                int l = (p[0] * 3 + p[1] * 6 + p[2]) / 10 * 3 / 2 + 40;
-                p[0] = p[1] = p[2] = (uint8_t)(l > 255 ? 255 : l);
-            }
-            make_icon(g_icon[IC_RUPEE_GREY], px[i], w[i], h[i], true);
-        }
         free(px[i]);
     }
 }
 
 // ---- the card on screen (and what comes next)
-struct Card { int item, amount, held; double t0; bool on; };  // amount: rupees; held: pieces / shells
+struct Card { int item, amount, held; double t0; bool on; };  // amount: containers; held: pieces / shells
 static Card g_card;
 static const double kIn = 0.22, kHold = 1.75, kOut = 0.25;  // seconds: ~2.2 s on screen
 
@@ -120,19 +100,18 @@ static int g_nwait;
 static void take_next(double t) {
     int item, count, held;
     while (silent_pickup_next(&item, &count, &held)) {
-        int rv = rupee_value(item) * (count > 0 ? count : 1);
-        // the same kind again while its card is still up (or waiting): that card counts on - rupees add up, heart
-        // pieces / seashells show the new count, containers "+2 Hearts" - and one on screen stays up a bit longer
+        (void)count;
+        if (item != IT_HEART_PIECE && item != IT_HEART_CONTAINER && item != IT_SEASHELL) continue;
+        // the same kind again while its card is still up (or waiting): that card counts on - heart pieces / seashells
+        // show the new count, containers "+2 Hearts" - and one on screen stays up a bit longer
         Card *last = g_nwait ? &g_wait[g_nwait - 1] : g_card.on ? &g_card : NULL;
-        bool same = last && (rv ? rupee_value(last->item) != 0 : last->item == item);
-        if (same && (last != &g_card || t - g_card.t0 < kIn + kHold)) {
-            if (rv) last->amount += rv;
-            else if (item == IT_HEART_CONTAINER) last->amount++;
+        if (last && last->item == item && (last != &g_card || t - g_card.t0 < kIn + kHold)) {
+            if (item == IT_HEART_CONTAINER) last->amount++;
             else last->held = held;
             if (last == &g_card) g_card.t0 = fmax(g_card.t0, t - kIn);
             continue;
         }
-        Card c = {item, rv ? rv : 1, held, t, true};
+        Card c = {item, 1, held, t, true};
         if (!g_card.on) g_card = c;
         else if (g_nwait < 8) g_wait[g_nwait++] = c;
     }
@@ -149,11 +128,6 @@ static void take_next(double t) {
 extern "C" bool pickup_flyin_wanted(void) {
     take_next(now_s());
     return g_card.on && game_in_play();
-}
-
-static ImU32 tint_for_rupee(int v) {  // the rupees' colours (green 1, blue 5, red 20, purple 50, silver 100, gold 300)
-    return v >= 300 ? IM_COL32(255, 214, 90, 255) : v >= 100 ? IM_COL32(225, 230, 240, 255) : v >= 50 ? IM_COL32(200, 120, 255, 255)
-         : v >= 20 ? IM_COL32(255, 96, 90, 255) : v >= 5 ? IM_COL32(110, 170, 255, 255) : IM_COL32(255, 255, 255, 255);
 }
 
 // the parchment panel (tracker_overlay.mm / race_overlay.mm style)
@@ -208,7 +182,7 @@ extern "C" void pickup_flyin_draw(ImVec2 display, ImFont *font, float scale) {
     float e = t < kIn ? 1 - (1 - k) * (1 - k) * (1 - k) : k * k * (3 - 2 * k);
 
     char title[64], value[48];
-    int it = g_card.item, rv = rupee_value(it);
+    int it = g_card.item;
     int quarters = 4;
     if (it == IT_HEART_PIECE) {
         int n = g_card.held % 4;
@@ -223,15 +197,12 @@ extern "C" void pickup_flyin_draw(ImVec2 display, ImFont *font, float scale) {
     } else if (it == IT_SEASHELL) {
         snprintf(title, sizeof title, "Secret Seashells");
         snprintf(value, sizeof value, "%d / %d", g_card.held, silent_seashell_total());
-    } else if (rv) {
-        title[0] = 0;
-        snprintf(value, sizeof value, "+%d %s", g_card.amount, g_card.amount == 1 ? "Rupee" : "Rupees");
     } else {
         return;
     }
 
-    float icon = (rv ? 46 : 64) * scale, pad = 14 * scale, gap = 14 * scale;
-    float ts = 28 * scale, vs = (rv ? 38 : 42) * scale;
+    float icon = 64 * scale, pad = 14 * scale, gap = 14 * scale;
+    float ts = 28 * scale, vs = 42 * scale;
     // Baloo's line box is tall: lines placed by their cap height (~0.5 of the size, from ~0.25 down)
     float tw = title[0] ? font->CalcTextSizeA(ts, FLT_MAX, 0, title).x : 0, vw = font->CalcTextSizeA(vs, FLT_MAX, 0, value).x;
     float textw = fmaxf(tw, vw);
@@ -248,9 +219,7 @@ extern "C" void pickup_flyin_draw(ImVec2 display, ImFont *font, float scale) {
     if (it == IT_HEART_PIECE) heart(dl, ip, icon, quarters);
     else if (it == IT_HEART_CONTAINER && g_icon[IC_CONTAINER].id) image(dl, IC_CONTAINER, ip, icon, IM_COL32_WHITE);
     else if (it == IT_HEART_CONTAINER) heart(dl, ip, icon, 4);
-    else if (it == IT_SEASHELL) image(dl, IC_SHELL, ip, icon, IM_COL32_WHITE);
-    else if (rv == 1 || !g_icon[IC_RUPEE_GREY].id) image(dl, IC_RUPEE, ip, icon, IM_COL32_WHITE);  // (green: as it is)
-    else image(dl, IC_RUPEE_GREY, ip, icon, tint_for_rupee(rv));
+    else image(dl, IC_SHELL, ip, icon, IM_COL32_WHITE);
     ImU32 ink = IM_COL32(0x3B, 0x2A, 0x14, 255), sub = IM_COL32(0x6A, 0x4E, 0x2C, 255);
     float tx = a.x + pad + icon + gap, ty = a.y + (h - texth) * 0.5f;
     if (title[0]) {
