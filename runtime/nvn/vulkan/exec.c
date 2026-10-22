@@ -38,6 +38,17 @@ static uint64_t gc_imported_bytes, stat_gc_misses;
 static uint64_t gmem_heap_size(void);
 static void gc_frame(void);
 static uint64_t stat_upload_bytes;
+static uint64_t prof_cb_reused, prof_cb_copied;  // (VK_PROF) lean constant blocks: copies reused, made (cbuf_lean)
+static bool cbuf_lean(void);
+static uint64_t prof_prog_memo, prof_pipe_memo, prof_key_draws;  // (VK_PROF) key memo answers (get_program), draws
+static bool key_memo_on(void);
+static uint64_t prof_sets_reused, prof_sets_new, prof_set_allocs, prof_set_calls;  // (VK_PROF) set reuse / batches
+static int set_batch = -1;  // (vk_alloc_set) LARECOMP_VK_NO_SET_BATCH
+static int set_recycle = -1;  // (vk_alloc_set) LARECOMP_VK_NO_SET_RECYCLE
+static uint64_t prof_sets_fresh;  // (VK_PROF) sets allocated from the pools (the rest handed out again from the stock)
+static uint64_t prof_slot_wait, prof_pool_reset, prof_pool_resets;  // (VK_PROF) sub(): ring slot waits, descriptor pool resets (ns, count)
+static bool set_reuse_on(void);
+static uint64_t prof_hook_draws, prof_hook_known;  // (VK_PROF) draws through the texture hook pass, with a known texture
 // LARECOMP_VK_PROF=1: render-thread time per category in the fps log (exec = whole command lists, draw = draw(),
 // sets = descriptor sets incl. cbuf copies, vtx = index scan + vertex copies, submit = vkQueueSubmit2)
 static int prof = -1;
@@ -59,6 +70,10 @@ void vk_collect_dead(void);
 // ================================================================== submissions
 // A submission = optional upload command buffer + the main one, signalling the timeline with its number.
 #define SUBS 8
+#define STOCK_TAB 1024  // (vk_alloc_set) layouts with sets in a slot's stock
+#define SET_BATCH 32
+// A layout's sets in a slot: sets[0..count) allocated from the slot's pools, [0..next) handed out this submission
+struct SetStock { VkDescriptorSetLayout layout; uint32_t next, count, cap; VkDescriptorSet *sets; };
 typedef struct {
     VkCommandBuffer main, upload;
     bool main_begun, upload_begun, ts;  // ts: GPU timestamps written (the GPU timer)
@@ -67,7 +82,12 @@ typedef struct {
     uint64_t seq;
     VkDescriptorPool pools[16];
     int npools, cur_pool;
+    struct SetStock *stock;  // (vk_alloc_set) the slot's sets per layout (NULL: none yet)
+    uint16_t stock_used[STOCK_TAB];  // (its entries in use)
+    int nstock_used;
+    bool sets_allocated, sets_untracked;  // since the pools' last reset: any set allocated, any outside the stock
 } Sub;
+static void sets_release(Sub *s);
 static Sub subs[SUBS];
 static int cur_sub;
 static void ss_forget(void);
@@ -255,7 +275,9 @@ static Sub *sub(void) {
     Sub *s = &subs[cur_sub];
     if (s->seq != submit_seq + 1) {  // slot reused: its previous submission must be done
         wait_why = "ring slot";
+        uint64_t tw = prof ? SDL_GetTicksNS() : 0;
         vk_wait_seq(s->seq);
+        if (prof) prof_slot_wait += SDL_GetTicksNS() - tw;
         cq_resolve_done(s->seq);
         if (s->ts) {  // GPU time of that submission
             uint64_t t[3];
@@ -264,8 +286,7 @@ static Sub *sub(void) {
                 gpu_timer_add(t, s->ts_skip, s->ts_win);
             s->ts = s->ts_skip = s->ts_win = false;
         }
-        for (int i = 0; i < s->npools; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
-        s->cur_pool = 0;
+        sets_release(s);
         pthread_mutex_lock(&seq_lock);
         s->main_begun = s->upload_begun = false;
         s->seq = submit_seq + 1;
@@ -498,25 +519,105 @@ void renderer_wait_seq(uint64_t seq) {
     vk_wait_seq(seq > s ? s : seq);  // not submitted yet (other thread): everything submitted so far
 }
 
-VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
-    Sub *s = sub();
+// Sets are allocated in batches per layout (LARECOMP_VK_NO_SET_BATCH=1: one per call, as before): a layout's batch
+// grows with the sets it holds so far (1, 1, 2, 4 ... 32 a call), so at most about half goes unused, at most 31 sets
+// once it allocates 32 at a time.
+// Set recycling (LARECOMP_VK_NO_SET_RECYCLE=1: off): resetting a slot's pools at every submission cost the Intel UHD
+// 770's Windows driver ~0.2 ms each (6-7 a frame). Once the slot's previous submission is done, its sets are handed out
+// again instead (every set is written in full before it is bound, as a new one), and the pools are reset only when
+// the stock outgrew the slot's first pool, a layout's set couldn't be kept (table full), or the table is 3/4 full.
+// Without recycling, the pools are reset only if a set was allocated since the last reset.
+static void sets_release(Sub *s) {  // (sub(): the slot's previous submission is done)
+    if (set_recycle < 0) set_recycle = getenv("LARECOMP_VK_NO_SET_RECYCLE") == NULL;
+    bool full = !set_recycle || s->cur_pool > 0 || s->sets_untracked || s->nstock_used > STOCK_TAB * 3 / 4;
+    if (!full) {
+        for (int i = 0; i < s->nstock_used; i++) s->stock[s->stock_used[i]].next = 0;
+        return;
+    }
+    if (s->sets_allocated) {
+        uint64_t tr = prof ? SDL_GetTicksNS() : 0;
+        int np = s->cur_pool < s->npools ? s->cur_pool + 1 : s->npools;  // (the pools sets came from: up to cur_pool)
+        for (int i = 0; i < np; i++) vkResetDescriptorPool(g_vk.dev, s->pools[i], 0);
+        if (prof) prof_pool_reset += SDL_GetTicksNS() - tr, prof_pool_resets += (uint64_t)np;
+    }
+    s->cur_pool = 0;
+    s->sets_allocated = s->sets_untracked = false;
+    for (int i = 0; i < s->nstock_used; i++) {  // (their sets went with the pools; the arrays are kept)
+        struct SetStock *e = &s->stock[s->stock_used[i]];
+        e->layout = VK_NULL_HANDLE; e->next = e->count = 0;
+    }
+    s->nstock_used = 0;
+}
+
+static bool alloc_sets(Sub *s, VkDescriptorSetLayout layout, uint32_t count, VkDescriptorSet *out) {
+    VkDescriptorSetLayout ls[SET_BATCH];
+    for (uint32_t i = 0; i < count; i++) ls[i] = layout;
     for (;;) {
         if (s->cur_pool == s->npools) {
-            if (s->npools == 16) FATAL("descriptor pools exhausted\n");
-            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
+            if (s->npools == 16) {
+                if (count > 1) return false;  // (the caller asks for one)
+                FATAL("descriptor pools exhausted\n");
+            }
+            // Set reuse moves most uniform buffers to the dynamic type: the pool then holds 8192 static + 16384 dynamic
+            // instead of 32768 static. Without it, the pool is as before: no dynamic descriptors (a pool's size costs
+            // on some drivers: the Intel UHD 770's Windows driver spent ~0.4 ms more a frame with 32768 more of them,
+            // apparently in vkResetDescriptorPool). A pool that runs out of a type is followed by another.
+            bool dynp = set_reuse_on();
+            VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, dynp ? 8192 : 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
-                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024}};
+                                            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
+                                            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 16384}};  // (stage_set: set reuse)
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 5, .pPoolSizes = sizes};
+                                             .poolSizeCount = dynp ? 6 : 5, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                                          .descriptorPool = s->pools[s->cur_pool], .descriptorSetCount = 1, .pSetLayouts = &layout};
-        VkDescriptorSet set;
-        VkResult r = vkAllocateDescriptorSets(g_vk.dev, &ai, &set);
-        if (r == VK_SUCCESS) return set;
+                                          .descriptorPool = s->pools[s->cur_pool], .descriptorSetCount = count, .pSetLayouts = ls};
+        prof_set_calls++;
+        VkResult r = vkAllocateDescriptorSets(g_vk.dev, &ai, out);
+        if (r == VK_SUCCESS) { s->sets_allocated = true; prof_sets_fresh += count; return true; }
         s->cur_pool++;
     }
+}
+
+VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
+    Sub *s = sub();
+    if (set_batch < 0) set_batch = getenv("LARECOMP_VK_NO_SET_BATCH") == NULL;
+    if (set_recycle < 0) set_recycle = getenv("LARECOMP_VK_NO_SET_RECYCLE") == NULL;
+    prof_set_allocs++;
+    struct SetStock *e = NULL;
+    if (set_batch || set_recycle) {
+        if (!s->stock) s->stock = calloc(STOCK_TAB, sizeof *s->stock);
+        uintptr_t h = (uintptr_t)layout;
+        h ^= h >> 17;
+        h *= 0x9E3779B97F4A7C15ull;
+        for (uint32_t i = 0, j = (uint32_t)(h >> 40) & (STOCK_TAB - 1); i < STOCK_TAB; i++, j = (j + 1) & (STOCK_TAB - 1))
+            if (s->stock[j].layout == layout || !s->stock[j].layout) { e = &s->stock[j]; break; }
+    }
+    if (e) {
+        if (!e->layout) {
+            e->layout = layout; e->next = e->count = 0;
+            s->stock_used[s->nstock_used++] = (uint16_t)(e - s->stock);
+        }
+        if (e->next < e->count) return e->sets[e->next++];
+        uint32_t want = !set_batch ? 1 : e->count < 1 ? 1 : e->count > SET_BATCH ? SET_BATCH : e->count;
+        if (e->count + want > e->cap) {
+            uint32_t nc = e->cap ? e->cap * 2 : 32;
+            while (nc < e->count + want) nc *= 2;
+            e->sets = realloc(e->sets, nc * sizeof *e->sets);
+            e->cap = nc;
+        }
+        if (!alloc_sets(s, layout, want, e->sets + e->count)) {  // (pools exhausted for a batch: one)
+            want = 1;
+            alloc_sets(s, layout, 1, e->sets + e->count);
+        }
+        e->count += want;
+        return e->sets[e->next++];
+    }
+    s->sets_untracked = true;  // (table full, or neither batches nor recycling)
+    VkDescriptorSet set;
+    alloc_sets(s, layout, 1, &set);
+    return set;
 }
 
 // ================================================================== transient memory ring
@@ -674,17 +775,33 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 
 // Guest memory copied once per submission: draws binding the same range share the copy.
 #define GCOPY_TAB 4096
-static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
+static struct { uint64_t addr, size, seq; VkSpan span; uint64_t scanned; } gcopy[GCOPY_TAB];  // (scanned: heap size then, 0 not)
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
 static void guest_copy_flush(void) { gcopy_gen++; }
-static VkSpan guest_copy(uint64_t addr, uint64_t size) {
+// scan: (lazy heap chunks, a uniform buffer of a shader with global memory) the range is also scanned for heap
+// pointers (gc_scan_pointers), once per shared copy: its contents can't change while the copy is shared (again if the
+// heap grew since: pointers past its end were passed over).
+static bool gc_scan_needed(void);
+static uint64_t prof_scan_calls, prof_scan_bytes, prof_scan_skipped;  // (VK_PROF, lazy chunks) pointer scans
+static VkSpan guest_copy_ex(uint64_t addr, uint64_t size, bool scan) {
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
-    if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size) return gcopy[slot].span;
+    bool hit = gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size;
+    uint64_t heap = 0;
+    if (scan) {
+        heap = gmem_heap_size();
+        if ((!hit || gcopy[slot].scanned != heap) && gc_scan_needed()) gc_scan_pointers((const uint32_t *)(uintptr_t)addr, size);
+        else prof_scan_skipped++;
+    }
+    if (hit) {
+        if (scan) gcopy[slot].scanned = heap;
+        return gcopy[slot].span;
+    }
     VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
-    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
+    gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s; gcopy[slot].scanned = heap;
     return s;
 }
+static VkSpan guest_copy(uint64_t addr, uint64_t size) { return guest_copy_ex(addr, size, false); }
 
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
@@ -976,6 +1093,12 @@ const char *renderer_stats(void) {
             snprintf(stats_text + n, sizeof stats_text - n, " | heap chunks %d imported (%llu MB), %llu misses", gc_imported,
                      (unsigned long long)gc_imported_bytes >> 20, (unsigned long long)stat_gc_misses);
             n = strlen(stats_text);
+            if (gc_lazy) {
+                snprintf(stats_text + n, sizeof stats_text - n, ", pointer scans %llu (%.2f MB), %llu skipped",
+                         (unsigned long long)prof_scan_calls, prof_scan_bytes / 1048576.0, (unsigned long long)prof_scan_skipped);
+                n = strlen(stats_text);
+            }
+            prof_scan_calls = prof_scan_bytes = prof_scan_skipped = 0;
         }
         snprintf(stats_text + n, sizeof stats_text - n, " | views created %llu | counters gpu %llu | pace %s, %llu frames over", (unsigned long long)prof_views_created,
                  (unsigned long long)stat_counters_gpu, pace_is_slow() ? "30" : "60", (unsigned long long)pace_frames_over());
@@ -991,6 +1114,29 @@ const char *renderer_stats(void) {
             n = strlen(stats_text);
             snprintf(stats_text + n, sizeof stats_text - n, " | tex unwritten %llu", (unsigned long long)prof_tex_watch_skips);
             prof_tex_watch_skips = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | const blocks %s: %llu reused %llu copied", cbuf_lean() ? "lean" : "full",
+                     (unsigned long long)prof_cb_reused, (unsigned long long)prof_cb_copied);
+            prof_cb_reused = prof_cb_copied = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | hook pass %llu draws, %llu with known textures",
+                     (unsigned long long)prof_hook_draws, (unsigned long long)prof_hook_known);
+            prof_hook_draws = prof_hook_known = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | key memo %s: program %llu pipeline %llu of %llu", key_memo_on() ? "on" : "off",
+                     (unsigned long long)prof_prog_memo, (unsigned long long)prof_pipe_memo, (unsigned long long)prof_key_draws);
+            prof_prog_memo = prof_pipe_memo = prof_key_draws = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | sets (reuse %s, batch %s, recycle %s): %llu reused %llu written, %llu allocated"
+                     " (%llu new from the pools in %llu calls)",
+                     set_reuse_on() ? "on" : "off", set_batch > 0 ? "on" : "off", set_recycle > 0 ? "on" : "off", (unsigned long long)prof_sets_reused,
+                     (unsigned long long)prof_sets_new, (unsigned long long)prof_set_allocs, (unsigned long long)prof_sets_fresh,
+                     (unsigned long long)prof_set_calls);
+            prof_sets_reused = prof_sets_new = prof_set_allocs = prof_set_calls = prof_sets_fresh = 0;
+            n = strlen(stats_text);
+            snprintf(stats_text + n, sizeof stats_text - n, " | slot wait %.1f ms, pool resets %llu %.2f ms",
+                     prof_slot_wait / 1e6, (unsigned long long)prof_pool_resets, prof_pool_reset / 1e6);
+            prof_slot_wait = prof_pool_reset = prof_pool_resets = 0;
         }
         {   // GPU time per frame by part (see gpu_timer_add), CPU waits per frame by place (device.c g_vk_frame_waits)
             static uint64_t lw[4];
@@ -1085,8 +1231,9 @@ typedef struct {
 // state and vertex / index buffer binds are not recorded again (a draw used to issue ~20 vkCmd* calls; most repeat the
 // previous draw's). Forgotten (ss_forget) whenever something else may have recorded state: a new command buffer, a new
 // render pass (present, ImGui, post-processing and copies all run between game passes) and the clear pipeline.
-// Descriptor sets are not filtered: every draw writes new ones (sharing identical sets within a submission was tried:
-// a third matched, but comparing them cost more than allocating and writing them on NVIDIA).
+// Descriptor sets are always bound (sharing identical sets within a submission was tried: a third matched, but
+// comparing them cost more than allocating and writing them on NVIDIA; with dynamic uniform buffers most sets repeat
+// their program's previous one, which stage_set keeps: "set reuse").
 // LARECOMP_VK_STATE_FILTER=0: every draw sets everything, as before.
 enum { SS_PIPE = 1 << 0, SS_DT = 1 << 1, SS_DW = 1 << 2, SS_DOP = 1 << 3, SS_STEN = 1 << 4, SS_SFACE0 = 1 << 5, SS_SFACE1 = 1 << 6,
        SS_BC = 1 << 7, SS_CULL = 1 << 8, SS_FF = 1 << 9, SS_TOPO = 1 << 10, SS_PRE = 1 << 11, SS_DBE = 1 << 12, SS_DB = 1 << 13,
@@ -1535,7 +1682,49 @@ typedef struct {
     _Atomic int state;  // 0 building, 1 ready, 2 failed
     uint64_t prep_vh, prep_fh;  // (prepared programs: their code hashes, for LARECOMP_PREP_CHECK)
     ShaderFp fp[2];             // (stale-program detector, shader_prep.h; compute: [0]; touched by the replay only)
+    struct PipeMemo *pmemo;     // (render thread) draw_'s pipeline key memo for this program
+    bool reuse;                 // set reuse (stage_set): some uniform buffers are dynamic, sets are kept while their contents repeat
+    struct SetCache *scache[2]; // (render thread) stage_set's last set per set index
 } Prog;
+
+// ---- descriptor set reuse (graphics programs; port of vk-draw-cpu-2 d50bbce)
+// Every draw allocated and wrote two descriptor sets (~20 descriptors) although most repeat the previous draw's of
+// the same program: the textures and samplers are the same, and the uniform buffers are copies in the same transient
+// ring buffer at new offsets. With the uniform buffers that move per draw declared dynamic (their offsets go to
+// vkCmdBindDescriptorSets), the set's contents (buffers, ranges, views, samplers) repeat, so stage_set keeps the last
+// set of each program and set index and binds it again while what it would write is identical. A kept set belongs to
+// the pending submission (its pools are reset with the slot) and to the current view generation; buffers bound in
+// sets are destroyed deferred (after the submissions using them), or at a reboot (ds_gen).
+// LARECOMP_VK_NO_SET_REUSE=1: no dynamic buffers, a new set per draw, as before.
+static int set_reuse = -1;
+static uint32_t ds_gen;  // bumped when a buffer bound in sets may be destroyed at once (reboot)
+static bool set_reuse_on(void) {
+    if (set_reuse < 0) set_reuse = getenv("LARECOMP_VK_NO_SET_REUSE") == NULL;
+    return set_reuse;
+}
+static bool is_ubo(VkDescriptorType t) { return t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || t == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC; }
+// Up to the device's limit for the whole pipeline layout (8 or more; NVIDIA 15, AMD 16), the uniform buffers whose
+// copies move most: the game's constant buffers (bindings 2-16), the scale table (18), the driver constants (0), the
+// tint (19), then the compiler constants (1: one copy per submission). (Build workers: before the program is ready.)
+static void mark_dynamic(Prog *p) {
+    if (!set_reuse_on()) return;
+    uint32_t lim = g_vk.props.limits.maxDescriptorSetUniformBuffersDynamic, n = 0;
+    if (lim > 32) lim = 32;
+    static const int8_t tier_of[20] = {2, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 1, 3};
+    for (int tier = 0; tier <= 4; tier++)
+        for (int i = 0; i < p->nbinds && n < lim; i++) {
+            VkBindingInfo *b = &p->binds[i];
+            if (b->set > 1 || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || b->binding >= 20 || tier_of[b->binding] != tier) continue;
+            b->type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            n++;
+        }
+    p->reuse = true;
+    static _Atomic int logged, logged_left;  // (the limit once; programs left with static buffers: the first 4)
+    int left = 0;
+    for (int i = 0; i < p->nbinds; i++) left += p->binds[i].type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && p->binds[i].set <= 1;
+    if (!atomic_exchange(&logged, 1) || (left && atomic_fetch_add(&logged_left, 1) < 4))
+        LOG("[vk] set reuse: %u dynamic uniform buffers allowed; a program with %u dynamic, %d left static\n", lim, n, left);
+}
 
 static VkPipelineLayout make_layout(Prog *p, int nsets, VkShaderStageFlags s0, VkShaderStageFlags s1) {
     p->set_layout[0] = vk_set_layout(p->binds, p->nbinds, 0, s0);
@@ -1614,6 +1803,7 @@ static void compile_program(void *arg) {
     if (spirv_strip_early_tests(sf, &nf)) p->fs_late = vk_module(sf, nf);
     free(sv);
     free(sf);
+    mark_dynamic(p);
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_compiles, 1);
     if (!p->vs || !p->fs) LOG("[shader] vs/fs %llx %llx: shader module creation failed\n", (unsigned long long)p->code[0], (unsigned long long)p->code[1]);
@@ -1713,7 +1903,37 @@ static void prog_fp_check(Prog *p, NvnProgram *np) {  // (the lookups below are 
     shader_fp_check(&p->fp[1], &np->stages[1], "fs");
 }
 
+// Key memo: draws mostly repeat the program and pipeline state of a recent draw. draw_ compares the inputs of the
+// program lookup with the previous lookup's, and those of the pipeline lookup with the last ones of that program
+// (plain compares of everything the keys are made from), and reuses the answer instead of hashing the program key
+// byte by byte and filling + hashing the ~700-byte PipeKey. The answers are the objects the tables give. key_gen:
+// bumped by vk_exec_reset (tables cleared). LARECOMP_VK_NO_KEY_MEMO=1: off.
+static int key_memo = -1;
+static uint32_t key_gen = 1;
+static bool key_memo_on(void) {
+    if (key_memo < 0) key_memo = getenv("LARECOMP_VK_NO_KEY_MEMO") == NULL;
+    return key_memo;
+}
+
+static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey);
 static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
+    static struct { uint64_t code[2]; ShaderKey vkey; uint8_t rt[8]; uint32_t gen; Prog *prog; } m;
+    bool on = key_memo_on();
+    if (on && m.prog && m.gen == key_gen && (np->stage_mask & 3) == 3 && m.code[0] == np->stages[0].code_addr &&
+        m.code[1] == np->stages[1].code_addr && !memcmp(&m.vkey, vkey, sizeof *vkey) && !memcmp(m.rt, fkey->rt_kind, 8)) {
+        prof_prog_memo++;
+        prog_fp_check(m.prog, np);  // (as a table hit)
+        return m.prog;
+    }
+    Prog *p = get_program_(np, vkey, fkey);
+    if (on && p) {
+        m.code[0] = np->stages[0].code_addr; m.code[1] = np->stages[1].code_addr;
+        m.vkey = *vkey; memcpy(m.rt, fkey->rt_kind, 8); m.gen = key_gen; m.prog = p;
+    }
+    return p;
+}
+
+static Prog *get_program_(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     if (!(np->stage_mask & 1) || !(np->stage_mask & 2)) return NULL;
     uint64_t h = 0xcbf29ce484222325ull;
     for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
@@ -1939,6 +2159,17 @@ typedef struct {
 } PipeKey;
 
 typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
+// (key memo, see get_program) everything pipe_key_fill reads besides the program: the pass's formats and the PipeIn.
+// One per program (draws often alternate between a few programs): the last pipeline that program drew with.
+struct PipeMemo {
+    uint32_t gen, ncolor, samples, channel_mask;
+    int nattrib, nstream;
+    VkFormat color[8], depth, stencil;
+    uint32_t attrib[16], stream[16][2], rt_fmt[8];
+    uint8_t blend[8][8], blend_on, a2c, cls, poly_fill;
+    Pipe *pp;
+    VtxLayout vl;  // the layout pipe_key_fill made from these inputs (dynamic vertex input leaves it out of pp's key)
+};
 #define PIPE_TAB 8192
 static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
 
@@ -2478,10 +2709,69 @@ static VkDescriptorBufferInfo ubo_span(VkSpan s, uint64_t size) {
     return (VkDescriptorBufferInfo){s.buf, s.off, size > max ? max : size};
 }
 
+// Lean constant blocks: the scale table (66 rows, 1 KB) and the driver constants (up to 2 KB) were zero-filled in
+// full and compared in full per stage and draw, although only a few rows / entries carry anything. These build and
+// compare only those (the scale table's rows 0..ntex and 65; the driver constants' storage buffer entries below the
+// size the shader reads) and write the same bytes as before. LARECOMP_VK_NO_CBUF_LEAN=1: the full blocks, as before.
+static int cbuf_lean_v = -1;
+static bool cbuf_lean(void) {
+    if (cbuf_lean_v < 0) cbuf_lean_v = getenv("LARECOMP_VK_NO_CBUF_LEAN") == NULL;
+    return cbuf_lean_v;
+}
+// The scale table of a graphics stage: rows 0..nt and 65 of rs are set, the rows between are zero (not read from rs).
+static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
+    static struct { uint64_t seq; int nt; float r[66][4]; VkSpan span; } last[2];
+    uint64_t seq = vk_pending_seq();
+    size_t used = (size_t)(nt + 1) * 16;
+    if (last[sg].seq == seq && last[sg].nt == nt && !memcmp(last[sg].r, rs, used) && !memcmp(last[sg].r[65], rs[65], 16)) {
+        prof_cb_reused++;
+        return last[sg].span;
+    }
+    VkSpan s = vk_transient(66 * 16, 256);
+    memcpy(s.ptr, rs, used);
+    if (nt < 64) memset((uint8_t *)s.ptr + used, 0, (size_t)(64 - nt) * 16);
+    memcpy((uint8_t *)s.ptr + 65 * 16, rs[65], 16);
+    last[sg].seq = seq; last[sg].nt = nt; memcpy(last[sg].r, rs, used); memcpy(last[sg].r[65], rs[65], 16); last[sg].span = s;
+    prof_cb_copied++;
+    return s;
+}
+// The driver constants of a graphics stage (cbuf 0, size bytes): zero but for the stage's storage buffer table at
+// base (16 bytes an entry: address low, high, size). Compared by the entries within size.
+static VkSpan drv_dedupe(int stage, uint64_t size) {
+    static struct { uint64_t seq, size; int stage; Range sb[16]; VkSpan span; } last[2];
+    int slot = stage == 1;
+    uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
+    int ne = size > base ? (int)((size - base + 15) / 16) : 0;
+    if (ne > 16) ne = 16;
+    uint64_t seq = vk_pending_seq();
+    if (last[slot].seq == seq && last[slot].size == size && last[slot].stage == stage &&
+        !memcmp(last[slot].sb, st.sbuf[stage], (size_t)ne * sizeof(Range))) {
+        prof_cb_reused++;
+        return last[slot].span;
+    }
+    uint32_t drv[0x800 / 4];
+    memset(drv, 0, size);
+    for (int i = 0; i < ne; i++) {  // (an entry may run past size: drv is 0x800 bytes, only size of them are copied)
+        uint32_t *e = &drv[(base + 16 * i) / 4];
+        e[0] = (uint32_t)st.sbuf[stage][i].addr;
+        e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
+        e[2] = (uint32_t)st.sbuf[stage][i].size;
+    }
+    VkSpan s = vk_transient_copy(drv, size, 256);
+    last[slot].seq = seq; last[slot].size = size; last[slot].stage = stage; last[slot].span = s;
+    memcpy(last[slot].sb, st.sbuf[stage], (size_t)ne * sizeof(Range));
+    prof_cb_copied++;
+    return s;
+}
+
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32_t gx, uint32_t gy, uint32_t gz) {
     static const uint8_t zeros[0x10000];
     if (k == 0) {
+        if (stage != 5 && cbuf_lean()) {  // (the size as below)
+            uint64_t size = si->cbuf_size[0] > 0x800 ? 0x800 : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
+            return ubo_span(drv_dedupe(stage, size), size);
+        }
         uint32_t drv[0x800 / 4] = {0};
         if (stage == 5) {
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
@@ -2520,6 +2810,11 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
     // snapshot: later CPU writes must not leak in. Shared by the draws of one submission binding the same range:
     // within a command list nothing writes guest memory (no inline UpdateUniformBuffer: that writes through below
     // and drops the shared copies).
+    // (lazy heap chunks) pointers in it import their chunks: scanned once per shared copy (LARECOMP_VK_NO_SCAN_ONCE=1:
+    // at every draw, as before)
+    static int scan_once = -1;
+    if (scan_once < 0) scan_once = getenv("LARECOMP_VK_NO_SCAN_ONCE") == NULL;
+    if (gc_lazy && si->uses_gmem && scan_once) return ubo_span(guest_copy_ex(r.addr, size, true), size);
     if (gc_lazy && si->uses_gmem) gc_scan_pointers((const uint32_t *)(uintptr_t)r.addr, size);
     return ubo_span(guest_copy(r.addr, size), size);
 }
@@ -3068,16 +3363,18 @@ static bool gc_import(int k) {
 // read 0 (chunk 47 at +752 MB at every scene entry, chunk 50 at the first grass cut: 576 misses over a tour). An
 // 8-byte-aligned word pair that happens to look like a heap address imports a chunk for nothing: bounded, and logged.
 #define GC_SCAN_MAX 48
+static int gc_scan_warned;
 static void gc_scan_pointers(const uint32_t *w, uint64_t bytes) {
     uint64_t heap = gmem_heap_size();
+    prof_scan_calls++;
+    prof_scan_bytes += bytes;
     for (uint64_t i = 0; i + 1 < bytes / 4; i += 2) {
         uint64_t v = (uint64_t)w[i] | (uint64_t)w[i + 1] << 32;
         if (v < HEAP_BASE || v - HEAP_BASE >= heap) continue;
         int k = (int)((v - HEAP_BASE) >> gc_shift);
         if (k >= gc_n || gc[k].buf) continue;
         if (gc_scanned >= GC_SCAN_MAX) {
-            static int warned;
-            if (!warned++) LOG("[vk] guest heap: %d chunks imported for pointers in uniform buffers: no more\n", gc_scanned);
+            if (!gc_scan_warned++) LOG("[vk] guest heap: %d chunks imported for pointers in uniform buffers: no more\n", gc_scanned);
             return;
         }
         if (gc_import(k)) {
@@ -3087,6 +3384,26 @@ static void gc_scan_pointers(const uint32_t *w, uint64_t bytes) {
                 (unsigned long long)((uint64_t)k << gc_shift) >> 20, (unsigned long long)v);
         }
     }
+}
+
+// Whether a pointer scan can still import anything: some chunk of the heap mapped so far isn't imported (and the
+// scan's import limit isn't used up). Once every chunk is in, the scans are skipped (guest_copy_ex).
+static bool gc_scan_needed(void) {
+    static uint64_t c_heap;
+    static uint32_t c_gen;
+    static int c_scanned = -1, c_warned;
+    static bool c_need = true;
+    uint64_t heap = gmem_heap_size();
+    if (heap != c_heap || gc_gen != c_gen || gc_scanned != c_scanned || gc_scan_warned != c_warned) {
+        c_heap = heap; c_gen = gc_gen; c_scanned = gc_scanned; c_warned = gc_scan_warned;
+        c_need = false;
+        if (gc_scanned < GC_SCAN_MAX || !gc_scan_warned) {
+            int n = (int)((heap + (1ull << gc_shift) - 1) >> gc_shift);
+            if (n > gc_n) n = gc_n;
+            for (int k = 0; k < n && !c_need; k++) c_need = !gc[k].buf;
+        }
+    }
+    return c_need;
 }
 
 // A heap range a draw or dispatch binds: its chunks get imported (lazy mode), and the chunk after it as well - the
@@ -3668,6 +3985,8 @@ static int g_cs_n;  // (compute program table below)
 void vk_exec_reset(void) {
     memset(prog_tab, 0, sizeof prog_tab);
     memset(pipe_tab, 0, sizeof pipe_tab);
+    key_gen++;  // (the key memo: the tables' answers are gone)
+    ds_gen++;   // (set reuse: the heap import below is destroyed at once)
     g_cs_n = 0;
     gcopy_gen++;
     if (gmem_buf) {
@@ -3809,21 +4128,31 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
 // viewport decision), or NULL.
 static float g_mirror_w;  // mirror mode's composite: its render target width (rscale[65].x; 0 otherwise)
 
+// (set reuse) what a set holds, one entry per descriptor written, in stage_set's order (fixed per program)
+typedef struct { uint32_t binding, type; uint64_t a, b, c; } SetEnt;
+typedef struct SetCache { uint64_t seq; uint32_t view_gen, ds_gen; int n; VkDescriptorSet set; SetEnt e[MAX_BIND]; } SetCache;
+
+// dyn / ndyn: the set's dynamic offsets are appended at dyn[*ndyn] (binding order, as vkCmdBindDescriptorSets takes
+// them); NULL for programs without dynamic buffers (compute).
 static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t set, int stage, ShaderInfo *si, const float *rscale_row0,
-                                 const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii) {
-    VkDescriptorSet ds = vk_alloc_set(layout);
+                                 const float tint[8], uint32_t gx, uint32_t gy, uint32_t gz, const VkDescriptorImageInfo *pre_ii,
+                                 uint32_t *dyn, uint32_t *ndyn) {
     VkWriteDescriptorSet w[MAX_BIND];
     VkDescriptorBufferInfo bi[MAX_BIND];
     VkDescriptorImageInfo ii[MAX_BIND];
-    int n = 0;
+    uint32_t dbind[MAX_BIND], doff[MAX_BIND];
+    int n = 0, nd = 0;
     int sg = stage == 1 ? 1 : 0;
-    float rs[66][4] = {{1, 1, 0, 0}};  // ([65]: mirror mode, renderer.m)
+    bool lean = cbuf_lean();
+    float rs[66][4];  // ([65]: mirror mode, renderer.m) (lean: only rows 0, 1..ntex and 65 are set and read)
+    if (!lean) memset(rs, 0, sizeof rs);
+    rs[0][0] = rs[0][1] = 1; rs[0][2] = rs[0][3] = 0;
     if (rscale_row0) memcpy(rs[0], rscale_row0, 16);
-    rs[65][0] = g_mirror_w;
+    rs[65][0] = g_mirror_w; rs[65][1] = rs[65][2] = rs[65][3] = 0;
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
         if (b->set != set) continue;
-        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
+        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) {
             int ti = (int)b->binding - 32;
@@ -3840,7 +4169,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
                 tex_fr[sg][ti][0] = fr[0]; tex_fr[sg][ti][1] = fr[1];
             }
             w[n].pImageInfo = &ii[n];
-        } else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) {
+        } else if (is_ubo(b->type) && b->binding < 17) {
             bi[n] = cbuf_info(stage, si, (int)b->binding, gx, gy, gz);
             w[n].pBufferInfo = &bi[n];
         } else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
@@ -3853,9 +4182,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
     }
     for (int i = 0; i < p->nbinds; i++) {
         VkBindingInfo *b = &p->binds[i];
-        if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-            (b->binding != 18 && b->binding != 19 && b->binding != GMAP_BUFFER_INDEX)) continue;
-        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
+        if (b->set != set || !is_ubo(b->type) || (b->binding != 18 && b->binding != 19 && b->binding != GMAP_BUFFER_INDEX)) continue;
+        w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == GMAP_BUFFER_INDEX) {  // (compute) this dispatch's fast-copy table: gfast_prepare
             bi[n] = ubo_span(vk_transient_copy(gmap_tab, sizeof gmap_tab, 256), sizeof gmap_tab);
@@ -3863,7 +4191,8 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             for (int t = 0; t < si->ntex && t < 64; t++) {  // scale x, y, content part x, y
                 rs[1 + t][0] = tex_sc[sg][t][0]; rs[1 + t][1] = tex_sc[sg][t][1]; rs[1 + t][2] = tex_fr[sg][t][0]; rs[1 + t][3] = tex_fr[sg][t][1];
             }
-            bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
+            if (lean) bi[n] = ubo_span(rscale_dedupe(sg, (const float (*)[4])rs, si->ntex < 64 ? si->ntex : 64), sizeof rs);
+            else bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_RSCALE_F : DEDUPE_RSCALE_V, rs, sizeof rs, 256), sizeof rs);
         } else {
             float zero[8] = {0};
             bi[n] = ubo_span(copy_dedupe(DEDUPE_TINT, tint ? tint : zero, 32, 256), 32);
@@ -3871,7 +4200,50 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n].pBufferInfo = &bi[n];
         n++;
     }
+    // dynamic buffers: the offset moves to the bind (the descriptor keeps buffer and range)
+    for (int i = 0; i < n; i++)
+        if (w[i].descriptorType == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC) {
+            int j = nd++;  // (insertion by binding: the order vkCmdBindDescriptorSets takes the offsets in)
+            while (j > 0 && dbind[j - 1] > w[i].dstBinding) { dbind[j] = dbind[j - 1]; doff[j] = doff[j - 1]; j--; }
+            dbind[j] = w[i].dstBinding;
+            doff[j] = (uint32_t)bi[i].offset;
+            bi[i].offset = 0;
+        }
+    if (nd) {
+        if (!dyn || !ndyn) FATAL("stage_set: dynamic buffers without an offset array\n");
+        memcpy(dyn + *ndyn, doff, (size_t)nd * sizeof doff[0]);
+        *ndyn += (uint32_t)nd;
+    }
+    extern uint32_t vk_view_gen;
+    SetCache *c = NULL;
+    SetEnt e[MAX_BIND];
+    if (p->reuse && set < 2) {  // the same contents as this program's last set of this index: bind that one again
+        if (!p->scache[set]) p->scache[set] = calloc(1, sizeof *p->scache[set]);
+        c = p->scache[set];
+        memset(e, 0, (size_t)n * sizeof e[0]);  // (padding: compared with memcmp)
+        for (int i = 0; i < n; i++) {
+            e[i].binding = w[i].dstBinding;
+            e[i].type = (uint32_t)w[i].descriptorType;
+            if (w[i].pImageInfo) {
+                e[i].a = (uint64_t)(uintptr_t)ii[i].sampler; e[i].b = (uint64_t)(uintptr_t)ii[i].imageView; e[i].c = (uint64_t)ii[i].imageLayout;
+            } else {
+                e[i].a = (uint64_t)(uintptr_t)bi[i].buffer; e[i].b = bi[i].offset; e[i].c = bi[i].range;
+            }
+        }
+        if (c->set && c->seq == vk_pending_seq() && c->view_gen == vk_view_gen && c->ds_gen == ds_gen && c->n == n &&
+            !memcmp(c->e, e, (size_t)n * sizeof e[0])) {
+            prof_sets_reused++;
+            return c->set;
+        }
+    }
+    VkDescriptorSet ds = vk_alloc_set(layout);
+    for (int i = 0; i < n; i++) w[i].dstSet = ds;
     if (n) vkUpdateDescriptorSets(g_vk.dev, (uint32_t)n, w, 0, NULL);
+    prof_sets_new++;
+    if (c) {
+        c->set = ds; c->seq = vk_pending_seq(); c->view_gen = vk_view_gen; c->ds_gen = ds_gen; c->n = n;
+        memcpy(c->e, e, (size_t)n * sizeof e[0]);
+    }
     return ds;
 }
 
@@ -4253,7 +4625,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         LOG("\n");
     }
     if (cp->si->uses_gmem_map) gfast_prepare(cb);
-    VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL);
+    VkDescriptorSet ds = stage_set(&cp->p, cp->p.set_layout[0], 0, 5, cp->si, NULL, NULL, gx, gy, gz, NULL, NULL, NULL);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     if (gc_shift && cp->si->uses_gmem) gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, GMEM_CHUNK_SET(STAGE_COMPUTE), 1u << STAGE_COMPUTE);
@@ -4491,36 +4863,64 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.rt.ncolor && i < 8; i++) rt_fmt[i] = st.rt.color[i] ? st.rt.color[i]->format : 0;
     const PipeIn in = {st.attrib, st.nattrib, (const uint32_t (*)[2])st.stream, st.nstream, rt_fmt, st.channel_mask,
                        st.color_state[0], (const uint8_t (*)[8])st.blend, st.ms[0xC] != 0, cls, st.poly[2] != 1};
+    bool memo_on = key_memo_on();
+    if (memo_on && !pr->pmemo) pr->pmemo = calloc(1, sizeof *pr->pmemo);
+    struct PipeMemo *pm = memo_on ? pr->pmemo : NULL;
+    int nat = st.nattrib < 0 ? 0 : st.nattrib > 16 ? 16 : st.nattrib, nst = st.nstream < 0 ? 0 : st.nstream > 16 ? 16 : st.nstream;
+    uint32_t npc = pass_ncolor < 8 ? pass_ncolor : 8;
+    prof_key_draws++;
     PipeKey k;
-    VtxLayout vl;
-    pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &vl);
-    uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
-    if (!ph) ph = 1;
-    uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
-    while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
-    Pipe *pp = pipe_tab[pslot].pipe;
-    if (!pp) {
-        if (shader_rec_recording()) {
-            ShaderRec rec;
-            rec_from_state(&rec, vkey.flip_x, mode);
-            shader_rec_note(&rec);
-        }
-        pp = prep_pipes_n ? PREP_GET(prep_pipes, ph) : NULL;  // prepared before the game
-        if (pp && memcmp(&pp->k, &k, sizeof k)) pp = NULL;
+    VtxLayout vl;  // the draw's vertex layout (on a memo hit: the memo's, made from the same inputs)
+    Pipe *pp;
+    if (pm && pm->pp && pm->gen == key_gen && pm->ncolor == pass_ncolor && pm->samples == pass_samples && pm->depth == pass_depth &&
+        pm->stencil == pass_stencil && pm->nattrib == st.nattrib && pm->nstream == st.nstream && pm->channel_mask == in.channel_mask &&
+        pm->blend_on == in.blend_on && pm->a2c == in.a2c && pm->cls == in.topo_class && pm->poly_fill == in.poly_fill &&
+        !memcmp(pm->color, pass_color, npc * sizeof pass_color[0]) && !memcmp(pm->rt_fmt, rt_fmt, sizeof rt_fmt) &&
+        !memcmp(pm->attrib, st.attrib, (size_t)nat * 4) && !memcmp(pm->stream, st.stream, (size_t)nst * 8) &&
+        !memcmp(pm->blend, st.blend, sizeof pm->blend)) {
+        prof_pipe_memo++;
+        pp = pm->pp;
+        vl = pm->vl;  // (the key leaves the layout out with dynamic vertex input: kept with the memo)
+    } else {
+        pipe_key_fill(&k, pr, &in, pass_color, pass_ncolor, pass_depth, pass_stencil, pass_samples, &vl);
+        uint64_t ph = hash_words(0xcbf29ce484222325ull, &k, sizeof k);
+        if (!ph) ph = 1;
+        uint32_t pslot = (uint32_t)(ph ^ (ph >> 29)) & (PIPE_TAB - 1);
+        while (pipe_tab[pslot].key && pipe_tab[pslot].key != ph) pslot = (pslot + 1) & (PIPE_TAB - 1);
+        pp = pipe_tab[pslot].pipe;
         if (!pp) {
-            uint64_t vh = shader_stage_hash(&st.program->stages[0]), fh = shader_stage_hash(&st.program->stages[1]);
-            shader_first_visit("pipeline", vh, fh, ph);
-            if (prep_check_on()) {
+            if (shader_rec_recording()) {
                 ShaderRec rec;
                 rec_from_state(&rec, vkey.flip_x, mode);
-                prep_check(&k, vh, fh, &rec);
+                shader_rec_note(&rec);
             }
-            pp = calloc(1, sizeof *pp);
-            pp->k = k;
-            run_job(build_pipeline, pp);
+            pp = prep_pipes_n ? PREP_GET(prep_pipes, ph) : NULL;  // prepared before the game
+            if (pp && memcmp(&pp->k, &k, sizeof k)) pp = NULL;
+            if (!pp) {
+                uint64_t vh = shader_stage_hash(&st.program->stages[0]), fh = shader_stage_hash(&st.program->stages[1]);
+                shader_first_visit("pipeline", vh, fh, ph);
+                if (prep_check_on()) {
+                    ShaderRec rec;
+                    rec_from_state(&rec, vkey.flip_x, mode);
+                    prep_check(&k, vh, fh, &rec);
+                }
+                pp = calloc(1, sizeof *pp);
+                pp->k = k;
+                run_job(build_pipeline, pp);
+            }
+            pipe_tab[pslot].key = ph;
+            pipe_tab[pslot].pipe = pp;
         }
-        pipe_tab[pslot].key = ph;
-        pipe_tab[pslot].pipe = pp;
+        if (pm) {
+            pm->gen = key_gen; pm->ncolor = pass_ncolor; pm->samples = pass_samples; pm->depth = pass_depth; pm->stencil = pass_stencil;
+            pm->nattrib = st.nattrib; pm->nstream = st.nstream; pm->channel_mask = in.channel_mask; pm->blend_on = in.blend_on;
+            pm->a2c = in.a2c; pm->cls = in.topo_class; pm->poly_fill = in.poly_fill;
+            memcpy(pm->color, pass_color, sizeof pm->color); memcpy(pm->rt_fmt, rt_fmt, sizeof pm->rt_fmt);
+            memcpy(pm->attrib, st.attrib, sizeof pm->attrib); memcpy(pm->stream, st.stream, sizeof pm->stream);
+            memcpy(pm->blend, st.blend, sizeof pm->blend);
+            pm->pp = pp;
+            pm->vl = vl;
+        }
     }
     if (atomic_load(&pp->state) != 1) { SKIP(atomic_load(&pp->state) == 2 ? SK_PIPE_FAILED : SK_PIPE_BUILDING); return; }
     ss_enabled();
@@ -4597,12 +4997,30 @@ static void draw_(CmdRec *r, bool indexed) {
     float *vp = st.viewport[0];
     float zn = st.depth_range[0][0], zf = st.depth_range[0][1];
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
+    // The hooks below look for known textures (texpatch ids, TexBackend.tp > 0) among the fragment textures: one pass
+    // finds the texture objects and whether any is known; the loops only run when one is (most draws have none).
+    // LARECOMP_VK_NO_HOOK_PASS=1: every loop looks its textures up, as before.
+    static int hook_pass = -1;
+    if (hook_pass < 0) hook_pass = getenv("LARECOMP_VK_NO_HOOK_PASS") == NULL;
+    NvnTexture *ftex[64];
+    bool fknown = true;
+    if (hook_pass) {
+        fknown = false;
+        for (int i = 0; i < pr->fi->ntex; i++) {
+            ftex[i] = shader_texture_object(1, &pr->fi->tex[i]);
+            const TexBackend *b = ftex[i] ? (const TexBackend *)ftex[i]->backend : NULL;
+            if (b && b->tp > 0) fknown = true;
+        }
+        prof_hook_draws++;
+        if (fknown) prof_hook_known++;
+    }
+#define FTEX(i) (hook_pass ? ftex[i] : shader_texture_object(1, &pr->fi->tex[i]))
     {   // the Items page's cursor brackets while the cursor is on the companion card (runtime/hle/pets.c)
         extern bool pets_hide_item_cursor(void);
         extern bool texpatch_is_item_cursor(int id);
-        if (pets_hide_item_cursor())
+        if (pets_hide_item_cursor() && fknown)
             for (int i = 0; i < pr->fi->ntex; i++) {
-                NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+                NvnTexture *t = FTEX(i);
                 const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
                 if (b && b->tp > 0 && texpatch_is_item_cursor(b->tp - 1)) { SKIP(SK_HIDDEN); return; }
             }
@@ -4610,8 +5028,8 @@ static void draw_(CmdRec *r, bool indexed) {
     float tint[8] = {0};
     int recol = 0;  // a Cosmetics recolour texture's class (runtime/nvn/recolour.c)
     if (pr->fi->uses_tint) {
-        for (int i = 0; i < pr->fi->ntex; i++) {
-            NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        for (int i = 0; i < pr->fi->ntex && fknown; i++) {
+            NvnTexture *t = FTEX(i);
             const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
             if (b && b->tp > 0) recol = recolour_pick(recol, recolour_class_of(b->tp - 1));
         }
@@ -4628,8 +5046,8 @@ static void draw_(CmdRec *r, bool indexed) {
         extern int texpatch_heart_kind(int id);
         extern void texpatch_heart_tint(int kind, float tint[8]);
         int bottle = 0, heart = 0;
-        for (int i = 0; i < pr->fi->ntex; i++) {
-            NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        for (int i = 0; i < pr->fi->ntex && fknown; i++) {
+            NvnTexture *t = FTEX(i);
             const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
             if (b && b->tp > 0 && !bottle) bottle = texpatch_bottle_kind(b->tp - 1);
             if (b && b->tp > 0 && !heart) heart = texpatch_heart_kind(b->tp - 1);
@@ -4645,7 +5063,8 @@ static void draw_(CmdRec *r, bool indexed) {
     // build the vertex set now and the fragment set after the decision (stage_set fills tex_sc for stage 1).
     if (prof) prof_dyn += SDL_GetTicksNS() - prof_td_;
     PROF_T0();
-    VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL);
+    uint32_t dyn[2 * MAX_BIND], ndyn = 0;  // (set reuse: the sets' dynamic offsets, vertex then fragment)
+    VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndyn);
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
@@ -4655,7 +5074,8 @@ static void draw_(CmdRec *r, bool indexed) {
         tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
         tex_fr[1][i][0] = fr[0]; tex_fr[1][i][1] = fr[1];
         // the Hint Sheet (runtime/hle/hint_sheet.c): the dungeon map's icon in place of the first bottle's
-        NvnTexture *t = shader_texture_object(1, &pr->fi->tex[i]);
+        // (tp read after texture_info: its upload check may have identified the texture just now)
+        NvnTexture *t = FTEX(i);
         const TexBackend *b = t ? (const TexBackend *)t->backend : NULL;
         extern int texpatch_bottle_kind(int id);
         if (b && b->tp > 0 && texpatch_bottle_kind(b->tp - 1) == 1) {
@@ -4669,6 +5089,7 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
     }
+#undef FTEX
     if (prof) prof_tex += SDL_GetTicksNS() - prof_tx_;
     if (fabsf(pass_sx - pass_sy) > 0.01f * pass_sy && st.rt.ncolor && renderer_texture_presented(st.rt.color[0])) {
         // Draws into the swapchain image (see renderer.m): composites fill the window, UI goes in a centred 16:9 box.
@@ -4720,10 +5141,10 @@ static void draw_(CmdRec *r, bool indexed) {
     apply_scissor();
     float rs0[4] = {vp_sx, vp_sy, vp_ox, vp_oy};
     uint64_t prof_t1_ = prof ? SDL_GetTicksNS() : 0;
-    VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii);
+    VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii, dyn, &ndyn);
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
     VkDescriptorSet sets[2] = {vset, fset};
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, 0, NULL);  // (always new sets)
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 0, 2, sets, ndyn, ndyn ? dyn : NULL);
     if (gc_shift && (pr->vi->uses_gmem || pr->fi->uses_gmem))
         gmem_chunk_bind(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, GMEM_CHUNK_SET(STAGE_FRAGMENT),
                         (pr->vi->uses_gmem ? 1u << STAGE_VERTEX : 0) | (pr->fi->uses_gmem ? 1u << STAGE_FRAGMENT : 0));
@@ -4860,8 +5281,9 @@ static void draw_(CmdRec *r, bool indexed) {
             extern void pot_gold_tint(float tint[8]);
             if (run_gold[ri]) pot_gold_tint(rtint);
             else if (recol) recolour_tint(recol, rtint);
-            VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii);
-            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, 0, NULL);
+            uint32_t rdyn[MAX_BIND], nrdyn = 0;
+            VkDescriptorSet rset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, rtint, 0, 0, 0, fii, rdyn, &nrdyn);
+            vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pr->layout, 1, 1, &rset, nrdyn, nrdyn ? rdyn : NULL);
         }
         if (!use_index) vkCmdDraw(cb, count, run_n[ri], first, base_inst + run_at[ri]);
         else vkCmdDrawIndexed(cb, icount, run_n[ri], 0, base_vertex, base_inst + run_at[ri]);
