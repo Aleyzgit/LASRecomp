@@ -262,6 +262,9 @@ static void set_job(const std::string &s, bool failed = false, const std::string
     pthread_mutex_unlock(&g_lock);
 }
 
+// (the not-found failure's hint, and the caption over the game files page's example folder)
+static const char *const PICK_FOLDER_HINT = "Choose the folder that has the game's exefs and romfs folders in it.";
+
 // Setup failures: a short headline and what to do next (also LARECOMP_LAUNCHER_SHOT=<f>:fail<1-6>, screenshots)
 enum { FAIL_NOT_FOUND = 1, FAIL_UNUSABLE, FAIL_COPY, FAIL_VERSION, FAIL_MISSING, FAIL_BUILD };
 static void set_failure(int k, int have = -1, const char *reason = NULL) {
@@ -270,7 +273,7 @@ static void set_failure(int k, int have = -1, const char *reason = NULL) {
                                        "The game code didn't build"};
     static const char *const hint[] = {
         "",
-        "Choose the folder that has the game's exefs and romfs folders in it.",
+        PICK_FOLDER_HINT,
         "LAS Recomp needs the game's own files (the exefs and romfs folders), not .xci / .nsp / .nca files.",
         "Make sure there's about 12 GB free and try again.",
         "LAS Recomp needs version 1.0.0, 1.0.1 or 1.1.0 of the game.",
@@ -806,6 +809,76 @@ static bool menu_tip(float s) {
         ImGui::EndPopup();
     }
     return go;
+}
+
+// The game files page's example: a Finder-style window (the same on every platform) with the folder to choose -
+// exefs opened (its files), romfs closed. All drawn here (shapes and the page's font, sized from the font: sharp at
+// any scale), up to w wide, at the cursor; it takes its space with a Dummy.
+enum { FOLDER_EXAMPLE_ROWS = 8 };
+static float folder_example_height(void) {  // (its window, without the Dummy's gap under it)
+    float fs = ImGui::GetFontSize();
+    return fs * 1.45f + fs * 0.35f * 2 + FOLDER_EXAMPLE_ROWS * fs * 1.12f;
+}
+static void draw_folder_example(float w) {
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImFont *font = ImGui::GetFont();
+    float fs = ImGui::GetFontSize(), ts = fs * 0.82f;  // (the rows' text a little under the page's)
+    float rh = fs * 1.12f, bar = fs * 1.45f, pad = fs * 0.35f, r = fs * 0.45f;
+    struct Item { const char *name; int depth; int kind; };  // kind: 0 file, 1 folder opened, 2 folder closed
+    static const Item items[] = {{"exefs", 0, 1}, {"main", 1, 0}, {"main.npdm", 1, 0}, {"rtld", 1, 0}, {"sdk", 1, 0},
+                                 {"subsdk0", 1, 0}, {"subsdk1", 1, 0}, {"romfs", 0, 2}};
+    const int n = FOLDER_EXAMPLE_ROWS;
+    static_assert(sizeof items / sizeof items[0] == FOLDER_EXAMPLE_ROWS, "one row per item");
+    w = fminf(w, fs * 15);
+    float h = folder_example_height();
+    ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + w, a.y + h);
+    const ImU32 body = IM_COL32(24, 28, 27, 255), title = IM_COL32(40, 45, 43, 255), edge = IM_COL32(255, 255, 255, 38),
+                text = IM_COL32(220, 216, 205, 255), dim = IM_COL32(150, 152, 144, 255),
+                gold = IM_COL32(236, 194, 84, 255), gold_tab = IM_COL32(200, 160, 62, 255),
+                paper = IM_COL32(226, 224, 216, 255), fold = IM_COL32(160, 158, 150, 255);
+    dl->AddRectFilled(ImVec2(a.x, a.y + fs * 0.12f), ImVec2(b.x, b.y + fs * 0.22f), IM_COL32(0, 0, 0, 70), r);  // shadow
+    dl->AddRectFilled(a, b, body, r);
+    dl->AddRectFilled(a, ImVec2(b.x, a.y + bar), title, r, ImDrawFlags_RoundCornersTop);
+    dl->AddLine(ImVec2(a.x, a.y + bar), ImVec2(b.x, a.y + bar), IM_COL32(0, 0, 0, 90), 1.0f);
+    dl->AddRect(a, b, edge, r, 0, 1.0f);
+    // the title bar: three dots on the left, the folder's name in the middle
+    static const ImU32 dots[] = {IM_COL32(255, 95, 87, 255), IM_COL32(254, 188, 46, 255), IM_COL32(40, 200, 64, 255)};
+    float dr = fs * 0.21f, cy = a.y + bar * 0.5f;
+    for (int i = 0; i < 3; i++) dl->AddCircleFilled(ImVec2(a.x + fs * 0.65f + i * fs * 0.62f, cy), dr, dots[i]);
+    const char *t = "Game files";
+    ImVec2 tsz = font->CalcTextSizeA(ts, FLT_MAX, 0, t);
+    dl->AddText(font, ts, ImVec2(a.x + (w - tsz.x) * 0.5f, cy - tsz.y * 0.5f), text, t);
+    // the list: a disclosure triangle on folders, the folder / file glyph, the name
+    float g = fs * 0.78f;  // (glyph size)
+    for (int i = 0; i < n; i++) {
+        const Item &it = items[i];
+        float y = a.y + bar + pad + i * rh, my = y + rh * 0.5f;
+        if (i & 1) dl->AddRectFilled(ImVec2(a.x + 1, y), ImVec2(b.x - 1, y + rh), IM_COL32(255, 255, 255, 9));
+        float x = a.x + fs * 0.5f + it.depth * fs * 1.25f;
+        if (it.kind) {  // ▼ opened, ▶ closed
+            float u = fs * 0.2f, cx = x + u;
+            if (it.kind == 1)
+                dl->AddTriangleFilled(ImVec2(cx - u, my - u * 0.6f), ImVec2(cx + u, my - u * 0.6f),
+                                      ImVec2(cx, my + u * 0.75f), dim);
+            else
+                dl->AddTriangleFilled(ImVec2(cx - u * 0.6f, my - u), ImVec2(cx - u * 0.6f, my + u),
+                                      ImVec2(cx + u * 0.75f, my), dim);
+        }
+        x += fs * 0.6f;
+        float gx = x, gy = my - g * 0.5f;
+        if (it.kind) {  // folder: a tab, then the body over it
+            dl->AddRectFilled(ImVec2(gx, gy + g * 0.12f), ImVec2(gx + g * 0.46f, gy + g * 0.42f), gold_tab, g * 0.1f);
+            dl->AddRectFilled(ImVec2(gx, gy + g * 0.26f), ImVec2(gx + g, gy + g * 0.9f), gold, g * 0.1f);
+        } else {  // file: a page with its top right corner folded
+            float l = gx + g * 0.16f, rr = gx + g * 0.84f, tp = gy + g * 0.02f, bt = gy + g * 0.98f, c = g * 0.24f;
+            ImVec2 pts[] = {ImVec2(l, tp), ImVec2(rr - c, tp), ImVec2(rr, tp + c), ImVec2(rr, bt), ImVec2(l, bt)};
+            dl->AddConvexPolyFilled(pts, 5, paper);
+            dl->AddTriangleFilled(ImVec2(rr - c, tp), ImVec2(rr - c, tp + c), ImVec2(rr, tp + c), fold);
+        }
+        ImVec2 nsz = font->CalcTextSizeA(ts, FLT_MAX, 0, it.name);
+        dl->AddText(font, ts, ImVec2(x + g + fs * 0.4f, my - nsz.y * 0.5f), text, it.name);
+    }
+    ImGui::Dummy(ImVec2(w, h));
 }
 
 // Start-screen text: a soft drop shadow, then the text with a top-to-bottom colour gradient (top == bottom: flat)
@@ -1909,7 +1982,22 @@ extern "C" void launcher_run(const char *root) {
                     if (r == 1) onedrive_keep();
                     else if (r == 2) choose_data_folder();
                 }
-                opt_end();
+                if (ready) opt_end();
+                else {  // before the setup: under the description, what the folder to choose looks like (at the bottom)
+                    opt_split();
+                    opt_desc_text();
+                    float fs = ImGui::GetFontSize(), ew = fminf(ImGui::GetContentRegionAvail().x, fs * 15);
+                    float eh = ImGui::CalcTextSize(PICK_FOLDER_HINT, NULL, false, ew).y + 8 * sc +
+                               folder_example_height() + fs * 0.3f;  // (+ its shadow)
+                    float bottom = ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - eh;
+                    ImGui::SetCursorPosY(fmaxf(ImGui::GetCursorPosY() + 20 * sc, bottom));
+                    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ew);
+                    ImGui::TextColored(ImVec4(0.55f, 0.58f, 0.52f, 1), "%s", PICK_FOLDER_HINT);
+                    ImGui::PopTextWrapPos();
+                    ImGui::Dummy(ImVec2(0, 4 * sc));
+                    draw_folder_example(ew);
+                    opt_split_end();
+                }
                 if (g_confirm_delete && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                                          ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
                     g_confirm_delete = false;  // (B / Esc: back out of the question first)
