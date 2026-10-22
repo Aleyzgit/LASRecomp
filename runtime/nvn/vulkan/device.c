@@ -323,6 +323,15 @@ static void create_device(void) {
     g_fault_ext = fault;
     bool budget = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);  // (real per-heap budgets: vk_log_memory)
     if (budget) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+    // pipeline-building features: logged below (issue #92); dynamic vertex input used, the library one only measured
+    bool vids_ext = has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+#ifdef VK_EXT_graphics_pipeline_library
+    bool gpl_ext = has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+                   has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+#endif
+#ifdef VK_EXT_extended_dynamic_state3
+    bool eds3_ext = has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
+#endif
 #ifdef __linux__
     // the guest heap as driver memory mapped at HEAP_BASE (exec.c backend_guest_heap_prepare)
     g_vk.dmabuf = has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
@@ -346,7 +355,75 @@ static void create_device(void) {
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT have_placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
     if (placed_ext) have12.pNext = &have_placed;
 #endif
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT have_vids = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    if (vids_ext) have_vids.pNext = have.pNext, have.pNext = &have_vids;
+#ifdef VK_EXT_graphics_pipeline_library
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT have_gpl = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+    if (gpl_ext) have_gpl.pNext = have.pNext, have.pNext = &have_gpl;
+#endif
+#ifdef VK_EXT_extended_dynamic_state3
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT have_eds3 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    if (eds3_ext) have_eds3.pNext = have.pNext, have.pNext = &have_eds3;
+#endif
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    {   // what the driver offers for building pipelines (one line, for #92 reports)
+        VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 pr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
+        char gpl[96] = "no extension", eds3[160] = "no extension";
+#ifdef VK_EXT_graphics_pipeline_library
+        VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gplp = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
+        if (gpl_ext) gplp.pNext = pr.pNext, pr.pNext = &gplp;
+#else
+        snprintf(gpl, sizeof gpl, "not in this build's headers");
+#endif
+#ifndef VK_EXT_extended_dynamic_state3
+        snprintf(eds3, sizeof eds3, "not in this build's headers");
+#endif
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &pr);
+#ifdef VK_EXT_graphics_pipeline_library
+        if (gpl_ext)
+            snprintf(gpl, sizeof gpl, "%s (fast linking %s, independent interpolation decoration %s)",
+                     have_gpl.graphicsPipelineLibrary ? "yes" : "no", gplp.graphicsPipelineLibraryFastLinking ? "yes" : "no",
+                     gplp.graphicsPipelineLibraryIndependentInterpolationDecoration ? "yes" : "no");
+#endif
+#ifdef VK_EXT_extended_dynamic_state3
+        if (eds3_ext)
+            snprintf(eds3, sizeof eds3, "polygon mode %d, samples %d, alpha to coverage %d, blend enable %d, "
+                     "blend equation %d, write mask %d", have_eds3.extendedDynamicState3PolygonMode,
+                     have_eds3.extendedDynamicState3RasterizationSamples, have_eds3.extendedDynamicState3AlphaToCoverageEnable,
+                     have_eds3.extendedDynamicState3ColorBlendEnable, have_eds3.extendedDynamicState3ColorBlendEquation,
+                     have_eds3.extendedDynamicState3ColorWriteMask);
+#endif
+        LOG("[vk] driver %s %s; graphics pipeline library: %s; vertex input dynamic state: %s; extended dynamic state 3: %s\n",
+            drv.driverName, drv.driverInfo, gpl, vids_ext ? (have_vids.vertexInputDynamicState ? "yes" : "no") : "no extension",
+            eds3);
+    }
+    {   // dynamic vertex input (exec.c): fewer pipelines; LARECOMP_VK_DYN_VERTEX=0 keeps the layout in each pipeline
+        const char *e = getenv("LARECOMP_VK_DYN_VERTEX");
+        bool off = e && !atoi(e);
+        g_vk.vids = vids_ext && have_vids.vertexInputDynamicState && !off;
+        if (g_vk.vids) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+        else LOG("[vk] vertex input: in each pipeline (%s)\n", off ? "LARECOMP_VK_DYN_VERTEX=0" :
+                 !vids_ext ? "no VK_EXT_vertex_input_dynamic_state" : "vertexInputDynamicState not supported");
+    }
+#ifdef VK_EXT_graphics_pipeline_library
+    {   // LARECOMP_VK_GPL_PROBE=1: library builds timed after shader preparation (exec.c gpl_probe); nothing else uses it
+        const char *e = getenv("LARECOMP_VK_GPL_PROBE");
+        if (e && atoi(e)) {
+            g_vk.gpl_probe = gpl_ext && have_gpl.graphicsPipelineLibrary;
+            if (g_vk.gpl_probe) {
+                ext[n_ext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME;
+                ext[n_ext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME;
+            } else LOG("[gpl] probe: the driver has no graphics pipeline library; skipped\n");
+        }
+    }
+#else
+    if (getenv("LARECOMP_VK_GPL_PROBE") && atoi(getenv("LARECOMP_VK_GPL_PROBE"))) LOG("[gpl] probe: this build's Vulkan headers have no graphics pipeline library; skipped\n");
+#endif
 #if defined(__linux__) && defined(VK_EXT_map_memory_placed)
     have12.pNext = NULL;
     g_vk.map_placed = placed_ext && have_placed.memoryMapPlaced;
@@ -386,6 +463,14 @@ static void create_device(void) {
                                                          .pNext = f.pNext};
     if (g_vk.map_placed) f.pNext = &placed;
 #endif
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT en_vids = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, .vertexInputDynamicState = VK_TRUE};
+    if (g_vk.vids) en_vids.pNext = f.pNext, f.pNext = &en_vids;
+#ifdef VK_EXT_graphics_pipeline_library
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT en_gpl = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE};
+    if (g_vk.gpl_probe) en_gpl.pNext = f.pNext, f.pNext = &en_gpl;
+#endif
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
@@ -412,6 +497,12 @@ static void create_device(void) {
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    if (g_vk.vids) {
+        g_vk.set_vertex_input = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
+        if (!g_vk.set_vertex_input) g_vk.vids = false;
+        LOG("[vk] vertex input: %s\n", g_vk.vids ? "dynamic (VK_EXT_vertex_input_dynamic_state)" :
+            "in each pipeline (vkCmdSetVertexInputEXT missing)");
+    }
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
                                  .vulkanApiVersion = VK_API_VERSION_1_3,

@@ -36,6 +36,12 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, dmabuf;
+    // VK_EXT_vertex_input_dynamic_state (exec.c): the vertex layout is set per draw (vkCmdSetVertexInputEXT), not
+    // baked into each pipeline - fewer pipelines. Off: no extension / feature, or LARECOMP_VK_DYN_VERTEX=0.
+    bool vids;
+    PFN_vkCmdSetVertexInputEXT set_vertex_input;
+    // LARECOMP_VK_GPL_PROBE=1 only (exec.c gpl_probe, measurement): VK_EXT_graphics_pipeline_library enabled
+    bool gpl_probe;
     bool map_placed, unmap_reserve;  // VK_EXT_map_memory_placed: driver memory mapped at a given address (exec.c guest_heap_dmabuf)
     bool ssbo_chunks;  // stores and atomics from fragment and vertex shaders (exec.c: the heap in chunks counts misses)
     bool lazy_heap, bda;  // the heap imported chunk by chunk (device.c lazy_heap_predicted), buffer device addresses enabled for it
