@@ -493,7 +493,8 @@ static void SDLCALL picked(void *, const char *const *files, int) {
 
 // ------------------------------------------------------------------ OneDrive (Windows)
 // A data root inside a OneDrive folder uploads every game file to the player's OneDrive: a warning on the start screen
-// with roughly how much, until Keep here (settings.onedrive_kept). Checked once per launch (plat_onedrive_synced); the
+// with roughly how much, and Choose another folder (the Data folder's Change...: move the data there) or Keep here
+// (settings.onedrive_kept). Checked once per launch on the current data root (plat_onedrive_synced); the
 // size in the background: the data root's own once set up, before that the picked game files (or a typical copy) plus
 // what the setup adds. LARECOMP_TEST_ONEDRIVE=1 (test): shown on any system.
 #define GAME_FILES_GB 6.3   // exefs + romfs, as players bring them
@@ -520,9 +521,9 @@ static void *onedrive_size_thread(void *arg) {
     return NULL;
 }
 
-// The warning, w wide at the cursor (the start screen's upper right; before the setup, under the Game Files rows); true
-// once Keep here is pressed
-static bool onedrive_notice(float s, float w, bool ready) {
+// The warning, w wide at the cursor (the start screen's upper right; before the setup, under the Game Files rows).
+// 1: Keep here pressed, 2: Choose another folder (offered when the data folder can be changed and nothing is running)
+static int onedrive_notice(float s, float w, bool ready) {
     std::string src;
     pthread_mutex_lock(&g_lock);
     src = ready ? "" : g_src.empty() ? "\x01" : g_src;
@@ -533,7 +534,7 @@ static bool onedrive_notice(float s, float w, bool ready) {
         if (pthread_create(&th, NULL, onedrive_size_thread, new std::string(src)) == 0) pthread_detach(th);
     }
     double gb = g_od_gb;
-    if (gb < 0) return false;
+    if (gb < 0) return 0;
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.04f, 0.05f, 0.86f));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 14 * s);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 18 * s));
@@ -543,13 +544,23 @@ static bool onedrive_notice(float s, float w, bool ready) {
     ImGui::PopStyleColor();
     ImGui::PushTextWrapPos(0);
     ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  This folder is synced by OneDrive");
-    ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "All game files (about %.0f GB) will be uploaded to your OneDrive. "
-                       "Moving the LAS Recomp folder somewhere not synced, like C:\\Games, avoids that.", fmax(1.0, gb));
+    ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "All game files (about %.0f GB) will be uploaded to your OneDrive.",
+                       fmax(1.0, gb));
     ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0, 4 * s));
-    bool keep = ImGui::Button("Keep here", ImVec2(160 * s, 0));
+    int r = 0;
+    pthread_mutex_lock(&g_lock);
+    bool busy = g_busy;
+    pthread_mutex_unlock(&g_lock);
+    if (!rt_data_root_fixed()) {
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Choose another folder")) r = 2;
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+    }
+    if (ImGui::Button("Keep here")) r = 1;
     ImGui::EndChild();
-    return keep;
+    return r;
 }
 static void onedrive_keep(void) {
     g_settings.onedrive_kept = true;
@@ -1062,6 +1073,7 @@ enum { DF_NONE, DF_ASK, DF_MOVING, DF_FAILED };
 static int g_df;                  // (main thread)
 static std::string g_df_pick;     // the folder picked (g_lock: the dialog calls back on any thread)
 static RtDataTarget g_df_t;
+static bool g_df_onedrive;        // the folder picked is synced by OneDrive too (Windows)
 static std::atomic<int> g_df_step{0}, g_df_result{0};  // result: 0 running, 1 moved, -1 failed
 static std::atomic<float> g_df_frac{0};
 static char g_df_err[600];
@@ -1096,6 +1108,7 @@ static void data_folder_popup(float s) {
     pthread_mutex_unlock(&g_lock);
     if (!pick.empty() && g_df == DF_NONE && !busy) {
         rt_data_target(pick.c_str(), &g_df_t);
+        g_df_onedrive = !g_df_t.refuse[0] && plat_onedrive_synced(g_df_t.path);
         g_df = DF_ASK;
         ImGui::OpenPopup("##datafolder");
     }
@@ -1118,6 +1131,7 @@ static void data_folder_popup(float s) {
     };
     if (g_df == DF_ASK) {
         ImGui::TextDisabled("%s", t.path);
+        if (g_df_onedrive) ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "This folder is synced by OneDrive too.");
         ImGui::Spacing();
         if (t.refuse[0]) {
             ImGui::TextColored(red, "%s", t.refuse);
@@ -1897,7 +1911,9 @@ extern "C" void launcher_run(const char *root) {
                 }
                 if (!ready && g_onedrive > 0 && !g_settings.onedrive_kept) {  // (before the copy is the time to move)
                     ImGui::Dummy(ImVec2(0, 14 * sc));
-                    if (onedrive_notice(1.5f * sc, ImGui::GetContentRegionAvail().x, false)) onedrive_keep();
+                    int r = onedrive_notice(1.5f * sc, ImGui::GetContentRegionAvail().x, false);
+                    if (r == 1) onedrive_keep();
+                    else if (r == 2) choose_data_folder();
                 }
                 opt_end();
                 if (g_confirm_delete && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
@@ -1944,7 +1960,9 @@ extern "C" void launcher_run(const char *root) {
             if (g_onedrive > 0 && !g_settings.onedrive_kept) {
                 float w = fminf(ds.x * 0.42f, 560 * s);
                 ImGui::SetCursorPos(ImVec2(ds.x - w - 60 * s, 60 * s));
-                if (onedrive_notice(s, w, status.empty())) onedrive_keep();
+                int r = onedrive_notice(s, w, status.empty());
+                if (r == 1) onedrive_keep();
+                else if (r == 2) choose_data_folder();
             }
             if (const char *f = getenv("LARECOMP_LAUNCHER_FONT")) {  // (test) which typeface this window shows
                 const char *b = strrchr(f, '/');
