@@ -19,6 +19,7 @@
 #include "renderer.h"
 #include "pace.h"
 #include "texpatch.h"
+#include "tex_hash.h"
 #include "screen_filter.h"
 
 static id<MTLDevice> dev;
@@ -563,15 +564,18 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     bool identified_now = !b->tp;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
     if (identified_now) b->tp = texpatch_marker(t);
     bool restyle = b->tp > 0 && b->tp <= TEXPATCH_RECOLOUR_BASE && b->uploaded && b->tp_gen != texpatch_generation();
+    bool fast = tex_fast_hash();  // (runtime/nvn/tex_hash.h; LARECOMP_TEX_FASTHASH=0: the previous hashes)
     if (!full && !restyle) {
-        uint64_t sh = fnv_sample(mem, total);
+        uint64_t sh = fast ? tex_hash_sample(mem, total) : fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
     }
     extern void slow_note_full_hash(void), slow_note_upload(uint64_t bytes);  // (slowframe.h)
     slow_note_full_hash();
-    uint64_t h = hash_full(mem, total);
+    uint64_t h = fast ? tex_hash_full(mem, total) : hash_full(mem, total);
     b->full_frame = g_frame_counter;
-    b->sample_hash = fnv_sample(mem, total);
+    // (the sample is only compared while the texture isn't dynamic, and a dynamic one stays so: none for those)
+    if (!fast) b->sample_hash = fnv_sample(mem, total);
+    else if (!b->dynamic && !(b->uploaded && h != b->data_hash)) b->sample_hash = tex_hash_sample(mem, total);
     if (b->uploaded && h == b->data_hash && !restyle) return;
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
     // new contents (the game reused the memory for another image, or the data arrived after the first check): which
