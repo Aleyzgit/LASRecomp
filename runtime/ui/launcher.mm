@@ -835,7 +835,8 @@ static void draw_folder_example(float w) {
     const ImU32 body = IM_COL32(24, 28, 27, 255), title = IM_COL32(40, 45, 43, 255), edge = IM_COL32(255, 255, 255, 38),
                 text = IM_COL32(220, 216, 205, 255), dim = IM_COL32(150, 152, 144, 255),
                 gold = IM_COL32(236, 194, 84, 255), gold_tab = IM_COL32(200, 160, 62, 255),
-                paper = IM_COL32(226, 224, 216, 255), fold = IM_COL32(160, 158, 150, 255);
+                paper = IM_COL32(226, 224, 216, 255), fold = IM_COL32(160, 158, 150, 255),
+                select = IM_COL32(32, 84, 176, 255), text_sel = IM_COL32(250, 250, 255, 255);
     dl->AddRectFilled(ImVec2(a.x, a.y + fs * 0.12f), ImVec2(b.x, b.y + fs * 0.22f), IM_COL32(0, 0, 0, 70), r);  // shadow
     dl->AddRectFilled(a, b, body, r);
     dl->AddRectFilled(a, ImVec2(b.x, a.y + bar), title, r, ImDrawFlags_RoundCornersTop);
@@ -853,16 +854,19 @@ static void draw_folder_example(float w) {
     for (int i = 0; i < n; i++) {
         const Item &it = items[i];
         float y = a.y + bar + pad + i * rh, my = y + rh * 0.5f;
-        if (i & 1) dl->AddRectFilled(ImVec2(a.x + 1, y), ImVec2(b.x - 1, y + rh), IM_COL32(255, 255, 255, 9));
+        if (i == 0)  // the folder to choose: selected, as Finder shows it
+            dl->AddRectFilled(ImVec2(a.x + fs * 0.25f, y), ImVec2(b.x - fs * 0.25f, y + rh), select, fs * 0.25f);
+        else if (i & 1) dl->AddRectFilled(ImVec2(a.x + 1, y), ImVec2(b.x - 1, y + rh), IM_COL32(255, 255, 255, 9));
         float x = a.x + fs * 0.5f + it.depth * fs * 1.25f;
         if (it.kind) {  // ▼ opened, ▶ closed
             float u = fs * 0.2f, cx = x + u;
+            ImU32 tc = i == 0 ? text_sel : dim;
             if (it.kind == 1)
                 dl->AddTriangleFilled(ImVec2(cx - u, my - u * 0.6f), ImVec2(cx + u, my - u * 0.6f),
-                                      ImVec2(cx, my + u * 0.75f), dim);
+                                      ImVec2(cx, my + u * 0.75f), tc);
             else
                 dl->AddTriangleFilled(ImVec2(cx - u * 0.6f, my - u), ImVec2(cx - u * 0.6f, my + u),
-                                      ImVec2(cx + u * 0.75f, my), dim);
+                                      ImVec2(cx + u * 0.75f, my), tc);
         }
         x += fs * 0.6f;
         float gx = x, gy = my - g * 0.5f;
@@ -876,7 +880,19 @@ static void draw_folder_example(float w) {
             dl->AddTriangleFilled(ImVec2(rr - c, tp), ImVec2(rr - c, tp + c), ImVec2(rr, tp + c), fold);
         }
         ImVec2 nsz = font->CalcTextSizeA(ts, FLT_MAX, 0, it.name);
-        dl->AddText(font, ts, ImVec2(x + g + fs * 0.4f, my - nsz.y * 0.5f), text, it.name);
+        float nx = x + g + fs * 0.4f;
+        dl->AddText(font, ts, ImVec2(nx, my - nsz.y * 0.5f), i == 0 ? text_sel : text, it.name);
+        if (i == 0) {  // an arrow pointing at it, and what to do, on the row's right (smaller when narrow)
+            const char *hint = "Choose this one";
+            float room = b.x - fs * 0.6f - (nx + nsz.x + fs * 0.5f), aw = fs * 1.1f, gap = fs * 0.3f;
+            float hs = ts, hw = font->CalcTextSizeA(hs, FLT_MAX, 0, hint).x;
+            if (aw + gap + hw > room)
+                hs *= fmaxf(0.7f, (room - aw - gap) / hw), hw = font->CalcTextSizeA(hs, FLT_MAX, 0, hint).x;
+            float hx = b.x - fs * 0.6f - hw, ax = hx - gap - aw, th = fs * 0.09f, hd = fs * 0.26f;
+            dl->AddLine(ImVec2(ax + th, my), ImVec2(ax + aw, my), gold, th);
+            dl->AddTriangleFilled(ImVec2(ax - th, my), ImVec2(ax + hd, my - hd), ImVec2(ax + hd, my + hd), gold);
+            dl->AddText(font, hs, ImVec2(hx, my - font->CalcTextSizeA(hs, FLT_MAX, 0, hint).y * 0.5f), gold, hint);
+        }
     }
     ImGui::Dummy(ImVec2(w, h));
 }
@@ -1983,19 +1999,20 @@ extern "C" void launcher_run(const char *root) {
                     else if (r == 2) choose_data_folder();
                 }
                 if (ready) opt_end();
-                else {  // before the setup: under the description, what the folder to choose looks like (at the bottom)
+                else {  // before the setup: under the description, what the folder to choose looks like and the hint
+                        // (at the bottom)
                     opt_split();
                     opt_desc_text();
                     float fs = ImGui::GetFontSize(), ew = fminf(ImGui::GetContentRegionAvail().x, fs * 15);
-                    float eh = ImGui::CalcTextSize(PICK_FOLDER_HINT, NULL, false, ew).y + 8 * sc +
-                               folder_example_height() + fs * 0.3f;  // (+ its shadow)
+                    float eh = folder_example_height() + fs * 0.3f + ImGui::GetStyle().ItemSpacing.y * 2 +
+                               ImGui::CalcTextSize(PICK_FOLDER_HINT, NULL, false, ew).y;
                     float bottom = ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - eh;
                     ImGui::SetCursorPosY(fmaxf(ImGui::GetCursorPosY() + 20 * sc, bottom));
+                    draw_folder_example(ew);
+                    ImGui::Dummy(ImVec2(0, fs * 0.3f));  // (its shadow)
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ew);
                     ImGui::TextColored(ImVec4(0.55f, 0.58f, 0.52f, 1), "%s", PICK_FOLDER_HINT);
                     ImGui::PopTextWrapPos();
-                    ImGui::Dummy(ImVec2(0, 4 * sc));
-                    draw_folder_example(ew);
                     opt_split_end();
                 }
                 if (g_confirm_delete && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
