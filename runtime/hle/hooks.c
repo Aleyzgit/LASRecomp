@@ -96,6 +96,23 @@ int rt_hook(Cpu *c, uint64_t site) {
     case GA_FRAME_JOB_FINISH_SITE:  // FRAME_JOB_FINISH_SITE - ldr x8, [x0]: a frame job's finish (debug delay)
         rt_frame_job_finish(c->x[0]);
         return 0;
+    case GA_SHAPE_SIM_SITES_0:  // SHAPE_SIM_SITES - a PhysX shape change: the shape's simulation object (#314)
+    case GA_SHAPE_SIM_SITES_1: {
+        if (c->x[0] != 1) return 0;  // (PhysX's getSimForShape: 1 = the simulation holds no object for the shape)
+        static int logged;
+        if (logged++ < 8) {  // the shape, and who changed it (frame records from x29)
+            char where[160] = "";
+            int n = 0;
+            uint64_t fp = c->x[29];
+            for (int i = 0; i < 6 && n < (int)sizeof where - 24 && fp >= c->sp && fp < c->sp + 0x100000 && !(fp & 7); i++) {
+                n += snprintf(where + n, sizeof where - n, " %#llx", (unsigned long long)LD64(fp + 8));
+                fp = LD64(fp);
+            }
+            LOG("[physx] shape %#llx changed (flags %#x) without a simulation object: update skipped (issue #314), from%s\n",
+                (unsigned long long)c->x[1], site == GA_SHAPE_SIM_SITES_0 ? (unsigned)LD32(c->x[19]) : 0u, where);
+        }
+        return 2;
+    }
     }
     return 0;
 }

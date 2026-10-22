@@ -863,6 +863,15 @@ SHADOW_LINK_BGM_SITE = A.SHADOW_LINK_BGM_SITE
 ACTOR_EVENT_SITE = A.ACTOR_EVENT_SITE
 
 
+# Issue #314 (Hot Head, Turtle Rock: crash reading 0x11 in main+0x142afb0 when the Magic Rod's fire hit him): a PhysX
+# shape change on an actor in the scene (main+0x1408db0, RigidCore::onShapeChange - the geometry / pose / filter /
+# flags / offsets a shape setter just changed, flags at [x2]) and its sibling main+0x1408d60 look up the actor's
+# simulation object for that shape with main+0x14090a0 (RigidSim::getSimForShape). PhysX hands back the address 1
+# when the shape has none ("should never happen": it is only asserted in PhysX's own debug builds) and the update then
+# reads through it. The hooks right after the lookup skip the update for a shape the simulation doesn't hold (the
+# functions' own return): its simulation object, if one is made later, starts from the shape's current state.
+SHAPE_SIM_SITES = [A.SHAPE_SIM_SITES_0, A.SHAPE_SIM_SITES_1]
+
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
 # what to do - 0 run it, 1 the hook did it all, 2.. jump to the site's first.. target (each a label in its function).
 # The game code they generate never changes when a hook's behaviour does: only a new site needs the game code
@@ -891,4 +900,6 @@ HOOKS = {
     FRAME_JOB_KICKOFF_SITES[3]: (0x910782b3, (), 'add x19, x21, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_FINISH_SITE: (0xf9400008, (), 'ldr x8, [x0]: frame job finish (debug delay)'),
     OWNER_CALL_NOTIFY_SITE: (0x9100e2a0, (), 'add x0, x21, #0x38: owner-thread call done, the caller is waiting first'),
+    SHAPE_SIM_SITES[0]: (0xaa0003f4, (A.SHAPE_SIM_SKIP_0,), 'mov x20, x0: a PhysX shape change, no update without its simulation object (#314)'),
+    SHAPE_SIM_SITES[1]: (0xaa0003e1, (A.SHAPE_SIM_SKIP_1,), 'mov x1, x0: a PhysX shape change, no update without its simulation object (#314)'),
 }
