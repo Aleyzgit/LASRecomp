@@ -17,7 +17,9 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/ucontext.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -222,6 +224,65 @@ static void require_cpu(void) {
 #else
 static void require_cpu(void) {}
 #endif
+
+// "key=value" / "key\t: value" lines: the value of the first line starting with key (quotes and spaces trimmed)
+static bool kv_line(const char *line, const char *key, char sep, char *out, size_t n) {
+    size_t k = strlen(key);
+    if (strncmp(line, key, k)) return false;
+    const char *p = line + k;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p++ != sep) return false;
+    while (*p == ' ' || *p == '\t' || *p == '"') p++;
+    snprintf(out, n, "%s", p);
+    for (size_t l = strlen(out); l && (out[l - 1] == '\n' || out[l - 1] == '"' || out[l - 1] == ' '); l--) out[l - 1] = 0;
+    return true;
+}
+
+void plat_system_info(PlatSysInfo *si) {
+    // the OS: /etc/os-release (the host's, also inside an AppImage; SteamOS: NAME="SteamOS", VERSION_ID), the kernel
+    char pretty[96] = "", name[64] = "", ver[48] = "", line[512];
+    FILE *f = fopen("/etc/os-release", "r");
+    if (!f) f = fopen("/usr/lib/os-release", "r");
+    for (; f && fgets(line, sizeof line, f);) {
+        if (!pretty[0]) kv_line(line, "PRETTY_NAME", '=', pretty, sizeof pretty);
+        if (!name[0]) kv_line(line, "NAME", '=', name, sizeof name);
+        if (!ver[0]) kv_line(line, "VERSION_ID", '=', ver, sizeof ver);
+    }
+    if (f) fclose(f);
+    char os[160];
+    if (pretty[0] && (!ver[0] || strstr(pretty, ver))) snprintf(os, sizeof os, "%s", pretty);
+    else if (pretty[0] || name[0]) snprintf(os, sizeof os, "%s %s", pretty[0] ? pretty : name, ver);
+    else snprintf(os, sizeof os, "Linux");
+    struct utsname u;
+    if (uname(&u) == 0) snprintf(si->os, sizeof si->os, "%.80s (%s, kernel %.32s)", os, u.machine, u.release);
+    else snprintf(si->os, sizeof si->os, "%.80s", os);
+    // the CPU: x86 "model name"; ARM boards often have none - the device tree's model then (e.g. "Raspberry Pi 5")
+    // cores: distinct (physical id, core id) pairs; threads: the processors online
+    si->threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    enum { MAXC = 1024 };
+    static int seen[MAXC];
+    int nseen = 0, phys = 0;
+    f = fopen("/proc/cpuinfo", "r");
+    for (char v[128]; f && fgets(line, sizeof line, f);) {
+        if (!si->cpu[0] && kv_line(line, "model name", ':', si->cpu, sizeof si->cpu)) continue;
+        if (kv_line(line, "physical id", ':', v, sizeof v)) phys = atoi(v);
+        else if (kv_line(line, "core id", ':', v, sizeof v)) {
+            int key = phys * 4096 + atoi(v), i = 0;
+            while (i < nseen && seen[i] != key) i++;
+            if (i == nseen && nseen < MAXC) seen[nseen++] = key;
+        }
+    }
+    if (f) fclose(f);
+    si->cores = nseen ? nseen : si->threads;
+    if (!si->cpu[0] && (f = fopen("/proc/device-tree/model", "r"))) {
+        size_t n = fread(si->cpu, 1, sizeof si->cpu - 1, f);
+        si->cpu[n] = 0;  // (NUL-terminated in the file already)
+        fclose(f);
+    }
+    struct sysinfo s;
+    if (sysinfo(&s) == 0) si->ram = (uint64_t)s.totalram * s.mem_unit;
+    si->package = getenv("APPIMAGE") ? "AppImage" : NULL;  // (set by the AppImage runtime; its value is a path: not logged)
+}
 
 void plat_init(void) {
     log_to_file_without_terminal();

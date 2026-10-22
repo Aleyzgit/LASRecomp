@@ -16,7 +16,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <sys/ucontext.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -42,6 +44,35 @@ static void log_to_file_in_app(void) {
     else snprintf(dir, sizeof dir, "%s/Library/Application Support/com.peiikai.lasrecomp", home && *home ? home : "/tmp");
     mkdir(dir, 0755);
     session_log_open(dir, g_log_path, sizeof g_log_path);
+}
+
+static void sysctl_str(const char *name, char *out, size_t n) {
+    size_t len = n;
+    if (sysctlbyname(name, out, &len, NULL, 0) != 0) out[0] = 0;
+    else out[n - 1] = 0;
+}
+static int64_t sysctl_int(const char *name) {
+    int64_t v = 0;  // (hw.memsize is 64-bit, the counts 32-bit: little-endian, so either fits)
+    size_t len = sizeof v;
+    return sysctlbyname(name, &v, &len, NULL, 0) == 0 ? v : 0;
+}
+
+void plat_system_info(PlatSysInfo *si) {
+    char ver[32], machine[32] = "";
+    sysctl_str("kern.osproductversion", ver, sizeof ver);
+    struct utsname u;
+    if (uname(&u) == 0) snprintf(machine, sizeof machine, "%s", u.machine);
+    bool rosetta = sysctl_int("sysctl.proc_translated") == 1;
+    snprintf(si->os, sizeof si->os, "macOS %s (%s%s)", ver[0] ? ver : "?", machine, rosetta ? ", Rosetta" : "");
+    sysctl_str("machdep.cpu.brand_string", si->cpu, sizeof si->cpu);
+    si->cores = (int)sysctl_int("hw.physicalcpu");
+    si->threads = (int)sysctl_int("hw.logicalcpu");
+    int64_t p = sysctl_int("hw.perflevel0.physicalcpu"), e = sysctl_int("hw.perflevel1.physicalcpu");
+    if (p && e) snprintf(si->cores_detail, sizeof si->cores_detail, "%dP + %dE", (int)p, (int)e);
+    si->ram = (uint64_t)sysctl_int("hw.memsize");
+    char exe[1024];
+    uint32_t sz = sizeof exe;
+    si->package = _NSGetExecutablePath(exe, &sz) == 0 && strstr(exe, ".app/Contents/MacOS/") ? ".app" : NULL;
 }
 
 void plat_init(void) {

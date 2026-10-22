@@ -295,6 +295,7 @@ static void *pipeline_cache_saver(void *a) {  // every 3 minutes, when it grew
     (void)a;
     for (;;) {
         SDL_Delay(180000);
+        if (rq_stopping()) break;  // (quitting: backend_quit saves it)
         vk_pipeline_cache_save();
     }
     return NULL;
@@ -585,6 +586,7 @@ static Frame cur_frame;
 // nothing to draw into (minimised window).
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
+    if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
@@ -872,8 +874,8 @@ static void present_hooks(void) {
     pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
-    static long slow_ms = -1;
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    static long slow_ms = -1;  // LARECOMP_SIM_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
+    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SIM_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SIM_SLOW_FRAME_MS")) : 0;
     static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
     if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
     if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) SDL_Delay((Uint32)slow_ms);
@@ -912,18 +914,30 @@ void backend_present(NvnTexture *t) {
 void vk_exec_init(void);
 void vk_shaders_init(void);
 
-// exit() from any thread: let the GPU finish, keep the pipeline cache, then end the process without the DLL
-// teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
-static void quick_exit_handler(void) {
+// Quitting, before exit() (the window closed; also from exit() itself, quick_exit_handler): the render thread stops
+// between items, so no image is acquired or presented any more; then the GPU finishes and the pipeline cache is
+// kept. All of it before exit() runs the atexit handlers and the libraries' destructors: a Vulkan layer loaded with
+// the instance (the Steam overlay on the Steam Deck, #40) tears its swapchain state down there, and a present from
+// the render thread after that crashed in vkQueuePresentKHR. The swapchain, surface and window are never destroyed
+// explicitly: the process ends with them.
+void backend_quit(void) {
+    static atomic_flag once = ATOMIC_FLAG_INIT;
+    if (atomic_flag_test_and_set(&once)) return;
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
-    if (trace) LOG("[vk] exit: waiting for the GPU\n");
-    if (g_vk.dev) {
-        vkDeviceWaitIdle(g_vk.dev);
-        if (trace) LOG("[vk] exit: saving the pipeline cache\n");
-        vk_pipeline_cache_save();
-    }
-    if (trace) LOG("[vk] exit: terminating\n");
+    if (trace) LOG("[vk] quit: stopping the render thread\n");
+    rq_stop();
+    if (!g_vk.dev) return;
+    if (trace) LOG("[vk] quit: waiting for the GPU\n");
+    vkDeviceWaitIdle(g_vk.dev);
+    if (trace) LOG("[vk] quit: saving the pipeline cache\n");
+    vk_pipeline_cache_save();
+}
+
+// exit() from any thread: backend_quit (when the window close didn't already), then end the process without the DLL
+// teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
+static void quick_exit_handler(void) {
+    backend_quit();
     fflush(stdout);
     fflush(stderr);
 #if defined(_WIN32) || defined(__linux__)
@@ -983,6 +997,7 @@ void backend_reset(void) {
 }
 void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
 void backend_clear_window(void) {
+    if (rq_stopping()) return;
     rq_drain();
     static const float black[4] = {0, 0, 0, 1};
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
@@ -1000,6 +1015,7 @@ int ui_run(void) {
                 input_rumble_stop();
                 input_led_stop();
                 LOG("window closed\n");
+                backend_quit();  // (before exit(): see there)
                 exit(0);
             }
             extern bool input_user_blocked(const SDL_Event *e);
