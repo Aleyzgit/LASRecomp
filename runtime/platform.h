@@ -77,6 +77,8 @@ int plat_proc_wait(PlatProc p, bool block);  // exit code, or -1 while still run
 #define PLAT_PROC_SIGNALED 256               // + N: ended by signal N instead of exiting (not on Windows)
 void plat_proc_kill(PlatProc p);             // end it and what it started (then it's gone: no wait)
 bool plat_remove_tree(const char *dir);      // rm -rf
+// dir is synced by OneDrive (Windows: under a OneDrive folder, or a cloud file); false on other systems
+bool plat_onedrive_synced(const char *dir);
 #ifdef _WIN32
 #define PLAT_EXE_SUFFIX ".exe"
 #define PLAT_VENV_PYTHON "venv/Scripts/python.exe"  // relative to the venv's parent
