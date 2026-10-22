@@ -1627,6 +1627,63 @@ static MTLTextureType mtl_type_for(int t) {
     }
 }
 
+// Shadow slots (depth2d, sample_compare) need a depth texture: with nothing usable bound they get a 1x1 Depth32Float
+// cleared to 1.0 (lit under the usual less / less-equal compare, as an empty shadow map) instead of the RGBA8 dummy,
+// which compared as 0 (in shadow) and is not a depth texture. The Vulkan side does the same (exec.c shadow_slot_check).
+static id<MTLTexture> dummy_depth_texture(int type) {
+    static id<MTLTexture> t[10];
+    if (type < 0 || type >= 10) type = TEXTYPE_2D;
+    if (type != TEXTYPE_2D && type != TEXTYPE_2D_ARRAY && type != TEXTYPE_CUBE && type != TEXTYPE_CUBE_ARRAY)
+        return dummy_texture(type);  // (3D has no shadow form; 1D depth textures don't exist)
+    if (!t[type]) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+        d.pixelFormat = MTLPixelFormatDepth32Float;
+        d.width = d.height = 1;
+        d.textureType = mtl_type_for(type);
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        id<MTLTexture> tex = [dev newTextureWithDescriptor:d];
+        if (!tex) return dummy_texture(type);
+        NSUInteger slices = type == TEXTYPE_CUBE || type == TEXTYPE_CUBE_ARRAY ? 6 : 1;
+        id<MTLCommandBuffer> cb = [renderer_queue() commandBuffer];  // (committed now: runs before the current one)
+        for (NSUInteger s = 0; s < slices; s++) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.depthAttachment.texture = tex;
+            rp.depthAttachment.slice = s;
+            rp.depthAttachment.loadAction = MTLLoadActionClear;
+            rp.depthAttachment.storeAction = MTLStoreActionStore;
+            rp.depthAttachment.clearDepth = 1.0;
+            [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+        }
+        [cb commit];
+        t[type] = tex;
+    }
+    return t[type];
+}
+
+static bool mtl_depth_comparable(id<MTLTexture> t) {
+    switch (t.pixelFormat) {
+    case MTLPixelFormatDepth16Unorm: case MTLPixelFormatDepth32Float: case MTLPixelFormatDepth32Float_Stencil8:
+        return true;  // (depth targets are never D24S8 here)
+    default: return false;
+    }
+}
+
+// The texture for a shadow slot: tex if it is a comparable depth texture, else the depth dummy (logged once per cause).
+static id<MTLTexture> shadow_slot_texture(id<MTLTexture> tex, const ShaderTexture *st_, int i, uint64_t h) {
+    if (tex && mtl_depth_comparable(tex) && tex.textureType != MTLTextureType2DMultisample) return tex;
+    static bool logged[3];
+    int why = !h ? 0 : !tex ? 1 : 2;
+    if (!logged[why]) {
+        logged[why] = true;
+        static const char *names[3] = {"handle 0 (nothing bound)", "no texture (unregistered / finalized / type mismatch)",
+                                       "not a comparable depth texture"};
+        LOG("[mtl] shadow slot t%d (type %d): %s - handle %#llx, pixel format %lu: 1x1 depth dummy instead (once per cause)\n",
+            i, st_->type, names[why], (unsigned long long)h, tex ? (unsigned long)tex.pixelFormat : 0ul);
+    }
+    return dummy_depth_texture(st_->type);
+}
+
 // NVN texture/view component swizzle (same enum values as MTLTextureSwizzle), applied as a view.
 static id<MTLTexture> apply_swizzle(id<MTLTexture> tex, NvnTexture *t, const NvnTextureView *v, bool has_view) {
     const uint8_t *sw = (has_view && (v->setmask & 8)) ? v->swizzle : t->swizzle;
@@ -1895,6 +1952,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
         }
         NvnSamplerDesc *sd = h && st.spool && tsc < (uint32_t)st.spool->count ? &((NvnSamplerDesc *)st.spool->entries)[tsc] : NULL;
         if (sd) smp = sampler_for(sd);
+        if (st_->shadow) tex = shadow_slot_texture(tex, st_, i, h);
         if (!tex) tex = dummy_texture(st_->type);
         if (!smp) smp = default_sampler();
         if (g_debug_frame && tex.textureType == MTLTextureType2D && stage == 1) {
@@ -2154,6 +2212,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         NvnSamplerDesc *sd = h && st.spool && tsc < (uint32_t)st.spool->count ? &((NvnSamplerDesc *)st.spool->entries)[tsc] : NULL;
         if (sd) smp = sampler_for(sd);
         if (!smp) smp = default_sampler();
+        if (st_->shadow) tex = shadow_slot_texture(tex, st_, i, h);
         [ce setTexture:tex ? tex : dummy_texture(st_->type) atIndex:i];
         if (cmapped) { msmp[i] = smp; mdesc[i] = sd; }
         else [ce setSamplerState:smp atIndex:i];
