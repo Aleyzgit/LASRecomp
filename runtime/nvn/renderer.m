@@ -493,6 +493,7 @@ uint64_t renderer_submit_seq(void) {
     pthread_mutex_unlock(&cb_lock);
     return q;
 }
+uint64_t renderer_issued_seq(void) { return renderer_submit_seq(); }  // (rqueue.h: committed here is submitted)
 
 // Sequence number a fence placed now belongs to: the pending (uncommitted) work's submission, else the last one.
 uint64_t renderer_fence_seq(void) {

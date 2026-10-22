@@ -22,6 +22,7 @@
 #else
 #include "imgui_impl_vulkan.h"
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
+extern "C" void rec_drain(void);             // runtime/nvn/vulkan/record.c
 #endif
 
 extern "C" {
@@ -865,6 +866,14 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
     g_font = f0, g_font_big = f1;
 }
 
+// Whether menu_render draws anything: the menu, the keyboard, an overlay (FPS, inventory, tracker, chaos, race, a
+// pickup card). Asked by the Vulkan backend before menu_render, which records into the window image's command buffer
+// itself: its recorder thread (runtime/nvn/vulkan/record.c) has to be caught up first, and only when there is something
+// to draw.
+static bool render_needed(bool open, bool kbd, bool inv, bool trk, bool trkd, bool chaos, bool race, bool flyin) {
+    return open || kbd || g_settings.show_fps || inv || trk || trkd || chaos || race || flyin;
+}
+
 #ifdef __APPLE__
 void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> target) {
     const double tw = target.width, th = target.height;
@@ -880,7 +889,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool kbd = g_kbd.load() == 1;
     bool race = race_overlay_wanted();  // (run timer, race seed hash: race_overlay.mm)
     bool flyin = pickup_flyin_wanted() && !open;  // (a silent pickup's card)
-    if (!open && !kbd && !g_settings.show_fps && !inv && !trk && !trkd && !chaos && !race && !flyin) {
+    if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin)) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         g_ov_same = 0;  // (shown again: built afresh first)
         return;
@@ -925,6 +934,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
             ImGui_ImplMetal_RenderDrawData(dd, cb, enc);
             [enc endEncoding];
 #else
+            rec_drain();  // (ImGui records into cmd itself: the recorder thread idle first, as below)
             ImGui_ImplVulkan_RenderDrawData(dd, (VkCommandBuffer)cmd);
 #endif
             return;
@@ -1032,6 +1042,13 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
     [enc endEncoding];
 #else
+    // ImGui records into cmd itself: the recorder thread (record.c) must have recorded everything queued so far, and
+    // be idle, first (one thread at a time on a command buffer and its pool). Drained here, right before, rather than
+    // on an earlier guess in device.c of whether anything is drawn: that read the overlays' state a moment before the
+    // check at the top of this function read it again, so an overlay turning on in between (game_in_play() at the
+    // first frame of play, a pickup card) recorded into cmd while the recorder was still recording it. Uploads
+    // queued above (overlay icons) are recorded by the drain too.
+    rec_drain();
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
 #endif
 }
