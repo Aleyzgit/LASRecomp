@@ -178,7 +178,8 @@ static uint32_t tex_wh[2][64][2];       // per bound texture slot: guest size
 static int draw_bottle;                 // a fragment texture is the bottle's item icon (1) / model map (2): Escape Bottle
 static int draw_heart;                  // ... a HUD / file select heart's: heart colour (Cosmetics tab)
 static bool draw_item_cursor;           // a fragment texture is the Items page's cursor brackets
-static int draw_recolour;               // ... a Cosmetics recolour texture: its class (runtime/nvn/recolour.c)
+static int draw_recolour[2];            // ... Cosmetics recolour textures: their classes (runtime/nvn/recolour.c)
+static char draw_recolour_names[512];   // ... their names (LARECOMP_LOG_RECOLOUR_AT, test)
 #define RSCALE_BUFFER_INDEX 18
 
 static int debug_pass_no;
@@ -1857,7 +1858,10 @@ static int sampler_slots(int n, __strong id<MTLSamplerState> *smp, NvnSamplerDes
 }
 
 static void bind_textures(int stage, ShaderInfo *si) {
-    if (stage == 1) draw_bottle = draw_heart = draw_recolour = 0, draw_item_cursor = false;
+    if (stage == 1) {
+        draw_bottle = draw_heart = draw_recolour[0] = draw_recolour[1] = 0, draw_item_cursor = false;
+        draw_recolour_names[0] = 0;
+    }
     bool mapped = si->ntex > MSL_MAX_SAMPLERS;  // (fragment only: the translator refuses such vertex shaders)
     __strong id<MTLSamplerState> msmp[64];
     NvnSamplerDesc *mdesc[64];
@@ -1892,7 +1896,12 @@ static void bind_textures(int stage, ShaderInfo *si) {
                     }
                 }
                 if (!draw_heart) draw_heart = texpatch_heart_kind(id);
-                draw_recolour = recolour_pick(draw_recolour, recolour_class_of(id));
+                recolour_add(draw_recolour, recolour_class_of(id));
+                if (recolour_name(id)) {
+                    size_t n = strlen(draw_recolour_names);
+                    snprintf(draw_recolour_names + n, sizeof draw_recolour_names - n, " t%d=%s(%d)", i, recolour_name(id),
+                             recolour_class_of(id));
+                }
                 draw_item_cursor |= texpatch_is_item_cursor(id);
             }
             if (e->tex && i < 64) {
@@ -2909,9 +2918,35 @@ static void draw(CmdRec *r, bool indexed) {
                 }
         }
     }
+    {  // LARECOMP_LOG_RECOLOUR_AT=<frame>[,<frame>...] (test): each draw of those frames sampling a recognised
+       // texture (LARECOMP_RECOLOUR_NAMES=1: any of the overworld's), and the class it is tinted with
+        static const char *at;
+        static int init;
+        if (!init) init = 1, at = getenv("LARECOMP_LOG_RECOLOUR_AT");
+        extern uint64_t renderer_exec_frame(void);
+        if (at && draw_recolour_names[0]) {
+            long f = (long)renderer_exec_frame();
+            for (const char *p = at; p && *p; p = strchr(p, ','), p = p ? p + 1 : NULL)
+                if (atol(p) == f) {
+                    LOG("[recolour-draw] f%ld class %d/%d tint %d:%s\n", f, draw_recolour[0], draw_recolour[1], pr->fi->uses_tint,
+                        draw_recolour_names);
+                    break;
+                }
+        }
+    }
     if (pr->fi->uses_tint) {  // per-draw highlight tint (golden unchecked pots, runtime/hle/pot_glow.c)
-        float tint[8] = {0};
-        if (draw_recolour) recolour_tint(draw_recolour, tint);  // (Cosmetics; the highlights below win)
+        float tint[RECOLOUR_TINT_FLOATS] = {0};
+        recolour_tint_draw(draw_recolour, tint);  // (Cosmetics; the highlights below win)
+        {   // LARECOMP_RECOLOUR_FLASH=<text> (test, Metal): draws sampling a recognised texture whose name has <text>
+            // (LARECOMP_RECOLOUR_NAMES=1: any overworld map) turn magenta - which objects a texture is on
+            static const char *fl;
+            static int init;
+            if (!init) init = 1, fl = getenv("LARECOMP_RECOLOUR_FLASH");
+            if (fl && strstr(draw_recolour_names, fl)) {
+                memset(tint, 0, sizeof tint);
+                recolour_pack(tint, 0.83f, 4.0f, 1.0f, 0.0f, 0.5f, 0.0f, 0.0f);
+            }
+        }
         extern bool pot_tint(const float *m, float tint[8], uint64_t mesh);
         extern bool pot_glow_active(void);
         if (model_ubo && st.ubuf[0][2].addr && st.ubuf[0][2].size >= 48 && pot_glow_active())
@@ -2963,10 +2998,10 @@ static void draw(CmdRec *r, bool indexed) {
     if (!nruns) { run_at[0] = 0; run_n[0] = inst_all; nruns = 1; run_gold[0] = false; }
     for (int ri = 0; ri < nruns; ri++) {
     if (nruns > 1 || run_gold[0]) {
-        float tint[8] = {0};
+        float tint[RECOLOUR_TINT_FLOATS] = {0};
         extern void pot_gold_tint(float tint[8]);
         if (run_gold[ri]) pot_gold_tint(tint);
-        else if (draw_recolour) recolour_tint(draw_recolour, tint);
+        else recolour_tint_draw(draw_recolour, tint);
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
     }
     // draw
