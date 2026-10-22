@@ -897,8 +897,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
-        // ImGui records into cb itself: the recorder must have recorded everything before it (and records what follows)
-        if (menu_render_needed()) rec_drain();
+        // (ImGui records into cb itself: menu_render drains the recorder right before, when it draws anything)
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         static long win_shot = -1;
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;

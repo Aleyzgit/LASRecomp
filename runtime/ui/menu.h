@@ -26,8 +26,6 @@ void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> targ
 // Render thread, inside the window image's rendering (Vulkan command buffer cmd).
 void menu_render(void *cmd, uint32_t target_w, uint32_t target_h);
 #endif
-// Render thread: menu_render would draw something now (the Vulkan backend waits for its recorder thread first)
-bool menu_render_needed(void);
 
 #ifdef __cplusplus
 }
