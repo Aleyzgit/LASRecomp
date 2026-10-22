@@ -74,7 +74,7 @@ jobs:
         run: DEPS="$HOME/sdl3" python3 tools/test_data_move.py
       - name: Dynamic resolution controller (simulated GPU)
         run: python3 tools/test_dynres.py
-      - name: Frame pacing (simulated frames: hitches, slow machines)
+      - name: Frame pacing (simulated frames, hitches and slow machines)
         run: python3 tools/test_pace.py
       - name: Controller light colours
         run: |
@@ -148,7 +148,7 @@ jobs:
         run: python3 tools/test_data_move.py
       - name: Dynamic resolution controller (simulated GPU)
         run: python3 tools/test_dynres.py
-      - name: Frame pacing (simulated frames: hitches, slow machines)
+      - name: Frame pacing (simulated frames, hitches and slow machines)
         run: python3 tools/test_pace.py
       - name: Controller light colours
         run: |
