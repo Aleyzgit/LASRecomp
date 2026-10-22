@@ -1378,6 +1378,51 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             deadline = !getenv("LARECOMP_PRESENT_DEADLINE") || atoi(getenv("LARECOMP_PRESENT_DEADLINE"));
             LOG("[metal] presents %s\n", deadline ? "carry a one-frame deadline (GPU clock)" : "without a deadline");
         }
+        // (debug) LARECOMP_ASYNC_SHOTS=<from>,<every>,<count>: the window image of those frames -> build/aframes/, copied
+        // on the GPU inside this command buffer and encoded to PNG on a background thread once it has completed: no CPU
+        // wait, so the frames show what overlapping CPU / GPU work really produced (a waited shot hides it)
+        {
+            static long af_from = -2, af_every, af_count;
+            if (af_from == -2) {
+                const char *e = getenv("LARECOMP_ASYNC_SHOTS");
+                af_from = -1;
+                if (e && sscanf(e, "%ld,%ld,%ld", &af_from, &af_every, &af_count) == 3) mkdir("build/aframes", 0755);
+                else af_from = -1;
+            }
+            if (af_from >= 0 && (long)frame >= af_from && af_every > 0 && ((long)frame - af_from) % af_every == 0 && ((long)frame - af_from) / af_every < af_count) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:drawable.texture.pixelFormat
+                                             width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
+                td.usage = MTLTextureUsageShaderRead;
+                td.storageMode = MTLStorageModeShared;
+                id<MTLTexture> at = [dev newTextureWithDescriptor:td];
+                id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+                [bl copyFromTexture:drawable.texture toTexture:at];
+                [bl endEncoding];
+                uint64_t fno = frame;
+                static dispatch_queue_t bg;
+                if (!bg) bg = dispatch_queue_create("larecomp.aframes", DISPATCH_QUEUE_SERIAL);
+                [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                    (void)done;
+                    dispatch_async(bg, ^{
+                        NSUInteger w = at.width, h = at.height;
+                        uint8_t *px = malloc(w * h * 4);
+                        [at getBytes:px bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+                        bool bgra = at.pixelFormat == MTLPixelFormatBGRA8Unorm || at.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+                        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+                        CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, w * 4, cs,
+                            bgra ? (kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+                        CGImageRef img = CGBitmapContextCreateImage(ctx);
+                        char path[256];
+                        snprintf(path, sizeof path, "build/aframes/frame_%05llu.png", (unsigned long long)fno);
+                        CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
+                        CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
+                        if (dest) { CGImageDestinationAddImage(dest, img, NULL); CGImageDestinationFinalize(dest); CFRelease(dest); }
+                        CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+                        free(px);
+                    });
+                }];
+            }
+        }
         if (deadline) [cb presentDrawable:drawable atTime:CACurrentMediaTime() + 1.0 / 60.0];
         else [cb presentDrawable:drawable];
         [cb commit];

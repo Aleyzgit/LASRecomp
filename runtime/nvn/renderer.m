@@ -1096,9 +1096,62 @@ static uint64_t ring_alloc(const void *data, uint64_t size) {
 
 static void ring_reset(void) { ring_off = 0; }
 
-// Bind guest memory [addr, addr+size) as a buffer: zero-copy inside the heap, copied otherwise.
+// (debug) LARECOMP_LOG_BINDS=1: guest memory the GPU reads in place, per frame (bytes bound; distinct ranges once),
+// and the ranges of the previous frame whose contents the game rewrote by the time this frame is translated: with
+// the frame fence deferred (overlap) the GPU may still read them - the racing data.
+static uint64_t range_hash(uint64_t addr, uint64_t size) {
+    const uint64_t *w = (const uint64_t *)(uintptr_t)addr;
+    uint64_t h = 1469598103934665603ull, n = size / 8;
+    for (uint64_t i = 0; i < n; i++) h = (h ^ w[i]) * 1099511628211ull;
+    return h;
+}
+static void bind_note(int kind, uint64_t addr, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = ENV("LARECOMP_LOG_BINDS") != NULL;
+    if (!on) return;
+    extern uint64_t renderer_present_count(void);
+    extern int nvn_pool_flags_at(uint64_t addr);
+    uint64_t g_cur_fs_hash = 0; (void)g_cur_fs_hash;
+    enum { REC = 8192 };
+    static struct { uint64_t addr, size, hash, fs; uint8_t kind; } rec[REC];
+    static int nrec;
+    static uint64_t frame, all[5], uniq[5], wr[5];
+    static uint32_t n[5];
+    uint64_t f = renderer_present_count();
+    if (f != frame) {
+        // the previous frame's ranges, rewritten since?
+        uint64_t chg[5] = {0}, chgn[5] = {0};
+        int shown = 0;
+        for (int i = 0; i < nrec; i++) {
+            if (range_hash(rec[i].addr, rec[i].size) == rec[i].hash) continue;
+            chg[rec[i].kind] += rec[i].size; chgn[rec[i].kind]++;
+            if (frame % 120 == 0 && shown++ < 12)
+                LOG("[race] frame %llu %s %llx+%llu pool flags %#x fs %016llx\n", (unsigned long long)frame,
+                    rec[i].kind == 0 ? "vertex" : rec[i].kind == 1 ? "index" : rec[i].kind == 2 ? "storage" : rec[i].kind == 3 ? "compute" : "gmem-ptr", (unsigned long long)rec[i].addr,
+                    (unsigned long long)rec[i].size, nvn_pool_flags_at(rec[i].addr), (unsigned long long)rec[i].fs);
+        }
+        if (frame % 120 == 0 || chgn[0] + chgn[1] + chgn[2] + chgn[3] + chgn[4])
+            LOG("[binds] frame %llu: vertex %llu KB (%llu KB distinct, %u binds), index %llu KB (%llu), storage %llu KB (%llu, %u), compute %llu KB (%llu), gmem-ptr %llu KB (%llu) | in CPU-writable pools: %llu/%llu/%llu/%llu/%llu KB | rewritten since: vertex %llu KB/%llu, index %llu KB/%llu, storage %llu KB/%llu, compute %llu KB/%llu, gmem-ptr %llu KB/%llu\n",
+                (unsigned long long)frame, all[0] >> 10, uniq[0] >> 10, n[0], all[1] >> 10, uniq[1] >> 10, all[2] >> 10, uniq[2] >> 10, n[2], all[3] >> 10, uniq[3] >> 10, all[4] >> 10, uniq[4] >> 10,
+                wr[0] >> 10, wr[1] >> 10, wr[2] >> 10, wr[3] >> 10, wr[4] >> 10,
+                chg[0] >> 10, chgn[0], chg[1] >> 10, chgn[1], chg[2] >> 10, chgn[2], chg[3] >> 10, chgn[3], chg[4] >> 10, chgn[4]);
+        nrec = 0; memset(all, 0, sizeof all); memset(uniq, 0, sizeof uniq); memset(n, 0, sizeof n); memset(wr, 0, sizeof wr);
+        frame = f;
+    }
+    all[kind] += size; n[kind]++;
+    for (int i = 0; i < nrec; i++) if (rec[i].addr == addr && rec[i].size == size) return;
+    if (nrec == REC) return;
+    rec[nrec].addr = addr; rec[nrec].size = size; rec[nrec].kind = (uint8_t)kind; rec[nrec].fs = g_cur_fs_hash;
+    rec[nrec].hash = range_hash(addr, size);
+    nrec++;
+    uniq[kind] += size;
+    int pf = nvn_pool_flags_at(addr);
+    if (pf < 0 || !(pf & 1)) wr[kind] += size;  // (distinct bytes in pools the CPU can write: what a snapshot would copy)
+}
+
 static void bind_guest(id<MTLRenderCommandEncoder> e, bool vertex_stage, uint64_t addr, uint64_t size, int index) {
     if (addr >= HEAP_BASE && addr + size <= HEAP_BASE + HEAP_MAX && (addr & 3) == 0) {
+        bind_note(0, addr, size);
         if (vertex_stage) [e setVertexBuffer:g_guest_buffer offset:addr - HEAP_BASE atIndex:index];
         else [e setFragmentBuffer:g_guest_buffer offset:addr - HEAP_BASE atIndex:index];
         return;
@@ -2058,6 +2111,7 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
                 e[0] = (uint32_t)st.sbuf[stage][i].addr;
                 e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
                 e[2] = (uint32_t)st.sbuf[stage][i].size;
+                if (st.sbuf[stage][i].addr && (si->ssbo_read & (1u << i))) bind_note(2, st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
             }
             uint64_t size = si->cbuf_size[0] > sizeof drv ? sizeof drv : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
             uint64_t off = ring_alloc(drv, size);
@@ -2308,8 +2362,50 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         for (int i = 0; i < 18; i++) if (st.ubuf[5][i].addr) LOG(" %d(%llx,%llu)", i, st.ubuf[5][i].addr, st.ubuf[5][i].size);
         LOG(" gmem %d\n", si->uses_gmem);
     }
+    // (debug) LARECOMP_SSBO_PROBE=1: which storage slots a compute program writes - run synchronously, slot ranges
+    // (and the 64 KB after each) hashed before and after; the slots read by it are noted for the CPU-rewrite check
+    static int probe = -1;
+    if (probe < 0) probe = ENV("LARECOMP_SSBO_PROBE") != NULL;
+    uint64_t before[16][2];
+    if (probe) {
+        for (int i = 0; i < 16; i++) {
+            Range r = st.sbuf[5][i];
+            before[i][0] = r.addr ? range_hash(r.addr, r.size) : 0;
+            before[i][1] = r.addr && r.addr + r.size + 0x10000 <= HEAP_BASE + HEAP_MAX ? range_hash(r.addr + r.size, 0x10000) : 0;
+            if (r.addr) bind_note(3, r.addr, r.size);
+        }
+    }
     [ce dispatchThreadgroups:MTLSizeMake(gx, gy, gz) threadsPerThreadgroup:MTLSizeMake(cp->local[0], cp->local[1], cp->local[2])];
     [ce endEncoding];
+    if (probe) {
+        extern int nvn_pool_flags_at(uint64_t addr);
+        static struct { uint64_t cs; uint32_t read, written, after, flags_in, flags_w; } seen[64];
+        static int nseen;
+        renderer_flush();
+        uint64_t cs = st.program->stages[5].code_addr;
+        int k = -1;
+        for (int i = 0; i < nseen; i++) if (seen[i].cs == cs) k = i;
+        if (k < 0 && nseen < 64) { k = nseen++; memset(&seen[k], 0, sizeof seen[k]); seen[k].cs = cs; }
+        if (k >= 0) {
+            uint32_t written = seen[k].written, after = seen[k].after, read = seen[k].read;
+            for (int i = 0; i < 16; i++) {
+                Range r = st.sbuf[5][i];
+                if (!r.addr) continue;
+                read |= 1u << i;
+                int pf = nvn_pool_flags_at(r.addr);
+                if (range_hash(r.addr, r.size) != before[i][0]) { written |= 1u << i; seen[k].flags_w |= pf > 0 ? pf : 0x80000000; }
+                else seen[k].flags_in |= pf > 0 ? pf : 0x80000000;
+                if (r.addr + r.size + 0x10000 <= HEAP_BASE + HEAP_MAX && range_hash(r.addr + r.size, 0x10000) != before[i][1]) after |= 1u << i;
+            }
+            if (written != seen[k].written || after != seen[k].after || read != seen[k].read) {
+                seen[k].written = written; seen[k].after = after; seen[k].read = read;
+                LOG("[probe] cs %llx (gmem store %d): slots %#x written %#x after %#x; pool flags of unwritten %#x written %#x; e.g.", (unsigned long long)cs,
+                    cp->si->uses_gmem_store, read, written, after, seen[k].flags_in, seen[k].flags_w);
+                for (int i = 0; i < 16; i++) if (st.sbuf[5][i].addr) LOG(" %d=%llx/%llu", i, (unsigned long long)st.sbuf[5][i].addr, (unsigned long long)st.sbuf[5][i].size);
+                LOG("\n");
+            }
+        }
+    }
     CST("done");
     stat_dispatches++;
 }
@@ -2842,6 +2938,27 @@ static void draw(CmdRec *r, bool indexed) {
     // resources
     bind_cbufs(0, pr->vi);
     bind_cbufs(1, pr->fi);
+    // (debug, LARECOMP_LOG_BINDS) shaders loading global memory read through pointers in their uniform buffers: note
+    // 4 KB at each heap pointer found in the bound uniforms, to see whether the game rewrites that data per frame
+    if (pr->vi->uses_gmem || pr->fi->uses_gmem) {
+        static int on = -1;
+        if (on < 0) on = ENV("LARECOMP_LOG_BINDS") != NULL;
+        if (on) {
+            for (int stage = 0; stage < 2; stage++) {
+                ShaderInfo *si = stage ? pr->fi : pr->vi;
+                if (!si->uses_gmem) continue;
+                for (int k = 2; k < 18; k++) {
+                    Range r = st.ubuf[stage][k];
+                    if (!r.addr || !(si->cbuf_mask & (1u << k))) continue;
+                    uint64_t n = (r.size ? r.size : 256) / 8;
+                    if (n > 2048) n = 2048;
+                    const uint64_t *w = (const uint64_t *)(uintptr_t)r.addr;
+                    for (uint64_t i = 0; i < n; i++)
+                        if (w[i] >= HEAP_BASE && w[i] + 4096 <= HEAP_BASE + HEAP_MAX && !(w[i] & 15)) bind_note(4, w[i], 4096);
+                }
+            }
+        }
+    }
     if (pr->vi->uses_gmem) [enc setVertexBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     static id<MTLBuffer> dbgvs;
     bool dbg_this = maxwell_dbg_vs && (const uint8_t *)(uintptr_t)st.program->stages[0].code_addr == maxwell_dbg_vs;
@@ -3059,6 +3176,7 @@ static void draw(CmdRec *r, bool indexed) {
             uint64_t ioff;
             if (iaddr >= HEAP_BASE && iaddr + (uint64_t)count * isz <= HEAP_BASE + HEAP_MAX && (iaddr % isz) == 0) {
                 ib = g_guest_buffer; ioff = iaddr - HEAP_BASE;
+                bind_note(1, iaddr, (uint64_t)count * isz);
             } else {
                 ioff = ring_alloc((void *)(uintptr_t)iaddr, (uint64_t)count * isz); ib = ring;
             }
