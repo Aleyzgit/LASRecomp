@@ -182,6 +182,7 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - **[@gitarre1234rr5](https://github.com/gitarre1234rr5)** - controller rumble: the game's vibration on your controller
   (#104), and a regression test for the kernel's timed condition-variable wait (#88)
 - **[@rkammoun](https://github.com/rkammoun)** - diagnosed and patched the Metal 16-sampler limit behind the black walls in the Ukuku Prairie cave (#215, fixed in #216)
+- **[@NevesHenry](https://github.com/NevesHenry)** - a clear message on Linux when no folder or file window can open (#298), and the controller rumble test building again and running in CI (#299)
 
 Thanks also to everyone who reports issues and tests builds; your logs and screenshots find most of the bugs.
 
