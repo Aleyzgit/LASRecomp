@@ -21,7 +21,7 @@
 #include "../platform.h"
 #include "../rando.h"
 
-// GA_PLAYER_STATUS_PTR: PlayerStatus*: current level name at +0
+// GA(PLAYER_STATUS_PTR): PlayerStatus*: current level name at +0
 
 
 typedef struct { char level[40]; int col, row; char side; int own, partner, still; int tcol, trow; char tside; float depth;
@@ -114,7 +114,7 @@ RT_ON_RESET(doorjump_reset) {
 }
 
 static int is_player_collision(uint64_t p) {
-    return LD64(p) == GA_PLAYER_COLLISION_VT && LD64(p + 8) == p &&
+    return LD64(p) == GA(PLAYER_COLLISION_VT) && LD64(p + 8) == p &&
            !memcmp((const void *)(uintptr_t)(p + 0x18), "PlayerCollision", 16);
 }
 
@@ -133,9 +133,9 @@ static uint64_t find_player(uint64_t frame) {
         g_player_level[0] = 0;
         return 0;
     }
-    uint64_t gm = LD64(GA_GAME_MGR), actor = gm ? LD64(gm + 0x4b8) : 0;  // Link's actor (game_in_play: non-zero)
+    uint64_t gm = LD64(GA(GAME_MGR)), actor = gm ? LD64(gm + 0x4b8) : 0;  // Link's actor (game_in_play: non-zero)
     if (actor != g_player_actor) g_player_actor = actor, g_player_misses = 0;
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     const char *lv = ps ? (const char *)(uintptr_t)ps : "";
     if (strncmp(g_player_level, lv, sizeof g_player_level - 1) || g_player_rescan) {  // new level: look once settled
         g_player_rescan = 0;
@@ -165,7 +165,7 @@ static uint64_t find_player(uint64_t frame) {
     int nr = kernel_data_regions(ra, rs, 64), n = 0;
     for (int r = 0; r < nr; r++)
         for (uint64_t k = 0; k + 0x100 <= rs[r]; k += 16)
-            if (LD64(ra[r] + k) == GA_PLAYER_COLLISION_VT && is_player_collision(ra[r] + k)) {
+            if (LD64(ra[r] + k) == GA(PLAYER_COLLISION_VT) && is_player_collision(ra[r] + k)) {
                 const float *p = (const float *)(uintptr_t)(ra[r] + k + 0x80);
                 if (ENV("LARECOMP_DOORJUMP_LOG"))
                     LOG("[doorjump] candidate %llx (%.2f, %.2f, %.2f) parent %llx\n", (unsigned long long)(ra[r] + k),
@@ -352,7 +352,7 @@ static void place_tick(uint64_t frame) {
         }
     }
     if (at < 0 || done || (long)frame < at) return;
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     const char *lv = ps ? (const char *)(uintptr_t)ps : "";
     if (strncmp(level, lv, sizeof level - 1)) { strlcpy(level, lv, sizeof level); since = frame; return; }
     if (frame - since < 60) return;
@@ -389,10 +389,10 @@ void doorjump_tick(uint64_t frame) {
     }
     if (!g_njumps) return;
     if (ENV("LARECOMP_DOORJUMP_TEST")) {
-        uint64_t ps0 = LD64(GA_PLAYER_STATUS_PTR);
+        uint64_t ps0 = LD64(GA(PLAYER_STATUS_PTR));
         if (ps0) test_tick(frame, find_player(frame), (const char *)(uintptr_t)ps0);
     }
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     const char *lv = ps ? (const char *)(uintptr_t)ps : "";
     int any = 0;
     for (int i = 0; i < g_njumps && !any; i++) any = !strcmp(g_jumps[i].level, lv);
@@ -470,6 +470,8 @@ void doorjump_tick(uint64_t frame) {
         }
         LOG("[doorjump] %s %02d%c %c: (%.2f, %.2f) -> %02d%c %c (%.2f, %.2f)\n", lv, row, 'A' + col, j->side, x, z,
             j->trow, 'A' + j->tcol, j->tside, nx, nz);
+        { extern void pace_hitch(const char *why);  // nvn/pace.c
+          pace_hitch("a door jump"); }
         pos[0] = pos2[0] = nx;
         pos[2] = pos2[2] = nz;
         if (j->height > -90.0f) pos[1] = pos2[1] = j->height + 0.05f;  // onto the landing floor (raised rooms: 1.5)

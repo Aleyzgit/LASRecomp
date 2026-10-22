@@ -8,3 +8,6 @@ void pace_frame(void);  // once per presented frame, on the presenting thread
 uint64_t pace_end_counter(const uint64_t *start_entry, const uint64_t *entry, uint64_t value);
 bool pace_is_slow(void);
 uint64_t pace_frames_over(void);  // (stats) frames over 60 fps's budget since the last call
+// any thread: a one-off stall (a load, a save commit, ...; why: for the log): the next second's frames don't count
+// toward holding 30 (pace.c)
+void pace_hitch(const char *why);
