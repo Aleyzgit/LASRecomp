@@ -470,6 +470,8 @@ void doorjump_tick(uint64_t frame) {
         }
         LOG("[doorjump] %s %02d%c %c: (%.2f, %.2f) -> %02d%c %c (%.2f, %.2f)\n", lv, row, 'A' + col, j->side, x, z,
             j->trow, 'A' + j->tcol, j->tside, nx, nz);
+        { extern void pace_hitch(const char *why);  // nvn/pace.c
+          pace_hitch("a door jump"); }
         pos[0] = pos2[0] = nx;
         pos[2] = pos2[2] = nz;
         if (j->height > -90.0f) pos[1] = pos2[1] = j->height + 0.05f;  // onto the landing floor (raised rooms: 1.5)

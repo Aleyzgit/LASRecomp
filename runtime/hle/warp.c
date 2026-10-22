@@ -49,6 +49,8 @@ void rt_warp_request_obj(uint64_t r) {
         LOG("[warp] level-jump request object %llx\n", (unsigned long long)r);
         g_loads++;
         g_load_frame = g_frame_now;
+        { extern void pace_hitch(const char *why);  // nvn/pace.c
+          pace_hitch("a level load"); }
     }
     g_request = r;
 }

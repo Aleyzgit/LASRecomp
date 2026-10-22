@@ -273,6 +273,8 @@ static bool spawn_bush_item(Cpu *c, int i) {
             guest_call(c, GA(SP_RELEASE));
         }
         LOG("[pots] bush %s cut: its item (flag %d) %s\n", p->room, p->flag, LD64(s) ? "spawned" : "failed to spawn");
+        { extern void pace_hitch(const char *why);  // nvn/pace.c
+          pace_hitch("an item spawn"); }
     }
     if (sctrl) { c->x[0] = sctrl; guest_call(c, GA(SP_RELEASE)); }
     return loaded;
