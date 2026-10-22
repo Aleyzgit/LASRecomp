@@ -43,16 +43,28 @@
 // (the pause menu, title, file select: no scene composite, mirror.c) don't count, and a scene change (level, camera
 // zone - a dungeon room -, the menu opening or closing, a load) starts both over. And when the backend times the GPU
 // (pace_gpu_ns), its time per frame must fit too, on average under PACE_GPU_MS: CPU headroom says nothing on a
-// GPU-bound machine (under PACE_GPU_LATE_MS when frames shown late started the hold). (Held, the game draws once per
-// frame as at 60 - the second world step is CPU work only - so its GPU time per frame is what a frame at 60 would
-// take, or more: a GPU at half load may clock down.)
+// GPU-bound machine (under PACE_GPU_LATE_MS, or PACE_GPU_LATE_BACKOFF_MS when backing off, when frames shown late
+// started the hold). (Held, the game draws once per frame as at 60 - the second world step is CPU work only - so its
+// GPU time per frame is what a frame at 60 would take, or more: a GPU at half load may clock down.)
 // Backoff (issues #70, #40): a machine right at the edge (a handheld on a low power profile) gains headroom at 30 fps
 // just by cooling down, goes back to 60, and doesn't fit again a few seconds later - 60 / 30 flicker. Falling back
 // within 20 s of going back doubles the wait (up to 16x: 80 s for "enough"); a minute at 60 resets it.
+// Hitches aren't frames that don't fit 60 (an M3 Max at 5120x1440, GPU 10-13 ms a frame, held at 30 after door jumps,
+// save commits, bushes' items spawning, texture hash stalls): one stall makes the next frames come a vsync late in a
+// burst (12 of 60, none by busy time), then the release waited for a GPU time it never reached. So:
+// - for PACE_GRACE_NS after a hitch (pace_hitch: a level load or change, a door jump, a save commit, a movie, an item
+//   spawned, a render scale change; or a frame over 100 ms) frames are left out of the count, late or busy;
+// - the frames over must be spread through the window (some in each quarter of it: 15 frames, 1/4 s at 60), not
+//   bunched as after a hitch nothing signalled.
 // LARECOMP_PACE=0: off (the game's own choice, flips and all).
 #define PACE_SLOW_NS 20000000ull
 #define PACE_GPU_MS 15.0  // (16.7 ms a frame at 60, less some for the window image and jitter)
-#define PACE_GPU_LATE_MS 10.0  // (a hold that frames shown late started: see pace_frame)
+// A hold that frames shown late started (see pace_frame): the GPU's own time must leave room for the window's image and
+// the present. 13 ms (78% of 16.7) on the first try; after a failed return to 60 (backing off), 10. Measured on an M3
+// Max at 5120x1440: back at 13.8 ms, slow motion at once; at 10-13 ms (5.2-6.7 in light scenes) a steady 60.
+#define PACE_GPU_LATE_MS 13.0
+#define PACE_GPU_LATE_BACKOFF_MS 10.0
+#define PACE_GRACE_NS 1000000000ull
 extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked in waits / sleeps
 static bool pace_slow;
 static uint64_t stat_pace_over;
@@ -64,7 +76,12 @@ static uint64_t stat_pace_over;
 static bool hold_30(bool on) {
     static bool held;
     static uint8_t saved;
+#ifdef PACE_TEST  // (tools/test_pace.c: a simulated game manager)
+    extern uint64_t pace_test_game_mgr;
+    uint64_t fw = pace_test_game_mgr;
+#else
     uint64_t fw = *(volatile uint64_t *)(uintptr_t)GA_GAME_MGR;
+#endif
     if (!fw) return held = false;  // (between boots / before the game set up)
     volatile uint8_t *min = (volatile uint8_t *)(uintptr_t)(fw + FW_MIN_EXTRA_VSYNCS), *max = min + 1;
     if (on && *max >= 1) {
@@ -105,6 +122,14 @@ static float median60(const float *v) {
     for (int i = 1; i < 60; i++)  // (insertion sort: 60 floats a frame)
         for (int j = i; j > 0 && s[j - 1] > s[j]; j--) { float t = s[j]; s[j] = s[j - 1], s[j - 1] = t; }
     return (s[29] + s[30]) / 2;
+}
+
+// Any thread: a one-off stall (why: what, for the log) - the next PACE_GRACE_NS of frames don't count (see above).
+static uint64_t hitch_at;
+static const char *hitch_why;
+void pace_hitch(const char *why) {
+    __atomic_store_n(&hitch_why, why, __ATOMIC_RELAXED);
+    __atomic_store_n(&hitch_at, plat_now_ns(), __ATOMIC_RELEASE);
 }
 
 bool pace_is_slow(void) { return pace_slow; }
@@ -182,6 +207,12 @@ void pace_frame(void) {
     static int cpu_clear;   // gameplay frames in a row with clear headroom by CPU time alone
     if (first || p > 100000000ull) {  // (loading, a hitch: not a pace, and maybe a new scene)
         clear = calm = cpu_clear = 0, scene = 0;
+        if (!first) {
+            static char why[32];
+            snprintf(why, sizeof why, "a %.0f ms frame", p / 1e6);
+            __atomic_store_n(&hitch_why, (const char *)why, __ATOMIC_RELAXED);
+            __atomic_store_n(&hitch_at, now, __ATOMIC_RELEASE);
+        }
         hold_cadence(hold_30(pace_slow && on));
         return;
     }
@@ -227,6 +258,24 @@ void pace_frame(void) {
     bool late = !pace_slow && p >= 25000000ull && pace_scene();
     int b = cost > 16.2, o = b || late;
     stat_pace_over += o;
+    // Within PACE_GRACE_NS of a hitch: left out (the window keeps the frames before it). Logged when the grace ends.
+    static uint64_t grace_of;  // the hitch the left-out frames below are from
+    static int ign_late, ign_busy, ign_n;
+    static const char *ign_why;
+    uint64_t ha = __atomic_load_n(&hitch_at, __ATOMIC_ACQUIRE);
+    bool grace = ha && (int64_t)(now - ha) < (int64_t)PACE_GRACE_NS;
+    if ((ign_late || ign_busy) && (!grace || ha != grace_of)) {
+        LOG("[pace] left out %d of %d frames after %s: %d late, %d busy\n", ign_late + ign_busy, ign_n, ign_why,
+            ign_late, ign_busy);
+        ign_late = ign_busy = 0;
+    }
+    if (grace) {
+        if (ha != grace_of) grace_of = ha, ign_n = 0, ign_why = __atomic_load_n(&hitch_why, __ATOMIC_RELAXED);
+        ign_n++, ign_busy += b, ign_late += late && !b;
+        if (!on) return;
+        hold_cadence(hold_30(pace_slow));
+        return;
+    }
     nover += o - (over[idx] & 1);
     nbusy += b - (over[idx] >> 1);
     over[idx] = (uint8_t)(o | b << 1);
@@ -238,7 +287,21 @@ void pace_frame(void) {
         backoff = 1;
         LOG("[pace] a minute at 60: headroom needed back to normal\n");
     }
-    if (!pace_slow && nover >= 12 && med >= 13.0f) {
+    // Spread: frames over in each quarter of the window, oldest (idx) first - not one burst (see above).
+    int quarters = 0;
+    for (int q = 0; q < 4; q++) {
+        int any = 0;
+        for (int i = 0; i < 15 && !any; i++) any = over[(idx + q * 15 + i) % 60] & 1;
+        quarters += any;
+    }
+    static bool bunch_said;
+    if (nover < 12) bunch_said = false;
+    if (!pace_slow && nover >= 12 && med >= 13.0f && quarters < 4 && !bunch_said) {
+        bunch_said = true;
+        LOG("[pace] %d of the last 60 frames over 16.2 ms busy or shown late (%d by busy time), but bunched in %d of 4 "
+            "quarters: not holding (yet)\n", nover, nbusy, quarters);
+    }
+    if (!pace_slow && nover >= 12 && med >= 13.0f && quarters == 4) {
         pace_slow = true, calm = clear = cpu_clear = 0, gpu_said = 0;
         late_hold = nbusy < 12;
         if (back_at && now - back_at < 20000000000ull && backoff < 16) backoff *= 2;  // (flickering: wait longer)
@@ -251,9 +314,8 @@ void pace_frame(void) {
         if (sc != scene) clear = calm = cpu_clear = 0, scene = sc;  // (a new scene, the menu opening or closing: start over)
         // (no GPU timer: -1, CPU only. Held for frames shown late, the GPU must fit with more room: those frames' busy
         // time was short, so what made them late was the GPU's frame and the window's image - and their CPU headroom
-        // here says nothing. Measured on an M3 Max at 5120x1440: back at 13.8 ms a frame held, 32-35 fps in slow
-        // motion at once; at 5.2 and 6.7 ms, a steady 60.)
-        bool gpu_fits = gpu_avg < (late_hold ? PACE_GPU_LATE_MS : PACE_GPU_MS);
+        // here says nothing: PACE_GPU_LATE_MS, PACE_GPU_LATE_BACKOFF_MS once a return to 60 failed.)
+        bool gpu_fits = gpu_avg < (!late_hold ? PACE_GPU_MS : backoff > 1 ? PACE_GPU_LATE_BACKOFF_MS : PACE_GPU_LATE_MS);
         int clear_n = 60 * (backoff < 4 ? backoff : 4);
         cpu_clear = sc && avg < 11.0 && peak < 14.5f ? cpu_clear + 1 : 0;
         if (cpu_clear == clear_n && !gpu_fits && !gpu_said++)
