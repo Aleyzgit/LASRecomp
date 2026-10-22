@@ -36,8 +36,15 @@ static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
 
 // Claim the guest address range before anything else can map there. The host allocator places
 // regions at random addresses in the same window; on a collision, re-exec for a fresh layout.
+// LARECOMP_REEXEC_FORCE=1 (test): the first process skips the reservation once and starts again, as when the range is
+// taken (the new process has LARECOMP_REEXEC set and reserves normally).
+#define REEXEC_FORCED "forced by LARECOMP_REEXEC_FORCE"
 __attribute__((constructor(101))) static void reserve_guest_space(void) {
-    if (plat_reserve_guest(GUEST_LO, GUEST_HI)) return;
+    const char *force = getenv("LARECOMP_REEXEC_FORCE");
+    bool forced = force && *force && strcmp(force, "0") && !getenv("LARECOMP_REEXEC");
+    if (forced) setenv("LARECOMP_REEXEC_WHY", REEXEC_FORCED, 1);
+    else if (plat_reserve_guest(GUEST_LO, GUEST_HI)) return;
+    else setenv("LARECOMP_REEXEC_WHY", "", 0);  // (the platform may have said what holds the range; else nothing more)
     const char *tries = getenv("LARECOMP_REEXEC");
     int n = tries ? atoi(tries) : 0;
     if (n >= 20) {
@@ -195,6 +202,12 @@ static void log_startup_info(void) {
 int main(int argc, char **argv) {
     plat_init();
     log_startup_info();
+    if (getenv("LARECOMP_REEXEC")) {  // (reserve_guest_space started this process again)
+        const char *why = getenv("LARECOMP_REEXEC_WHY"), *n = getenv("LARECOMP_REEXEC");
+        if (!why) LOG("[boot] started again (try %s) (LARECOMP_REEXEC set by the caller)\n", n);
+        else if (!strcmp(why, REEXEC_FORCED)) LOG("[boot] started again (try %s): %s\n", n, why);
+        else LOG("[boot] started again (try %s): the guest address range was in use%s%s\n", n, *why ? ": " : "", why);
+    }
 #ifdef _WIN32
     setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering
 #else
