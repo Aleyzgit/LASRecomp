@@ -134,7 +134,7 @@ static uint64_t g_backdrop_frame = ~0ull;
 void widescreen_backdrop_seen(uint64_t hash) {
     static const uint64_t known[] = {BACKDROP_HASHES};
     for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
-        if (known[i] && hash == known[i]) { extern uint64_t renderer_present_count(void); g_backdrop_frame = renderer_present_count(); }
+        if (known[i] && hash == known[i]) { extern uint64_t renderer_exec_frame(void); g_backdrop_frame = renderer_exec_frame(); }
     (void)g_backdrop_hash;
 }
 // Interiors and dungeons only render their 16:9 centre. Besides the backdrop detection, the game's current level
@@ -173,8 +173,10 @@ static float g_vp[16];  // rows
 bool g_room_wide;  // the last presented frame showed a room wider than 16:9
 static uint64_t g_vp_frame = ~0ull;
 void widescreen_scene_ubo(const float *u, uint64_t size) {
-    extern uint64_t renderer_present_count(void);
-    uint64_t f = renderer_present_count();
+    // (the frame being translated, as the present that crops it numbers it: with the render thread on, the game
+    // thread's counter is already a frame ahead here, and every room read as "no scene camera" - boxed 16:9)
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
     if (size != 320 || g_vp_frame == f) return;  // (the frame's first scene draw)
     if (u[12] != 0 || u[13] != 0 || u[14] != 0 || u[15] != 1 || u[30] != -1 || u[31] != 0) return;  // perspective
     memcpy(g_vp, u + 32, sizeof g_vp);
