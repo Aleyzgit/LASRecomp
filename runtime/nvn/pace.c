@@ -22,9 +22,10 @@
 // fps, issue #40), also while the counters below reported slow frames.
 // So each presented frame's busy time is measured (present to present, minus the time the presenting thread was
 // blocked in kernel waits, sleeps and the window's image: idle); when frames don't fit 60 (12 of the last 60 over
-// 16.2 ms, and the median frame within ~3 ms of that: a few hitches or spikes in frames that otherwise fit don't count),
-// the game is held in its 30 fps mode: its least extra vsyncs becomes 1, and the counters report a frame of at least
-// PACE_SLOW_NS as before (its own dynamic resolution, which read them too, is off: tools/patches.py GAME_DYNRES_SITE).
+// 16.2 ms or, in gameplay, shown a vsync late - see pace_frame -, and the median frame within ~3 ms of that: a few
+// hitches or spikes in frames that otherwise fit don't count), the game is held in its 30 fps mode: its least extra
+// vsyncs becomes 1, and the counters report a frame of at least PACE_SLOW_NS as before (its own dynamic resolution,
+// which read them too, is off: tools/patches.py GAME_DYNRES_SITE).
 // Its 30 fps mode is two world steps a frame (+0x4e0 counts the extra one down) and a present interval of 2 (+0x4e1 + 1,
 // to nvnWindowSetPresentInterval). On the Switch the display waits out that interval; here nothing did, so a held
 // frame that fit in one vsync was still shown after one: the game asked for interval 2 the whole hold, yet a Steam
@@ -42,14 +43,16 @@
 // (the pause menu, title, file select: no scene composite, mirror.c) don't count, and a scene change (level, camera
 // zone - a dungeon room -, the menu opening or closing, a load) starts both over. And when the backend times the GPU
 // (pace_gpu_ns), its time per frame must fit too, on average under PACE_GPU_MS: CPU headroom says nothing on a
-// GPU-bound machine. (Held, the game draws once per frame as at 60 - the second world step is CPU work only - so its GPU
-// time per frame is what a frame at 60 would take, or more: a GPU at half load may clock down.)
+// GPU-bound machine (under PACE_GPU_LATE_MS when frames shown late started the hold). (Held, the game draws once per
+// frame as at 60 - the second world step is CPU work only - so its GPU time per frame is what a frame at 60 would
+// take, or more: a GPU at half load may clock down.)
 // Backoff (issues #70, #40): a machine right at the edge (a handheld on a low power profile) gains headroom at 30 fps
 // just by cooling down, goes back to 60, and doesn't fit again a few seconds later - 60 / 30 flicker. Falling back
 // within 20 s of going back doubles the wait (up to 16x: 80 s for "enough"); a minute at 60 resets it.
 // LARECOMP_PACE=0: off (the game's own choice, flips and all).
 #define PACE_SLOW_NS 20000000ull
 #define PACE_GPU_MS 15.0  // (16.7 ms a frame at 60, less some for the window image and jitter)
+#define PACE_GPU_LATE_MS 10.0  // (a hold that frames shown late started: see pace_frame)
 extern __thread uint64_t g_blocked_ns;  // kernel.c: this thread's time blocked in waits / sleeps
 static bool pace_slow;
 static uint64_t stat_pace_over;
@@ -115,17 +118,23 @@ uint64_t pace_frames_over(void) {
 // every that many frames from frame 2700 on (in play after a scripted load): a CPU-side hitch with the GPU idle
 // (dynamic resolution tests). LARECOMP_SPIKE_FROM / LARECOMP_SPIKE_UNTIL=<frame>: other first / last frames (with
 // EVERY=1: a machine too slow for 60 for a while - the 30 fps hold and the way back, frame pacing tests).
+// LARECOMP_SPIKE_IDLE=1: the sleep counts as idle (blocked), as a wait for the GPU's frame through the window's image
+// does - frames shown late with a short busy time (a GPU-bound machine).
 static void spike_test(void) {
-    static long ms = -1, every, frame, from, until;
+    static long ms = -1, every, frame, from, until, idle;
     if (ms < 0) {
+        idle = getenv("LARECOMP_SPIKE_IDLE") && atoi(getenv("LARECOMP_SPIKE_IDLE"));
         ms = getenv("LARECOMP_SPIKE_MS") ? atol(getenv("LARECOMP_SPIKE_MS")) : 0;
         every = getenv("LARECOMP_SPIKE_EVERY") ? atol(getenv("LARECOMP_SPIKE_EVERY")) : 60;
         if (every < 1) every = 60;
         from = getenv("LARECOMP_SPIKE_FROM") ? atol(getenv("LARECOMP_SPIKE_FROM")) : 2700;
         until = getenv("LARECOMP_SPIKE_UNTIL") ? atol(getenv("LARECOMP_SPIKE_UNTIL")) : 0;
     }
-    if (ms > 0 && ++frame > from && (!until || frame <= until) && frame % every == 0)
-        plat_sleep_until_ns(plat_now_ns() + (uint64_t)ms * 1000000);
+    if (ms > 0 && ++frame > from && (!until || frame <= until) && frame % every == 0) {
+        uint64_t t0 = plat_now_ns();
+        plat_sleep_until_ns(t0 + (uint64_t)ms * 1000000);
+        if (idle) g_blocked_ns += plat_now_ns() - t0;
+    }
 }
 
 // The scene a frame shows, for the way back to 60 (see above): 0 when it isn't gameplay (no save in play, or no world on
@@ -147,9 +156,10 @@ void pace_frame(void) {
     static int on = -1;
     if (on < 0) { const char *e = getenv("LARECOMP_PACE"); on = !e || atoi(e) != 0; }
     static uint64_t last, last_wait;
-    static uint8_t over[60];
+    static uint8_t over[60];  // (bit 0: over - busy or late; bit 1: over by busy time)
     static float recent[60];  // the last 60 frames' cost (ms at 60 fps)
-    static int idx, nover, calm, clear, backoff = 1;
+    static int idx, nover, nbusy, calm, clear, backoff = 1;
+    static bool late_hold;  // (the hold was started by frames shown late more than by busy ones)
     static uint64_t back_at;  // when frame pacing last went back to 60 (0: not yet)
     static double avg;  // cost (ms at 60 fps), moving average (~20 frames)
     static uint64_t last_tcpu, last_rcpu;
@@ -207,11 +217,20 @@ void pace_frame(void) {
         last_cpu = cpu;
         l_lock = g_rq_lock_ns, l_sub = g_submit_ns, l_gpu = g_gpu_wait_ns, l_pres = g_present_ns, l_hooks = g_hooks_ns;
     }
-    int o = cost > 16.2;
+    // Not held, a frame shown a vsync late (25 ms or more after the one before: not a 50 Hz display's 20 ms) didn't fit
+    // 60 either, whatever its busy time: what made it late can be idle here (waiting for the GPU's frame through the
+    // window's image or the present: a machine GPU-bound at a high resolution), and the game still runs its world one
+    // step for it half the time (its frame controller takes a late frame whose own CPU and GPU time were under its
+    // limits as a hiccup, and goes back to 60) - slow motion at a steady 30 fps (an M3 Max at 5120x1440: 30.0 fps,
+    // the pacer at 60, 4 of 60 frames over by busy time). It counts as over, at its period (gameplay frames only: a
+    // load or a menu shown late isn't slow motion).
+    bool late = !pace_slow && p >= 25000000ull && pace_scene();
+    int b = cost > 16.2, o = b || late;
     stat_pace_over += o;
-    nover += o - over[idx];
-    over[idx] = (uint8_t)o;
-    recent[idx] = (float)cost;
+    nover += o - (over[idx] & 1);
+    nbusy += b - (over[idx] >> 1);
+    over[idx] = (uint8_t)(o | b << 1);
+    recent[idx] = (float)(late && p / 1e6 > cost ? p / 1e6 : cost);
     idx = (idx + 1) % 60;
     if (!on) return;  // (measured and counted all the same: LARECOMP_LOG_PACE, the stats)
     float med = median60(recent);
@@ -221,15 +240,20 @@ void pace_frame(void) {
     }
     if (!pace_slow && nover >= 12 && med >= 13.0f) {
         pace_slow = true, calm = clear = cpu_clear = 0, gpu_said = 0;
+        late_hold = nbusy < 12;
         if (back_at && now - back_at < 20000000000ull && backoff < 16) backoff *= 2;  // (flickering: wait longer)
-        LOG("[pace] frames don't fit 60 fps (%d of the last 60 over 16.2 ms busy, median %.1f): holding the game's 30 fps mode%s\n",
-            nover, med, backoff > 1 ? " (backing off)" : "");
+        LOG("[pace] frames don't fit 60 fps (%d of the last 60 over 16.2 ms busy or shown late, %d by busy time, median %.1f): "
+            "holding the game's 30 fps mode%s\n", nover, nbusy, med, backoff > 1 ? " (backing off)" : "");
     } else if (pace_slow) {
         float peak = 0;
         for (int i = 0; i < 60; i++) peak = recent[i] > peak ? recent[i] : peak;
         uint64_t sc = pace_scene();
         if (sc != scene) clear = calm = cpu_clear = 0, scene = sc;  // (a new scene, the menu opening or closing: start over)
-        bool gpu_fits = gpu_avg < PACE_GPU_MS;  // (no GPU timer: -1, CPU only)
+        // (no GPU timer: -1, CPU only. Held for frames shown late, the GPU must fit with more room: those frames' busy
+        // time was short, so what made them late was the GPU's frame and the window's image - and their CPU headroom
+        // here says nothing. Measured on an M3 Max at 5120x1440: back at 13.8 ms a frame held, 32-35 fps in slow
+        // motion at once; at 5.2 and 6.7 ms, a steady 60.)
+        bool gpu_fits = gpu_avg < (late_hold ? PACE_GPU_LATE_MS : PACE_GPU_MS);
         int clear_n = 60 * (backoff < 4 ? backoff : 4);
         cpu_clear = sc && avg < 11.0 && peak < 14.5f ? cpu_clear + 1 : 0;
         if (cpu_clear == clear_n && !gpu_fits && !gpu_said++)
@@ -244,7 +268,7 @@ void pace_frame(void) {
             LOG("[pace] %d frames with %s headroom on gameplay frames (%.1f ms a frame at 60 on average, median %.1f, at most "
                 "%.1f%s): back to the game's own choice\n", clear >= clear_n ? clear : calm, clear >= clear_n ? "clear" : "enough",
                 avg, med, peak, g);
-            pace_slow = false, nover = 0, back_at = now;
+            pace_slow = false, nover = nbusy = 0, back_at = now;
             memset(over, 0, sizeof over);
             memset(recent, 0, sizeof recent);
         }
