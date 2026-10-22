@@ -882,13 +882,12 @@ static void draw_folder_example(float w) {
         ImVec2 nsz = font->CalcTextSizeA(ts, FLT_MAX, 0, it.name);
         float nx = x + g + fs * 0.4f;
         dl->AddText(font, ts, ImVec2(nx, my - nsz.y * 0.5f), i == 0 ? text_sel : text, it.name);
-        if (i == 0) {  // an arrow pointing at it, and what to do, on the row's right (smaller when narrow)
+        if (i == 0) {  // an arrow pointing back at the name, then what to do (smaller when the row is narrow)
             const char *hint = "Choose this one";
-            float room = b.x - fs * 0.6f - (nx + nsz.x + fs * 0.5f), aw = fs * 1.1f, gap = fs * 0.3f;
+            float ax = nx + nsz.x + fs * 0.5f, aw = fs * 1.1f, gap = fs * 0.3f, room = b.x - fs * 0.6f - ax;
             float hs = ts, hw = font->CalcTextSizeA(hs, FLT_MAX, 0, hint).x;
-            if (aw + gap + hw > room)
-                hs *= fmaxf(0.7f, (room - aw - gap) / hw), hw = font->CalcTextSizeA(hs, FLT_MAX, 0, hint).x;
-            float hx = b.x - fs * 0.6f - hw, ax = hx - gap - aw, th = fs * 0.09f, hd = fs * 0.26f;
+            if (aw + gap + hw > room) hs *= fmaxf(0.7f, (room - aw - gap) / hw);
+            float hx = ax + aw + gap, th = fs * 0.09f, hd = fs * 0.26f;
             dl->AddLine(ImVec2(ax + th, my), ImVec2(ax + aw, my), gold, th);
             dl->AddTriangleFilled(ImVec2(ax - th, my), ImVec2(ax + hd, my - hd), ImVec2(ax + hd, my + hd), gold);
             dl->AddText(font, hs, ImVec2(hx, my - font->CalcTextSizeA(hs, FLT_MAX, 0, hint).y * 0.5f), gold, hint);
@@ -1999,15 +1998,11 @@ extern "C" void launcher_run(const char *root) {
                     else if (r == 2) choose_data_folder();
                 }
                 if (ready) opt_end();
-                else {  // before the setup: under the description, what the folder to choose looks like and the hint
-                        // (at the bottom)
+                else {  // before the setup: under the description, what the folder to choose looks like, and the hint
                     opt_split();
                     opt_desc_text();
                     float fs = ImGui::GetFontSize(), ew = fminf(ImGui::GetContentRegionAvail().x, fs * 15);
-                    float eh = folder_example_height() + fs * 0.3f + ImGui::GetStyle().ItemSpacing.y * 2 +
-                               ImGui::CalcTextSize(PICK_FOLDER_HINT, NULL, false, ew).y;
-                    float bottom = ImGui::GetWindowHeight() - ImGui::GetStyle().WindowPadding.y - eh;
-                    ImGui::SetCursorPosY(fmaxf(ImGui::GetCursorPosY() + 20 * sc, bottom));
+                    ImGui::Dummy(ImVec2(0, fs * 0.5f));  // (a paragraph's space)
                     draw_folder_example(ew);
                     ImGui::Dummy(ImVec2(0, fs * 0.3f));  // (its shadow)
                     ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + ew);
