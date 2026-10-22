@@ -22,6 +22,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "../paths.h"
 #include "../platform.h"
 #include "posix_log.h"
 
@@ -39,9 +40,7 @@ static void log_to_file_in_app(void) {
     uint32_t sz = sizeof exe;
     if (isatty(STDERR_FILENO) || _NSGetExecutablePath(exe, &sz) != 0 || !strstr(exe, ".app/Contents/MacOS/")) return;
     char dir[900];
-    const char *env = getenv("LARECOMP_DATA_ROOT"), *home = getenv("HOME");
-    if (env && *env) snprintf(dir, sizeof dir, "%s", env);
-    else snprintf(dir, sizeof dir, "%s/Library/Application Support/com.peiikai.lasrecomp", home && *home ? home : "/tmp");
+    if (!rt_data_root_early(dir, sizeof dir)) return;  // (runtime/paths.h: the data folder, wherever it was moved)
     mkdir(dir, 0755);
     session_log_open(dir, g_log_path, sizeof g_log_path);
 }
@@ -272,6 +271,6 @@ int plat_proc_wait(PlatProc p, bool block) {
 
 static int rm_entry(const char *path, const struct stat *sb, int flag, struct FTW *ftw) {
     (void)sb, (void)flag, (void)ftw;
-    return remove(path);
+    return remove(path) == 0 || errno == ENOENT ? 0 : -1;  // (gone already: e.g. a ._ file macOS removed with its folder on exFAT)
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }

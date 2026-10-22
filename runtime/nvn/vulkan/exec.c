@@ -267,6 +267,11 @@ bool vk_gpu_split_ns(uint64_t out[4]) {
     out[3] = __atomic_load_n(&gpu_frames, __ATOMIC_RELAXED);
     return true;
 }
+// Frame pacing (pace.c): GPU time so far, the game's submissions and the window image's; -1: no GPU timer.
+int64_t pace_gpu_ns(void) {
+    uint64_t t[4];
+    return vk_gpu_split_ns(t) ? (int64_t)(t[0] + t[1]) : -1;
+}
 uint64_t vk_cum_wait_ns(void) { return __atomic_load_n(&cum_wait, __ATOMIC_RELAXED); }  // (all vk_wait_seq waits so far)
 
 static Sub *sub(void) {

@@ -572,6 +572,33 @@ extern "C" bool race_overlay_wanted(void);
 extern "C" void race_overlay_draw(ImVec2 display, ImFont *font, float scale);
 extern "C" bool pickup_flyin_wanted(void);  // (silent pickups: pickup_flyin.mm)
 extern "C" void pickup_flyin_draw(ImVec2 display, ImFont *font, float scale);
+extern "C" bool race_overlay_key(char *out, size_t cap);
+
+// ---- reusing the overlay's last drawing (LARECOMP_OVERLAY_CACHE=0: off, a new ImGui frame every present as before)
+// While only the FPS counter and / or the run timer are up (no menu, no input, nothing interactive or animated), the
+// overlay draws the same thing frame after frame: ImGui's NewFrame + layout + Render then run for nothing on the
+// render thread. Their drawing is described by a key (the text shown, the window size); while it stays the same, the
+// last frame's draw data (ImGui keeps it until the next NewFrame) is drawn again. Only after three frames in a row
+// built with that key: an auto-sized window (the FPS counter) settles over the frames after its text changes.
+// The FPS counter then shows the same average as ImGui's io.Framerate (the last 60 frame times), sampled twice a
+// second instead of every frame.
+static int g_ov_cache = -1;
+static char g_ov_key[96];
+static int g_ov_same;  // frames built in a row with g_ov_key
+static float g_fps_dt[60];
+static int g_fps_n, g_fps_i;
+static double g_fps_sum, g_fps_shown, g_fps_at;
+static void fps_note(double now, float dt) {
+    if (g_fps_n == 60) g_fps_sum -= g_fps_dt[g_fps_i];
+    else g_fps_n++;
+    g_fps_dt[g_fps_i] = dt;
+    g_fps_sum += dt;
+    g_fps_i = (g_fps_i + 1) % 60;
+    if (now - g_fps_at >= 0.5 || now < g_fps_at) {
+        g_fps_at = now;
+        g_fps_shown = g_fps_sum > 0 ? g_fps_n / g_fps_sum : 0;
+    }
+}
 
 // Reboot (runtime/main.c): the game is gone - menu and name dialog close; the ImGui context stays.
 RT_ON_RESET(menu_reset) {
@@ -864,6 +891,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     bool flyin = pickup_flyin_wanted() && !open;  // (a silent pickup's card)
     if (!render_needed(open, kbd, inv, trk, trkd, chaos, race, flyin)) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
+        g_ov_same = 0;  // (shown again: built afresh first)
         return;
     }
 #ifdef __APPLE__
@@ -879,6 +907,41 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     double now = SDL_GetTicks() / 1000.0;
     io.DeltaTime = last > 0 && now > last ? (float)(now - last) : 1.0f / 60;
     last = now;
+    if (g_ov_cache < 0) g_ov_cache = !getenv("LARECOMP_OVERLAY_CACHE") || atoi(getenv("LARECOMP_OVERLAY_CACHE")) != 0;
+    char key[sizeof g_ov_key];
+    key[0] = 0;
+    if (g_ov_cache) {
+        fps_note(now, io.DeltaTime);
+        char rk[64];
+        // (only the FPS counter and the run timer; input only reaches ImGui while the menu or the name entry is up)
+        if (!open && !kbd && !inv && !trk && !trkd && !chaos && !flyin && race_overlay_key(rk, sizeof rk)) {
+            pthread_mutex_lock(&q_lock);
+            bool events = !q_events.empty();
+            pthread_mutex_unlock(&q_lock);
+            if (!events) snprintf(key, sizeof key, "%.0fx%.0f fps %d %.0f | %s", tw, th, (int)g_settings.show_fps,
+                                  g_settings.show_fps ? g_fps_shown : 0.0, rk);
+        }
+        ImDrawData *dd = ImGui::GetDrawData();
+        if (key[0] && g_ov_same >= 3 && !strcmp(key, g_ov_key) && dd && dd->Valid) {
+            g_text_busy = false;  // (the menu is closed)
+#ifdef __APPLE__
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.colorAttachments[0].texture = target;
+            rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+            rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            ImGui_ImplMetal_NewFrame(rp);  // (the backend's target description only)
+            id<MTLRenderCommandEncoder> enc = [cb renderCommandEncoderWithDescriptor:rp];
+            ImGui_ImplMetal_RenderDrawData(dd, cb, enc);
+            [enc endEncoding];
+#else
+            rec_drain();  // (ImGui records into cmd itself: the recorder thread idle first, as below)
+            ImGui_ImplVulkan_RenderDrawData(dd, (VkCommandBuffer)cmd);
+#endif
+            return;
+        }
+        if (key[0] && !strcmp(key, g_ov_key)) g_ov_same++;
+        else { memcpy(g_ov_key, key, sizeof key); g_ov_same = key[0] ? 1 : 0; }
+    }
     drain_events(io);
     // fonts are built at 34/56 px for a ~1080 px tall output; scale to the window
     float scale = (float)(th / 1080.0);
@@ -912,7 +975,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::SetNextWindowBgAlpha(0.5f);
         ImGui::Begin("##fps", NULL, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                         ImGuiWindowFlags_NoInputs | ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing);
-        ImGui::Text("%.0f fps", io.Framerate);
+        ImGui::Text("%.0f fps", g_ov_cache ? g_fps_shown : io.Framerate);
         ImGui::End();
     }
 
