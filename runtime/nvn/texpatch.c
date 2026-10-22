@@ -26,6 +26,7 @@
 
 #include "../hle.h"
 #include "../input_bind.h"
+#include "../paths.h"
 #include "../rando.h"
 #include "../settings.h"
 #include "astc.h"
@@ -531,6 +532,19 @@ static stbtt_fontinfo g_font;
 static bool g_font_ok;
 static uint8_t *g_font_data;
 
+static void try_font(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    g_font_data = malloc((size_t)n);
+    if (fread(g_font_data, 1, (size_t)n, f) == (size_t)n && stbtt_InitFont(&g_font, g_font_data, stbtt_GetFontOffsetForIndex(g_font_data, 0)))
+        g_font_ok = true;
+    else { free(g_font_data); g_font_data = NULL; }
+    fclose(f);
+}
+
 static void load_font(void) {  // a bold system font for the letters (none of the game's fonts are needed)
     static const char *const paths[] = {
         "/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf", "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
@@ -538,18 +552,9 @@ static void load_font(void) {  // a bold system font for the letters (none of th
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
     };
-    for (unsigned i = 0; i < sizeof paths / sizeof *paths && !g_font_ok; i++) {
-        FILE *f = fopen(paths[i], "rb");
-        if (!f) continue;
-        fseek(f, 0, SEEK_END);
-        long n = ftell(f);
-        fseek(f, 0, SEEK_SET);
-        g_font_data = malloc((size_t)n);
-        if (fread(g_font_data, 1, (size_t)n, f) == (size_t)n && stbtt_InitFont(&g_font, g_font_data, stbtt_GetFontOffsetForIndex(g_font_data, 0)))
-            g_font_ok = true;
-        else { free(g_font_data); g_font_data = NULL; }
-        fclose(f);
-    }
+    for (unsigned i = 0; i < sizeof paths / sizeof *paths && !g_font_ok; i++) try_font(paths[i]);
+    char own[1100];  // none of the system's: the bundled DejaVu Sans Bold (third_party/fonts/DejaVu, in every release)
+    if (!g_font_ok && rt_resource("DejaVuSans-Bold.ttf", "third_party/fonts/DejaVu/DejaVuSans-Bold.ttf", own, sizeof own)) try_font(own);
     if (!g_font_ok) LOG("[texpatch] no system font for the button letters: Xbox letters stay Nintendo's\n");
 }
 

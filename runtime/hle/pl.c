@@ -11,8 +11,13 @@
 //     characters are the substitute's, so Chinese / Korean text can show missing glyphs.
 //     Standard's Japanese gothics are skipped when the game plays in Russian: Japanese fonts carry Cyrillic as
 //     full-width characters (JIS X 0208), every letter a square apart (issue #32) - Arial / DejaVu Sans then.
-//  4. Standard only: DejaVu Sans shipped with the app (third_party/fonts/DejaVu, free license), for systems with none
+//  4. Standard only, ahead of the OS's own: BIZ UDPGothic shipped with the app (third_party/fonts/BIZUDPGothic, SIL OFL),
+//     Morisawa's free font from the same universal-design gothic family as UD Shin Go: the same look on every platform.
+//     (Skipped for Russian like the other Japanese gothics.)
+//  5. Standard only: DejaVu Sans shipped with the app (third_party/fonts/DejaVu, free license), for systems with none
 //     of the above (Bazzite / Fedora Atomic have no DejaVu - issue #37).
+// A substitute (anything but the console's own files) gets the console font's OS/2 Windows metrics, which the game
+// sizes text by (match_switch_metrics): without that every substitute draws about 1.5x too large.
 // .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key (bfttf_decode).
 // .ttc collections get face 0 copied out as a standalone font (the game's font engine wants one sfnt).
 #include <stdlib.h>
@@ -142,6 +147,30 @@ static bool font_has(const uint8_t *f, size_t len, uint32_t cp) {
 // lacked it (issue #45). A substitute without them is passed over for the next one.
 static bool font_usable(const uint8_t *f, size_t len) { return font_has(f, len, 0x20) && font_has(f, len, 0x25A1); }
 
+// The game's font engine sizes a font by its OS/2 usWinAscent + usWinDescent: 1.5 em for the console's UD Shin Go
+// (1158 + 378 of 1024 units) against the usual 1.0 em, so a substitute draws about 1.5x too large. Give it the console
+// font's values; its text then matches the console's size (checked against the real font on the file select screen).
+static void match_switch_metrics(uint8_t *d, size_t len) {
+    if (len < 12) return;
+    unsigned ntab = (unsigned)d[4] << 8 | d[5];
+    if (12 + 16 * (size_t)ntab > len) return;
+    const uint8_t *head = NULL;
+    uint8_t *os2 = NULL;
+    for (unsigned i = 0; i < ntab; i++) {
+        const uint8_t *e = d + 12 + 16 * i;
+        uint32_t off = be32(e + 8), tlen = be32(e + 12);
+        if (off > len || tlen > len - off) continue;
+        if (!memcmp(e, "head", 4) && tlen >= 20) head = d + off;
+        if (!memcmp(e, "OS/2", 4) && tlen >= 78) os2 = d + off;
+    }
+    if (!head || !os2) return;
+    unsigned upem = (unsigned)head[18] << 8 | head[19];
+    if (!upem) return;
+    unsigned asc = (1158 * upem + 512) / 1024, desc = (378 * upem + 512) / 1024;
+    os2[74] = (uint8_t)(asc >> 8), os2[75] = (uint8_t)asc;    // usWinAscent
+    os2[76] = (uint8_t)(desc >> 8), os2[77] = (uint8_t)desc;  // usWinDescent
+}
+
 static int load_one_checked(const char *path, Font *ft, bool check);
 static int load_one(const char *path, Font *ft) { return load_one_checked(path, ft, false); }
 static int load_one_checked(const char *path, Font *ft, bool check) {
@@ -149,7 +178,8 @@ static int load_one_checked(const char *path, Font *ft, bool check) {
     uint8_t *d = read_file(path, &len);
     if (!d) return 0;
     size_t n = strlen(path);
-    if (n > 6 && !strcasecmp(path + n - 6, ".bfttf")) {
+    bool console_font = n > 6 && !strcasecmp(path + n - 6, ".bfttf");
+    if (console_font) {
         len = bfttf_decode(d, len);
         if (!len) { LOG("[pl] %s: not a valid .bfttf\n", path); free(d); return 0; }
     } else if (len >= 4 && !memcmp(d, "ttcf", 4)) {
@@ -160,6 +190,7 @@ static int load_one_checked(const char *path, Font *ft, bool check) {
         d = f0;
         len = l2;
     }
+    if (!console_font) match_switch_metrics(d, len);  // (a .ttf of the console's own font: already these values)
     if (check && !font_usable(d, len)) {
         LOG("[pl] %s: no glyph for a space or \"\u25A1\" (U+25A1) - skipped\n", path);
         free(d);
@@ -215,15 +246,21 @@ static void load_fonts(void) {
     static const char *const *const chains[N_FONT_TYPES] = {std, zh_cn, zh_cn_ext, zh_tw, ko, ext};
     extern const char *settings_language(void);
     bool cyrillic = !strcmp(settings_language(), "ru");
+    char bundled[1100];
     for (int t = 0; t < N_FONT_TYPES; t++) {
         if (env) load_one(env, &fonts[t]);  // (a forced font: it is what the player asked for, in any language)
         for (size_t i = 0; !fonts[t].addr && chains[t][i]; i++) {
             const char *f = chains[t][i];
+            bool own = strncmp(f, "fonts/", 6) == 0;  // (the console's own files: as they are)
+            // Standard, before the OS's fonts: the bundled BIZ UDPGothic (a Japanese gothic too: not for Russian)
+            if (t == F_STD && !own && !cyrillic && i && strncmp(chains[t][i - 1], "fonts/", 6) == 0 &&
+                rt_resource("BIZUDPGothic-Regular.ttf", "third_party/fonts/BIZUDPGothic/BIZUDPGothic-Regular.ttf", bundled, sizeof bundled) &&
+                load_one_checked(bundled, &fonts[t], true))
+                break;
             if (t == F_STD && cyrillic && (strstr(f, "/System/Library/Fonts/ヒラギノ") || strstr(f, "YuGoth"))) continue;
-            load_one_checked(f, &fonts[t], strncmp(f, "fonts/", 6) != 0);  // (the console's own files: as they are)
+            load_one_checked(f, &fonts[t], !own);
         }
     }
-    char bundled[1100];
     if (!fonts[F_STD].addr && rt_resource("DejaVuSans.ttf", "third_party/fonts/DejaVu/DejaVuSans.ttf", bundled, sizeof bundled))
         load_one_checked(bundled, &fonts[F_STD], true);
     if (!fonts[F_STD].addr)  // (only a broken install: the app ships DejaVu Sans)
