@@ -269,15 +269,32 @@ static void *watch_thread(void *a) {
     return NULL;
 }
 void watch_arm(void) {
+    if (!g_watch_lo) {  // (debug) LARECOMP_WATCH_ADDR=<lo>,<hi> (hex): who touches [lo, hi) - one page watched
+        const char *e = getenv("LARECOMP_WATCH_ADDR");
+        if (e) { g_watch_lo = strtoull(e, (char **)&e, 16); if (*e == ',') g_watch_hi = strtoull(e + 1, NULL, 16); }
+    }
     if (!g_watch_lo || watch_page) return;
     watch_page = g_watch_lo & ~(PLAT_PAGE - 1);
     pthread_t t;
     pthread_create(&t, NULL, watch_thread, NULL);
 }
 
+uint64_t g_fault_lr;  // (the platform's handler: the faulting thread's link register, for the watch log)
 bool rt_fault_watch(uint64_t fa, uint64_t pc) {
+    uint64_t lr = g_fault_lr;
     if (!watch_page || fa < watch_page || fa >= watch_page + PLAT_PAGE) return false;
     if (fa >= g_watch_lo && fa < g_watch_hi) {
+        static int hits;  // (LARECOMP_WATCH_ADDR) each (frame, caller) once with its offset, the first 4000
+        extern uint64_t renderer_present_count(void);
+        static uint64_t last_frame, last_pc;
+        uint64_t fr = renderer_present_count();
+        if (getenv("LARECOMP_WATCH_ADDR") && (fr != last_frame || pc != last_pc) && hits++ < 4000) {
+            last_frame = fr, last_pc = pc;
+            uint64_t lo = 0;
+            const char *ls = host_sym(lr, &lo);
+            fprintf(stderr, "[watch] frame %llu +%#llx pc %s lr %s+%llx\n", (unsigned long long)fr,
+                    (unsigned long long)(fa - g_watch_lo), host_sym(pc, NULL) ? host_sym(pc, NULL) : "?", ls ? ls : "?", (unsigned long long)lo);
+        }
         static char seen[64][48];
         static int nseen;
         const char *nm = host_sym(pc, NULL);
