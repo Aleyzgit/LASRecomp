@@ -106,3 +106,7 @@
 #define GA_FONT_BOX_GLYPH_SITE              UINT64_C(0x700111e000)
 #define GA_FONT_BOX_GLYPH_SKIP              UINT64_C(0x700111e06c)
 #define GA_SHADOW_LINK_APPEAR_SKIP         UINT64_C(0x7000d15814)
+#define GA_SHAPE_SIM_SITES_0                UINT64_C(0x7001408de0)
+#define GA_SHAPE_SIM_SITES_1                UINT64_C(0x7001408d80)
+#define GA_SHAPE_SIM_SKIP_0                 UINT64_C(0x7001408e0c)
+#define GA_SHAPE_SIM_SKIP_1                 UINT64_C(0x7001408d98)
