@@ -211,6 +211,7 @@ cancelled builds keep the previous installed library until a replacement is read
   (#104), and a regression test for the kernel's timed condition-variable wait (#88)
 - **[@rkammoun](https://github.com/rkammoun)** - diagnosed and patched the Metal 16-sampler limit behind the black walls in the Ukuku Prairie cave (#215, fixed in #216)
 - **[@NevesHenry](https://github.com/NevesHenry)** - a clear message on Linux when no folder or file window can open (#298), and the controller rumble test building again and running in CI (#299)
+- **[@ky1vstar](https://github.com/ky1vstar)** - the Linux aarch64 release built natively on an arm64 runner, cutting that build from about 1 h 20 to under 10 minutes (#319)
 
 Thanks also to everyone who reports issues and tests builds; your logs and screenshots find most of the bugs.
 
