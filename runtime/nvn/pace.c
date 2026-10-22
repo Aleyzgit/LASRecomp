@@ -9,6 +9,7 @@
 #include "../game_addresses.h"
 #include "../rt.h"
 #include "pace.h"
+#include "slowframe.h"
 
 // The game advances its world one fixed step per frame in its 60 fps mode, and two steps per frame in its 30 fps mode
 // (measured: Link walks twice as far per frame there) - so a 60-mode frame that takes 20 ms plays in slow motion, while
@@ -154,6 +155,7 @@ void pace_frame(void) {
     static uint64_t last_tcpu, last_rcpu;
     extern uint64_t rq_render_cpu_ns(void);  // rqueue.c: the render thread's CPU time so far (0: no render thread)
     uint64_t now = plat_now_ns(), w = g_blocked_ns, tcpu = plat_thread_cpu_ns(), rcpu = rq_render_cpu_ns();
+    slow_frame_present(now, tcpu);  // (slowframe.c: the "[slow]" line of a frame over LARECOMP_SLOW_FRAME_MS)
     uint64_t p = now - last, wt = w - last_wait, tc = tcpu - last_tcpu, rc = rcpu - last_rcpu;
     bool first = !last;
     last = now, last_wait = w, last_tcpu = tcpu, last_rcpu = rcpu;

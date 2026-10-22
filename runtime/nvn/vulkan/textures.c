@@ -608,7 +608,8 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     bool full = b->dynamic || !b->uploaded || always_full;
     bool periodic = frame - b->full_frame >= 120 && full_hash_budget >= total;  // (safety net: a full hash now and then)
     if (!full && periodic) { full = true; full_hash_budget -= total; }
-    if (!b->tp) b->tp = texpatch_identify(t) + 1;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
+    bool identified_now = !b->tp;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
+    if (identified_now) b->tp = texpatch_marker(t);
     bool restyle = b->tp > 0 && b->tp <= TEXPATCH_RECOLOUR_BASE && b->uploaded && b->tp_gen != texpatch_generation();
     // The OS's page write tracking (exec.c vk_pages_changed, shared with the vertex cache): texture memory the CPU
     // hasn't written since the last check is not hashed at all (dynamic textures were fully hashed every frame,
@@ -633,15 +634,21 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         if (sh == b->sample_hash) return;
     }
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
+    extern void slow_note_full_hash(void), slow_note_upload(uint64_t bytes);  // (slowframe.h)
+    slow_note_full_hash();
     uint64_t h = hash_full(mem, total);
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
     if (b->uploaded && h == b->data_hash && !restyle) return;
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
+    // new contents (the game reused the memory for another image, or the data arrived after the first check): which
+    // known texture it is, if any, is decided again before this upload patches it
+    if (!identified_now && h != b->data_hash) b->tp = texpatch_marker(t);
     if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
     if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
+    slow_note_upload(total);
     VkCommandBuffer cb = vk_upload_cmd();
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
@@ -988,6 +995,75 @@ VkImageView vk_dummy_view(int textype) {
     b->levels = 1;
     b->layers = cube ? 6 : 1;
     views[textype] = vk_image_view(b, vt, b->format, 0, 1, 0, cube ? 6 : 1, IDENTITY, VK_IMAGE_ASPECT_COLOR_BIT);
+    return views[textype];
+}
+
+// Depth compare (sampler*Shadow) needs a view whose format has SAMPLED_IMAGE_DEPTH_COMPARISON: the RGBA8 dummy above
+// has not (VUID-vkCmdDrawIndexed-None-06479). Shadow slots with nothing usable bound get a 1x1 depth image instead,
+// cleared to 1.0: the farthest depth, so a less / less-equal compare reads it as lit (no shadow), as an empty shadow
+// map would. D32_SFLOAT where it can be compared, else D16_UNORM. 3D (no shadow form) and 1D (depth 1D images are not
+// required) types keep the colour dummy.
+bool vk_format_depth_compare(VkFormat f) {
+    static VkFormat fs[16];
+    static int8_t ok[16];
+    static int n;
+    for (int i = 0; i < n; i++) if (fs[i] == f) return ok[i];
+    VkFormatProperties3 p3 = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_3};
+    VkFormatProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2, .pNext = &p3};
+    vkGetPhysicalDeviceFormatProperties2(g_vk.phys, f, &p2);
+    bool r = (p3.optimalTilingFeatures & VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_DEPTH_COMPARISON_BIT) != 0;
+    if (n < 16) { fs[n] = f; ok[n++] = r; }
+    return r;
+}
+
+// t's sampled image can be read with a depth compare (a depth image of a comparable format)
+bool vk_tex_depth_compare(NvnTexture *t) {
+    TexBackend *b = t ? (TexBackend *)t->backend : NULL;
+    return b && (b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) && vk_format_depth_compare(b->format);
+}
+
+VkImageView vk_dummy_depth_view(int textype) {
+    static TexBackend dummies[10];
+    static VkImageView views[10];
+    if (textype < 0 || textype >= 10) textype = TEXTYPE_2D;
+    if (views[textype]) return views[textype];
+    VkImageViewType vt = view_type_for(textype);
+    if (vt != VK_IMAGE_VIEW_TYPE_2D && vt != VK_IMAGE_VIEW_TYPE_2D_ARRAY && vt != VK_IMAGE_VIEW_TYPE_CUBE &&
+        vt != VK_IMAGE_VIEW_TYPE_CUBE_ARRAY)
+        return vk_dummy_view(textype);
+    static VkFormat df;
+    if (!df) {
+        df = vk_format_depth_compare(VK_FORMAT_D32_SFLOAT) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_D16_UNORM;
+        LOG("[vk] shadow slot dummy: 1x1 %s cleared to 1.0\n", df == VK_FORMAT_D32_SFLOAT ? "D32_SFLOAT" : "D16_UNORM");
+    }
+    bool cube = vt == VK_IMAGE_VIEW_TYPE_CUBE || vt == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+    uint32_t layers = cube ? 6 : 1;
+    TexBackend *b = &dummies[textype];
+    VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0,
+                            .imageType = VK_IMAGE_TYPE_2D, .format = df, .extent = {1, 1, 1}, .mipLevels = 1,
+                            .arrayLayers = layers, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+                            .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+    VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
+    if (vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL) != VK_SUCCESS) {
+        LOG("[vk] shadow slot dummy: depth image creation failed, the colour dummy instead\n");
+        return views[textype] = vk_dummy_view(textype);
+    }
+    VkCommandBuffer cb = vk_upload_cmd();
+    vk_image_init_layout(cb, b->image, VK_IMAGE_ASPECT_DEPTH_BIT);
+    VkClearDepthStencilValue one = {1.0f, 0};
+    VkImageSubresourceRange all = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, layers};
+    vkCmdClearDepthStencilImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, &one, 1, &all);
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                           .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    b->format = df;
+    b->levels = 1;
+    b->layers = layers;
+    b->aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    views[textype] = vk_image_view(b, vt, df, 0, 1, 0, layers, IDENTITY, VK_IMAGE_ASPECT_DEPTH_BIT);
+    if (!views[textype]) views[textype] = vk_dummy_view(textype);
     return views[textype];
 }
 

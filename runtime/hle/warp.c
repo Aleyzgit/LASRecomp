@@ -688,12 +688,13 @@ void give_item_tick(Cpu *c, uint64_t frame) {
     { extern void rescue_tick(uint64_t); rescue_tick(frame); }  // (softlock rescues: runtime/hle/rescue.c)
     pane_scan_tick(frame);
     { extern void doorjump_tick(uint64_t frame); doorjump_tick(frame); }
-    { extern void pot_reveal_tick(uint64_t frame); pot_reveal_tick(frame); }  // (after doorjump: Link found)
+    { extern void pot_regrow_tick(uint64_t frame); pot_regrow_tick(frame); }  // (after doorjump: Link found)
     { extern void souls_tick(uint64_t frame); souls_tick(frame); }  // (boss / mini-boss souls: runtime/hle/souls.c)
     { extern void triforce_tick(void); triforce_tick(); }  // (Triforce hunt: the get message's flags, triforce.c)
     { extern void hookshot_tour_tick(uint64_t frame); hookshot_tour_tick(frame); }
     { extern void flags_ext_tick(void); flags_ext_tick(); }  // (game thread: flag gets / sets happen here too)
     { extern void rt_powder_flag_tick(void); rt_powder_flag_tick(); }  // (found powder: keysanity.c)
+    { extern void silent_pickups_tick(uint64_t); silent_pickups_tick(frame); }  // (a silent Heart Container's refill)
     ptrscan_tick(frame);
     memdump_tick(frame);
     find_move_tick(frame);

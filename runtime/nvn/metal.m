@@ -560,20 +560,27 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
     if (!full && g_frame_counter - b->full_frame >= 120 && full_hash_budget >= total) { full = true; full_hash_budget -= total; }
-    if (!b->tp) b->tp = texpatch_identify(t) + 1;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
+    bool identified_now = !b->tp;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
+    if (identified_now) b->tp = texpatch_marker(t);
     bool restyle = b->tp > 0 && b->tp <= TEXPATCH_RECOLOUR_BASE && b->uploaded && b->tp_gen != texpatch_generation();
     if (!full && !restyle) {
         uint64_t sh = fnv_sample(mem, total);
         if (sh == b->sample_hash) return;
     }
+    extern void slow_note_full_hash(void), slow_note_upload(uint64_t bytes);  // (slowframe.h)
+    slow_note_full_hash();
     uint64_t h = hash_full(mem, total);
     b->full_frame = g_frame_counter;
     b->sample_hash = fnv_sample(mem, total);
     if (b->uploaded && h == b->data_hash && !restyle) return;
     if (b->uploaded && h != b->data_hash) b->dynamic = true;
+    // new contents (the game reused the memory for another image, or the data arrived after the first check): which
+    // known texture it is, if any, is decided again before this upload patches it
+    if (!identified_now && h != b->data_hash) b->tp = texpatch_marker(t);
     if (b->tp > 0) b->tp_gen = texpatch_generation();
     b->data_hash = h;
     b->uploaded = true;
+    slow_note_upload(total);
     // callers without an encoder get a private upload command buffer, created only when needed
     id<MTLCommandBuffer> own_cb = nil;
     if (!blit) { own_cb = [queue commandBuffer]; blit = [own_cb blitCommandEncoder]; }
@@ -864,7 +871,7 @@ void backend_guest_memory_reset(void) {
 
 // The window goes black while the game is down (instead of holding its last frame).
 void backend_clear_window(void) {
-    if (!layer || !dev) return;
+    if (!layer || !dev || rq_stopping()) return;
     rq_drain();
     @autoreleasepool {
         id<CAMetalDrawable> drawable = [layer nextDrawable];
@@ -1228,6 +1235,7 @@ void backend_represent(void) {
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
 void backend_present_now(NvnTexture *t, uint64_t frame) {
+    if (rq_stopping()) return;  // quitting: no drawable after the window closed (#40, as Vulkan)
     extern void renderer_submit(void);
     extern void renderer_texture_will_read(NvnTexture *t);
     renderer_texture_will_read(t);  // (a recorded clear of the image becomes its pass first)
@@ -1444,8 +1452,8 @@ static void present_hooks(void) {
     pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
-    static long slow_ms = -1;  // LARECOMP_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    static long slow_ms = -1;  // LARECOMP_SIM_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
+    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SIM_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SIM_SLOW_FRAME_MS")) : 0;
     static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
     if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
     if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) usleep((useconds_t)slow_ms * 1000);
@@ -1517,6 +1525,20 @@ SDL_Window *ui_window(void) { return window; }
 void *ui_metal_layer(void) { return (__bridge void *)layer; }
 void *ui_metal_device(void) { return (__bridge void *)dev; }
 
+// Quitting, before exit() (the window closed): the render thread stops between items (no nextDrawable / present
+// any more), then the GPU finishes what it was given - before exit()'s handlers and destructors run under it.
+void backend_quit(void) {
+    static atomic_flag once = ATOMIC_FLAG_INIT;
+    if (atomic_flag_test_and_set(&once)) return;
+    rq_stop();
+    if (!queue) return;
+    @autoreleasepool {
+        id<MTLCommandBuffer> cb = [queue commandBuffer];  // (one queue, in order: done when everything before it is)
+        [cb commit];
+        [cb waitUntilCompleted];
+    }
+}
+
 int ui_run(void) {
     // The emulated vsync/timer threads need precise sleeps; App Nap timer coalescing
     // otherwise stretches 16ms sleeps to ~100ms whenever the window isn't frontmost.
@@ -1532,7 +1554,7 @@ int ui_run(void) {
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             input_rumble_poll();
-            if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); input_led_stop(); LOG("window closed\n"); exit(0); }
+            if (e.type == SDL_EVENT_QUIT) { input_rumble_stop(); input_led_stop(); LOG("window closed\n"); backend_quit(); exit(0); }
             if (input_user_blocked(&e)) continue;  // scripted test runs: the real keyboard / mouse / pads do nothing
             input_cursor_event(&e);
             if (menu_handle_event(&e)) continue;
