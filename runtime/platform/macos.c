@@ -16,10 +16,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
+#include <sys/sysctl.h>
 #include <sys/ucontext.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "../paths.h"
 #include "../platform.h"
 #include "posix_log.h"
 
@@ -37,14 +40,44 @@ static void log_to_file_in_app(void) {
     uint32_t sz = sizeof exe;
     if (isatty(STDERR_FILENO) || _NSGetExecutablePath(exe, &sz) != 0 || !strstr(exe, ".app/Contents/MacOS/")) return;
     char dir[900];
-    const char *env = getenv("LARECOMP_DATA_ROOT"), *home = getenv("HOME");
-    if (env && *env) snprintf(dir, sizeof dir, "%s", env);
-    else snprintf(dir, sizeof dir, "%s/Library/Application Support/com.peiikai.lasrecomp", home && *home ? home : "/tmp");
+    if (!rt_data_root_early(dir, sizeof dir)) return;  // (runtime/paths.h: the data folder, wherever it was moved)
     mkdir(dir, 0755);
     session_log_open(dir, g_log_path, sizeof g_log_path);
 }
 
-void plat_init(void) { log_to_file_in_app(); }
+static void sysctl_str(const char *name, char *out, size_t n) {
+    size_t len = n;
+    if (sysctlbyname(name, out, &len, NULL, 0) != 0) out[0] = 0;
+    else out[n - 1] = 0;
+}
+static int64_t sysctl_int(const char *name) {
+    int64_t v = 0;  // (hw.memsize is 64-bit, the counts 32-bit: little-endian, so either fits)
+    size_t len = sizeof v;
+    return sysctlbyname(name, &v, &len, NULL, 0) == 0 ? v : 0;
+}
+
+void plat_system_info(PlatSysInfo *si) {
+    char ver[32], machine[32] = "";
+    sysctl_str("kern.osproductversion", ver, sizeof ver);
+    struct utsname u;
+    if (uname(&u) == 0) snprintf(machine, sizeof machine, "%s", u.machine);
+    bool rosetta = sysctl_int("sysctl.proc_translated") == 1;
+    snprintf(si->os, sizeof si->os, "macOS %s (%s%s)", ver[0] ? ver : "?", machine, rosetta ? ", Rosetta" : "");
+    sysctl_str("machdep.cpu.brand_string", si->cpu, sizeof si->cpu);
+    si->cores = (int)sysctl_int("hw.physicalcpu");
+    si->threads = (int)sysctl_int("hw.logicalcpu");
+    int64_t p = sysctl_int("hw.perflevel0.physicalcpu"), e = sysctl_int("hw.perflevel1.physicalcpu");
+    if (p && e) snprintf(si->cores_detail, sizeof si->cores_detail, "%dP + %dE", (int)p, (int)e);
+    si->ram = (uint64_t)sysctl_int("hw.memsize");
+    char exe[1024];
+    uint32_t sz = sizeof exe;
+    si->package = _NSGetExecutablePath(exe, &sz) == 0 && strstr(exe, ".app/Contents/MacOS/") ? ".app" : NULL;
+}
+
+void plat_init(void) {
+    log_to_file_in_app();
+    raise_open_file_limit();
+}
 
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     // Everything readable/writable: macOS pages are 16K but the guest maps at 4K granularity.
@@ -76,6 +109,11 @@ uint64_t plat_now_ns(void) {
     return mach_absolute_time() * tb.numer / tb.denom;
 }
 
+uint64_t plat_thread_cpu_ns(void) {
+    struct timespec ts;
+    return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec : 0;
+}
+
 void plat_sleep_until_ns(uint64_t t) {
     if (!tb.denom) mach_timebase_info(&tb);
     mach_wait_until(t * tb.denom / tb.numer);
@@ -100,6 +138,8 @@ void plat_thread_realtime(uint64_t period_ns) {
 // the game's frame-critical threads there - the main thread (priority 44) builds and submits every frame. Priorities
 // 44 and more urgent get user-interactive (performance cores first), the rest user-initiated. LARECOMP_THREAD_QOS=0:
 // the default class as before.
+int plat_cpu_count(void) { return 0; }  // (no affinity masks here: the caller uses the machine's count)
+
 void plat_thread_guest(int prio) {
     static int on = -1;
     if (on < 0) on = !getenv("LARECOMP_THREAD_QOS") || atoi(getenv("LARECOMP_THREAD_QOS")) != 0;
@@ -142,6 +182,22 @@ void plat_fatal_notice(void) {
     CFUserNotificationDisplayAlert(0, kCFUserNotificationStopAlertLevel, NULL, NULL, NULL, CFSTR("LAS Recomp"), msg,
                                    CFSTR("OK"), NULL, NULL, NULL);
     if (msg) CFRelease(msg);
+}
+
+static void *notice_thread(void *text) {
+    CFStringRef msg = CFStringCreateWithCString(NULL, text, kCFStringEncodingUTF8);
+    CFUserNotificationDisplayAlert(0, kCFUserNotificationCautionAlertLevel, NULL, NULL, NULL, CFSTR("LAS Recomp"), msg,
+                                   CFSTR("OK"), NULL, NULL, NULL);
+    if (msg) CFRelease(msg);
+    free(text);
+    return NULL;
+}
+void plat_notice(const char *text) {
+    if (!g_log_path[0]) return;
+    pthread_t t;
+    char *copy = strdup(text);
+    if (copy && !pthread_create(&t, NULL, notice_thread, copy)) pthread_detach(t);
+    else free(copy);
 }
 
 void plat_print_backtrace(void) {
@@ -210,12 +266,12 @@ int plat_proc_wait(PlatProc p, bool block) {
     pid_t r = waitpid((pid_t)p, &st, block ? 0 : WNOHANG);
     if (r == 0) return -1;
     if (r < 0) return 255;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? PLAT_PROC_SIGNALED + WTERMSIG(st) : 255;
 }
 
 static int rm_entry(const char *path, const struct stat *sb, int flag, struct FTW *ftw) {
     (void)sb, (void)flag, (void)ftw;
-    return remove(path);
+    return remove(path) == 0 || errno == ENOENT ? 0 : -1;  // (gone already: e.g. a ._ file macOS removed with its folder on exFAT)
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
 bool plat_onedrive_synced(const char *dir) { (void)dir; return false; }

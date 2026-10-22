@@ -39,13 +39,7 @@ This is a beta release. That means bugs are likely, crashes could occur, randomi
 
 ### Known issues
 
-- The Mysterious Woods look wrong when viewed from outside the woods.
-- Some lighting effects show horizontal or vertical lines in dungeons, caves and houses.
-- Controller doesn’t work on the start screen.
-- Shadow bugs in big dungeon rooms at ultrawide
-- Black boxes sometimes appear in dungeon rooms.
-- Checking the dresser in BowWow's mom's room causes the game to crash.
-- Clicking Title Screen in LAS Recomp's custom settings crashes.
+Known issues and their status are on the [GitHub issues page](https://github.com/peiikai/LASRecomp/issues).
 
 ## Features
 
@@ -65,8 +59,10 @@ This is a beta release. That means bugs are likely, crashes could occur, randomi
   [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB)) in `gamecontrollerdb.txt` in the data
   folder (see "Where files live" below); the log names it once it works: `[input] gamepad: ...`.
 - Optional 360-degree movement, blur removal and a hidden Hero Mode icon.
+- Optional run timer in the corner: real time from the start of gameplay to the ending (set it before starting a
+  save), and LiveSplit support through its Server component: auto-start, a split for each instrument and the ending.
 - Apple MetalFX upscaler on macOS (the default there).
-- Internal resolution adjustments: raise or lower the resolution in steps, match the display, or use dynamic resolution. Combined with the MetalFX upscaler, even a MacBook Air should handle this easily with the right settings. Bilinear upscaling is the only option on Windows currently.
+- Internal resolution adjustments: raise or lower the resolution in steps, match the display, or use dynamic resolution. Combined with the MetalFX upscaler, even a MacBook Air should handle this easily with the right settings. On Windows and Linux the AMD FSR 1 upscaler is available.
 
 **Randomizer**
 - In-game seed generator.
@@ -101,20 +97,22 @@ This is a beta release. That means bugs are likely, crashes could occur, randomi
   - Switch companions from the pause menu, or send yours away.
 - Boss souls - a boss doesn't appear, can't be beaten and its reward stays locked until you find its soul.
 - Mini-boss souls - the same for dungeon mini-bosses (a separate option).
+- Triforce hunt - collect Triforce pieces (3, 12, 24 or any number up to 50, optionally with extra pieces hidden) instead
+  of waking the Wind Fish; the last one needed rolls the credits.
 - Entrance Randomizer - shuffles dungeon entrances, houses and caves, and connector caves. Includes a decoupled option.
-- Dungeon Room Shuffler - shuffles all dungeon rooms, creating unique custom dungeons every seed. Three modes:
-  - Coherent: dungeon rooms are shuffled but connecting rooms are lined up. To keep this workable in logic, dungeons
-    sometimes use duplicate rooms (as few as possible).
-  - Chaos: dungeon rooms are shuffled but don't need to make sense. Walking north may lead you to a door from another
-    direction.
-  - Madness: dungeon rooms are shuffled in a way that doesn't need to make sense AND the doors are decoupled, creating
-    nightmares to navigate.
+- Dungeon Room Shuffler - shuffles all dungeon rooms, creating unique custom dungeons every seed. Any doorway can
+  lead to any doorway of its dungeon (walking north may bring you out of a door on another side). Two modes:
+  - Coupled: doorways are linked in pairs, so going back through a door takes you back where you came from.
+  - Decoupled: doorways are one-way, so going back through a door takes you somewhere else, creating nightmares to
+    navigate.
   - Labyrinth (planned): an option for all dungeon room shuffles where doors in dungeons can lead into other dungeons,
     essentially making one giant dungeon with numerous wings.
   - Optionally the map shows what's connected to what as you explore, or in full once you find the dungeon's map.
 - The inventory screen tracks keys, dungeon items, trade items and souls for each dungeon, so you can see at a glance
   what you have keys for and which trade items you still hold.
 - Built-in check tracker on the overworld map (optional).
+- Race mode - the spoiler log stays locked until the credits, and the title / file select screen shows a seed hash of
+  five item icons so racers can check they have the same seed.
 
 ## Building from source
 
@@ -168,11 +166,29 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - macOS app: `~/Library/Application Support/com.peiikai.lasrecomp/` (the app itself is never written to).
 - Windows: next to `lasrecomp.exe`, so put the `LAS Recomp` folder somewhere writable (not Program Files).
 - Linux: `~/.local/share/lasrecomp/` (`$XDG_DATA_HOME/lasrecomp`).
+- Another folder (e.g. a bigger drive): Settings > Prelaunch > Data folder, or the Game Files window, moves everything
+  there (or starts fresh there); the folder above then only keeps `data_root.txt` with its path (and on Windows the logs).
 - Dev / portable mode: if the folder you start from has `extracted/` (a source checkout), that folder is used, as above.
 - `LARECOMP_DATA_ROOT=<dir>` overrides all of these.
 - The log (started without a terminal) is `lasrecomp.log` in that folder, always the latest run; up to five recent
   runs are kept as `lasrecomp-backup-*.log`. For a bug report attach `lasrecomp.log`, or if the problem was in an
   earlier run, that run's backup (by date modified).
+
+### Resuming game-code builds
+
+The game-code build keeps completed pieces in the game folder's `.gamebuild/`
+directory. **Cancel (B / Esc)** stops the compiler helpers; **Resume game code**
+appears after cancellation or interruption and continues from verified completed
+pieces. An interrupted build also resumes when LAS Recomp starts again. Generated
+source and object contents are checked before reuse. After success, only objects
+and their cache records are kept; generated C, logs, link files and compiler caches
+are removed. A generator update recompiles only changed pieces. Moving the app
+keeps reusable objects; changed compiler contents or flags require a full rebuild.
+
+**Game Files → Clear build cache** removes cached objects and temporary files,
+including the older `.zigcache` folder, while keeping the installed game library,
+game files and saves. Legacy build caches are upgraded automatically. Failed or
+cancelled builds keep the previous installed library until a replacement is ready.
 
 ## Credits
 
@@ -190,9 +206,12 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
   about 9 GB less memory committed (#107); the Vulkan fence fix for reused submission slots (#108); x86 rounding
   without x87 state changes (#115); movie memory freed on close, source change and reboot (#112); Vulkan stopping
   cleanly on GPU timeouts (#127); a strict Vulkan validation mode for automated tests (#128); Windows session logs:
-  `lasrecomp.log` always the latest run, with five backups (#114)
+  `lasrecomp.log` always the latest run, with five backups (#114); resumable game-code builds: a cancelled or interrupted setup picks up where it stopped (#56); randomizer check flags kept with committed saves (#170); save write fixes that keep a failed save from losing data (#169, merged in #182)
 - **[@gitarre1234rr5](https://github.com/gitarre1234rr5)** - controller rumble: the game's vibration on your controller
   (#104), and a regression test for the kernel's timed condition-variable wait (#88)
+- **[@rkammoun](https://github.com/rkammoun)** - diagnosed and patched the Metal 16-sampler limit behind the black walls in the Ukuku Prairie cave (#215, fixed in #216)
+- **[@NevesHenry](https://github.com/NevesHenry)** - a clear message on Linux when no folder or file window can open (#298), and the controller rumble test building again and running in CI (#299)
+- **[@ky1vstar](https://github.com/ky1vstar)** - the Linux aarch64 release built natively on an arm64 runner, cutting that build from about 1 h 20 to under 10 minutes (#319)
 
 Thanks also to everyone who reports issues and tests builds; your logs and screenshots find most of the bugs.
 
@@ -234,9 +253,9 @@ none of their files are used):
   (GPL 2.0; Python bindings BSD; runs small pieces of code to resolve jump tables) and
   [python-lz4](https://github.com/python-lz4/python-lz4) (BSD 3-clause, with the LZ4 library: BSD 2-clause)
 - [envytools](https://github.com/envytools/envytools) - NVIDIA GPU documentation used for the shader translator
-- **Ryujinx** by the Ryujinx Team and Contributors (MIT, `third_party/ryujinx/LICENSE.txt`) - the audio renderer's
-  reverb is a port of its ReverbState / reverb command and the mixer is modelled on its AudioRenderer; its shader
-  instruction decoders were the bit-layout reference for parts of the shader translator
+- An MIT-licensed open-source project's audio renderer and shader instruction decoders (license and copyright notice:
+  `third_party/ryujinx/LICENSE.txt`) - the audio renderer's reverb is a port of its reverb code and the mixer is
+  modelled on its renderer; its instruction decoders were the bit-layout reference for parts of the shader translator
 - **Dusklight** by the TwilitRealm team (https://github.com/TwilitRealm/dusklight) - design inspiration for the start
   screen (Play / Settings / Game Files layout)
 - **SuperMarioWonderRecomp** by BelmanteGu (https://github.com/BelmanteGu/SuperMarioWonderRecomp) - its
@@ -253,7 +272,7 @@ this repository and not in release builds. You must provide your own legally obt
 ## License
 
 LAS Recomp's own code (the recompiler tools, the runtime, the randomizer additions) is open source under the
-[MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), code ported from Ryujinx (MIT), Dear ImGui (MIT),
+[MIT License](LICENSE). Third-party components keep their own licenses: LAS-Randomizer (MIT), ported audio renderer code (MIT, see `third_party/`), Dear ImGui (MIT),
 Vulkan Memory Allocator (MIT), SMAA (MIT), AMD FSR 1 (MIT), the Baloo 2 font (SIL OFL 1.1), the DejaVu Sans font (Bitstream Vera / DejaVu license), SDL 3 (zlib), FFmpeg (LGPL 2.1+, linked dynamically), the
 Zig compiler (MIT; its LLVM / Clang / LLD: Apache 2.0 with LLVM exceptions; its C library headers keep their own
 licenses), and the generator helpers' bundled libraries listed under Credits (oead / evfl / Keystone in the seed

@@ -11,6 +11,7 @@
 #include <stdio.h>
 
 #include "../hle.h"
+#include "../rando.h"
 
 
 // item ids as AddItem gets them: Items.gsheet `itemID` (not the row number; rows 41+ differ)
@@ -33,9 +34,46 @@ static int refill(Cpu *c, int item, int count) {
     return 0;
 }
 
+// Found Magic Powder (LAS shuffle-powder): LAS lets powder in only once the event flag GetMagicPowder is set - a
+// powder capacity upgrade then adds 40 powder (chests, seashell rewards), the blue Skeletal Guards sell it. But every
+// item-get sequence for the key MagicPowder sets that flag too (Items.gsheet gettingFlag), whatever it shows: a powder
+// refill's "nowhere to put it" message and the Bomb Bag's (held up as the powder sack) set it without the bag, and
+// the next capacity upgrade handed out real powder. In these seeds the flag stays clear while the powder bit
+// (live save +0x5568 bit 8, set by the bag's own add) is - also mending saves where it was set that way.
+static int g_shuffle_powder = -1;  // the running seed has it (read again after an in-place reboot)
+RT_ON_RESET(shuffle_powder_reset) { g_shuffle_powder = -1; }
+
+bool flags_ext_get(int idx);  // flags_ext.c
+void flags_put(int idx, bool on);
+
+void rt_powder_flag_tick(void) {
+    enum { GET_MAGIC_POWDER = 295 };  // (GlobalFlags.gsheet index)
+    if (g_shuffle_powder < 0) {
+        g_shuffle_powder = 0;
+        const char *dir = rando_seed_dir();
+        static char buf[1 << 16];
+        char p[512];
+        FILE *f = dir ? (snprintf(p, sizeof p, "%s/settings.json", dir), fopen(p, "rb")) : NULL;
+        if (f) {
+            size_t n = fread(buf, 1, sizeof buf - 1, f);
+            buf[n] = 0;
+            fclose(f);
+            g_shuffle_powder = strstr(buf, "\"shuffle-powder\": true") != NULL;
+        }
+    }
+    if (!g_shuffle_powder || !flags_ext_get(GET_MAGIC_POWDER)) return;
+    if (*(const uint32_t *)(uintptr_t)(GA_LIVE_SAVE + 0x5568) & (1u << 8)) return;  // (the Powder Bag is found)
+    flags_put(GET_MAGIC_POWDER, false);
+    LOG("[pots] GetMagicPowder set without the Powder Bag: cleared\n");
+}
+
 // x0 item, x1 count, x2 index: returns 1 when handled (AddItem then returns at once)
 int rt_add_item(Cpu *c) {
+    extern void rt_silent_add(Cpu *);  // silent_pickups.c: a silent pickup's index back to the real one (+ its fly-in)
+    rt_silent_add(c);
     int item = (int)(int32_t)c->x[0], count = (int)(int32_t)c->x[1], index = (int)(int32_t)c->x[2];
+    extern int triforce_add_item(int item, int index);  // triforce.c: a Triforce piece (Triforce hunt)
+    if (triforce_add_item(item, index)) return 1;
     extern int rt_shop_add_item(Cpu *);  // shopsanity.c: a stolen shopsanity good
     if (rt_shop_add_item(c)) return 1;
     if (index == REFILL_INDEX && (item == IT_BOMB || item == IT_POWDER || item == IT_ARROW)) return refill(c, item, count);

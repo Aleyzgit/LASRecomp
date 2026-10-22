@@ -36,6 +36,27 @@ float widescreen_effect_stretch(uint64_t fs_hash) {
     return 1.0f;
 }
 
+// Untextured quads drawn with a full-screen viewport are taken for fades and flashes and fill the window
+// (runtime/nvn/renderer.m), but a layout pane draws that way too, whatever its size: the speaker-less message box's
+// dark band (622x46 behind the rounded box, "Wow! This looks pretty heavy!...") came out stretched to the window's
+// width, two dark bars beside the box at 32:9 (user 2026-10-20). A layout (ui2d) draw's vertex uniforms hold the
+// projection (floats 0-15), the pane's model-view rows (16-27) and its rect (132-135: width, height, left, top; y up):
+// true when they describe a pane that doesn't cover the screen (such a draw stays in the 16:9 box).
+bool widescreen_ui_pane_partial(const float *u, uint64_t size) {
+    if (!u || size != 560) return false;
+    if (u[15] != 1 || u[12] != 0 || u[13] != 0 || !(u[0] > 0) || u[5] == 0) return false;  // (orthographic projection)
+    float w = u[132], h = u[133], l = u[134], t = u[135];
+    if (!(w > 0) || !(h > 0) || !(w < 1e5f) || !(h < 1e5f)) return false;
+    float lo[2] = {1e9f, 1e9f}, hi[2] = {-1e9f, -1e9f};
+    for (int i = 0; i < 4; i++) {
+        float x = l + (i & 1 ? w : 0), y = t - (i & 2 ? h : 0);
+        float X = u[16] * x + u[17] * y + u[19], Y = u[20] * x + u[21] * y + u[23], Z = u[24] * x + u[25] * y + u[27];
+        float n[2] = {u[0] * X + u[1] * Y + u[2] * Z + u[3], u[4] * X + u[5] * Y + u[6] * Z + u[7]};
+        for (int k = 0; k < 2; k++) lo[k] = fminf(lo[k], n[k]), hi[k] = fmaxf(hi[k], n[k]);
+    }
+    return lo[0] > -0.99f || hi[0] < 0.99f || lo[1] > -0.99f || hi[1] < 0.99f;
+}
+
 // Off in rooms that should keep 16:9 framing (interiors, dungeons) -- see widescreen_update.
 static bool g_allowed = true;
 static bool g_indoor;
@@ -76,6 +97,13 @@ float rt_cull_aspect(float orig) {
     return rt_aspect_site(6) * (orig > 0.1f && orig < 10.0f ? orig / (16.0f / 9.0f) : 1.0f);
 }
 
+// Sky and sea pieces past the north edge (tools/patches.py SKYSEA_BOX_SITES): a piece shows while Link is within
+// its reach plus half a 16:9 view (7.5). A wider view reaches further: half its extra width, doubled for the far
+// (top) edge of the perspective view, where the sky is.
+float rt_skysea_margin(void) {
+    return g_wide > 1.0f ? 15.0f * (g_wide - 1.0f) : 0.0f;
+}
+
 // Vertical field of view: unchanged for wide outputs; for tall ones (factor < 1) widened so the
 // horizontal view stays what the game shows at 16:9.
 float rt_fovy(float orig) {
@@ -106,7 +134,7 @@ static uint64_t g_backdrop_frame = ~0ull;
 void widescreen_backdrop_seen(uint64_t hash) {
     static const uint64_t known[] = {BACKDROP_HASHES};
     for (unsigned i = 0; i < sizeof known / sizeof known[0]; i++)
-        if (known[i] && hash == known[i]) { extern uint64_t renderer_present_count(void); g_backdrop_frame = renderer_present_count(); }
+        if (known[i] && hash == known[i]) { extern uint64_t renderer_exec_frame(void); g_backdrop_frame = renderer_exec_frame(); }
     (void)g_backdrop_hash;
 }
 // Interiors and dungeons only render their 16:9 centre. Besides the backdrop detection, the game's current level
@@ -145,8 +173,10 @@ static float g_vp[16];  // rows
 bool g_room_wide;  // the last presented frame showed a room wider than 16:9
 static uint64_t g_vp_frame = ~0ull;
 void widescreen_scene_ubo(const float *u, uint64_t size) {
-    extern uint64_t renderer_present_count(void);
-    uint64_t f = renderer_present_count();
+    // (the frame being translated, as the present that crops it numbers it: with the render thread on, the game
+    // thread's counter is already a frame ahead here, and every room read as "no scene camera" - boxed 16:9)
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
     if (size != 320 || g_vp_frame == f) return;  // (the frame's first scene draw)
     if (u[12] != 0 || u[13] != 0 || u[14] != 0 || u[15] != 1 || u[30] != -1 || u[31] != 0) return;  // perspective
     memcpy(g_vp, u + 32, sizeof g_vp);
@@ -168,6 +198,14 @@ static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
     }
     *id = *(const uint32_t *)(uintptr_t)z;
     return true;
+}
+
+// The current camera zone record (a dungeon room, an interior), 0 when there is none (overworld, title, loading).
+// (Frame pacing: runtime/nvn/pace.c - a room change is a new scene.)
+uint64_t game_camera_zone(void) {
+    float lo[3], hi[3];
+    uint32_t id;
+    return current_zone(lo, hi, &id) ? LD64(LD64(GA_SDK_SYSTEM_OBJECT) + 0x680) : 0;
 }
 
 // Horizontal crop (uv of the wide image): ROOM_CROP for a room wider than one screen (u0..u1), ROOM_BOX for a

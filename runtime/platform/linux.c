@@ -17,10 +17,13 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/sysinfo.h>
 #include <sys/ucontext.h>
+#include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "../paths.h"
 #include "../platform.h"
 #include "posix_log.h"
 
@@ -93,6 +96,18 @@ static void wt_init(uint64_t lo, uint64_t hi) {
     g_wt_page = pg;
 }
 
+// Tracking off after all (the Vulkan backend at boot, before any query protected a page: nothing is protected yet), with
+// the reason logged; LARECOMP_WRITE_TRACKING=1 keeps it on. Closing the userfaultfd unregisters the window.
+void plat_write_tracking_off(const char *why) {
+    if (g_uffd < 0 && g_pagemap < 0) return;
+    const char *e = getenv("LARECOMP_WRITE_TRACKING");
+    if (e && atoi(e)) { fprintf(stderr, "[plat] page write tracking kept on (LARECOMP_WRITE_TRACKING=1): %s\n", why); return; }
+    fprintf(stderr, "[plat] page write tracking off: %s\n", why);
+    if (g_pagemap >= 0) close(g_pagemap);
+    if (g_uffd >= 0) close(g_uffd);
+    g_pagemap = g_uffd = -1;
+}
+
 // ---- guest address space
 // Everything readable/writable from the start, like macOS: the guest maps at 4K granularity, and untouched pages
 // cost nothing (MAP_NORESERVE: the 12 GB window doesn't count against overcommit).
@@ -151,6 +166,11 @@ uint64_t plat_now_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000u + (uint64_t)ts.tv_nsec;
 }
 
+uint64_t plat_thread_cpu_ns(void) {
+    struct timespec ts;
+    return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) == 0 ? (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec : 0;
+}
+
 void plat_sleep_until_ns(uint64_t t) {
     struct timespec ts = {.tv_sec = (time_t)(t / 1000000000u), .tv_nsec = (long)(t % 1000000000u)};
     while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
@@ -158,6 +178,11 @@ void plat_sleep_until_ns(uint64_t t) {
 
 // Real-time scheduling where the user may have it (rtkit / limits.conf), else just a higher priority: keeps the
 // vsync thread on time while the guest threads load every core.
+int plat_cpu_count(void) {
+    cpu_set_t set;
+    return sched_getaffinity(0, sizeof set, &set) == 0 ? CPU_COUNT(&set) : 0;
+}
+
 void plat_thread_guest(int prio) { (void)prio; }  // (the OS's default scheduling serves the game here)
 
 void plat_thread_realtime(uint64_t period_ns) {
@@ -175,12 +200,7 @@ static char g_log_path[1024];
 static void log_to_file_without_terminal(void) {
     if (isatty(STDERR_FILENO)) return;
     char dir[900];
-    const char *env = getenv("LARECOMP_DATA_ROOT"), *xdg = getenv("XDG_DATA_HOME"), *home = getenv("HOME");
-    struct stat st;
-    if (env && *env) snprintf(dir, sizeof dir, "%s", env);
-    else if (stat("extracted", &st) == 0 && S_ISDIR(st.st_mode)) return;  // dev mode: wherever stderr goes already
-    else if (xdg && *xdg == '/') snprintf(dir, sizeof dir, "%s/lasrecomp", xdg);
-    else snprintf(dir, sizeof dir, "%s/.local/share/lasrecomp", home && *home ? home : "/tmp");
+    if (!rt_data_root_early(dir, sizeof dir)) return;  // dev mode: wherever stderr goes already
     for (char *c = dir + 1; *c; c++)
         if (*c == '/') { *c = 0; mkdir(dir, 0755); *c = '/'; }
     mkdir(dir, 0755);
@@ -201,8 +221,68 @@ static void require_cpu(void) {
 static void require_cpu(void) {}
 #endif
 
+// "key=value" / "key\t: value" lines: the value of the first line starting with key (quotes and spaces trimmed)
+static bool kv_line(const char *line, const char *key, char sep, char *out, size_t n) {
+    size_t k = strlen(key);
+    if (strncmp(line, key, k)) return false;
+    const char *p = line + k;
+    while (*p == ' ' || *p == '\t') p++;
+    if (*p++ != sep) return false;
+    while (*p == ' ' || *p == '\t' || *p == '"') p++;
+    snprintf(out, n, "%s", p);
+    for (size_t l = strlen(out); l && (out[l - 1] == '\n' || out[l - 1] == '"' || out[l - 1] == ' '); l--) out[l - 1] = 0;
+    return true;
+}
+
+void plat_system_info(PlatSysInfo *si) {
+    // the OS: /etc/os-release (the host's, also inside an AppImage; SteamOS: NAME="SteamOS", VERSION_ID), the kernel
+    char pretty[96] = "", name[64] = "", ver[48] = "", line[512];
+    FILE *f = fopen("/etc/os-release", "r");
+    if (!f) f = fopen("/usr/lib/os-release", "r");
+    for (; f && fgets(line, sizeof line, f);) {
+        if (!pretty[0]) kv_line(line, "PRETTY_NAME", '=', pretty, sizeof pretty);
+        if (!name[0]) kv_line(line, "NAME", '=', name, sizeof name);
+        if (!ver[0]) kv_line(line, "VERSION_ID", '=', ver, sizeof ver);
+    }
+    if (f) fclose(f);
+    char os[160];
+    if (pretty[0] && (!ver[0] || strstr(pretty, ver))) snprintf(os, sizeof os, "%s", pretty);
+    else if (pretty[0] || name[0]) snprintf(os, sizeof os, "%s %s", pretty[0] ? pretty : name, ver);
+    else snprintf(os, sizeof os, "Linux");
+    struct utsname u;
+    if (uname(&u) == 0) snprintf(si->os, sizeof si->os, "%.80s (%s, kernel %.32s)", os, u.machine, u.release);
+    else snprintf(si->os, sizeof si->os, "%.80s", os);
+    // the CPU: x86 "model name"; ARM boards often have none - the device tree's model then (e.g. "Raspberry Pi 5")
+    // cores: distinct (physical id, core id) pairs; threads: the processors online
+    si->threads = (int)sysconf(_SC_NPROCESSORS_ONLN);
+    enum { MAXC = 1024 };
+    static int seen[MAXC];
+    int nseen = 0, phys = 0;
+    f = fopen("/proc/cpuinfo", "r");
+    for (char v[128]; f && fgets(line, sizeof line, f);) {
+        if (!si->cpu[0] && kv_line(line, "model name", ':', si->cpu, sizeof si->cpu)) continue;
+        if (kv_line(line, "physical id", ':', v, sizeof v)) phys = atoi(v);
+        else if (kv_line(line, "core id", ':', v, sizeof v)) {
+            int key = phys * 4096 + atoi(v), i = 0;
+            while (i < nseen && seen[i] != key) i++;
+            if (i == nseen && nseen < MAXC) seen[nseen++] = key;
+        }
+    }
+    if (f) fclose(f);
+    si->cores = nseen ? nseen : si->threads;
+    if (!si->cpu[0] && (f = fopen("/proc/device-tree/model", "r"))) {
+        size_t n = fread(si->cpu, 1, sizeof si->cpu - 1, f);
+        si->cpu[n] = 0;  // (NUL-terminated in the file already)
+        fclose(f);
+    }
+    struct sysinfo s;
+    if (sysinfo(&s) == 0) si->ram = (uint64_t)s.totalram * s.mem_unit;
+    si->package = getenv("APPIMAGE") ? "AppImage" : NULL;  // (set by the AppImage runtime; its value is a path: not logged)
+}
+
 void plat_init(void) {
     log_to_file_without_terminal();
+    raise_open_file_limit();
     require_cpu();
 }
 
@@ -256,6 +336,19 @@ void plat_fatal_notice(void) {
     if (!g_log_path[0]) return;
     fflush(stderr);
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "LAS Recomp", text, NULL);
+}
+
+static void *notice_thread(void *text) {
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, "LAS Recomp", text, NULL);
+    free(text);
+    return NULL;
+}
+void plat_notice(const char *text) {
+    if (!g_log_path[0]) return;
+    pthread_t t;
+    char *copy = strdup(text);
+    if (copy && !pthread_create(&t, NULL, notice_thread, copy)) pthread_detach(t);
+    else free(copy);
 }
 
 bool plat_module_name(uint64_t pc, char *out, size_t n) {
@@ -352,12 +445,12 @@ int plat_proc_wait(PlatProc p, bool block) {
     pid_t r = waitpid((pid_t)p, &st, block ? 0 : WNOHANG);
     if (r == 0) return -1;
     if (r < 0) return 255;
-    return WIFEXITED(st) ? WEXITSTATUS(st) : 255;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : WIFSIGNALED(st) ? PLAT_PROC_SIGNALED + WTERMSIG(st) : 255;
 }
 
 static int rm_entry(const char *path, const struct stat *sb, int flag, struct FTW *ftw) {
     (void)sb, (void)flag, (void)ftw;
-    return remove(path);
+    return remove(path) == 0 || errno == ENOENT ? 0 : -1;  // (gone already: e.g. a ._ file macOS removed with its folder on exFAT)
 }
 bool plat_remove_tree(const char *dir) { return nftw(dir, rm_entry, 16, FTW_DEPTH | FTW_PHYS) == 0; }
 bool plat_onedrive_synced(const char *dir) { (void)dir; return false; }

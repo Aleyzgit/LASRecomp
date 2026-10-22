@@ -67,6 +67,27 @@ for _a in FOVY_SITES:
     PATCHES[_a] = _fovy_load
 
 
+# Sky and sea beyond the overworld's north edge (MapSkySea, map/SkySea.bfres): pieces 60 apart, each drawn only while
+# Link stands inside its box, the piece's centre +-(67.5, 50, 27) - its own reach plus half a 16:9 view. With a wider
+# view the next piece is needed sooner: at 32:9 the screen beside Link's showed black (no sky, no sea) until Link came
+# within 67.5. The box's across bounds are widened by the extra view (runtime/hle/widescreen.c rt_skysea_margin).
+SKYSEA_BOX_SITES = {A.SKYSEA_BOX_MAX_SITE: (0x3dc0bae1, 0x2e0, 1.0), A.SKYSEA_BOX_MIN_SITE: (0x3dc0b6e2, 0x2d0, -1.0)}
+
+
+def _skysea_box(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    want, off, sign = SKYSEA_BOX_SITES[a]
+    assert w == want, hex(w)  # ldr qN, [x23, #off]
+    rt = w & 31
+    return ('{ extern float rt_skysea_margin(void); float b[4]; '
+            f'memcpy(b, (const void *)(uintptr_t)(c->x[23] + {off:#x}), 16); b[0] += {sign}f * rt_skysea_margin(); '
+            f'memcpy(&c->v[{rt}], b, 16); }}  /* {a:#x}: ldr q{rt}, [x23, #{off:#x}] (sky / sea piece box) */')
+
+
+for _a in SKYSEA_BOX_SITES:
+    PATCHES[_a] = _skysea_box
+
+
 # Indoor detection: 0x7001023c70 (`ldr s1, =16/9`) is in the indoor shadow setup (community patch notes:
 # "Indoor Shadow AR"). It keeps loading 16:9 and tells the runtime an interior is being rendered.
 INDOOR_SITE = A.INDOOR_SITE
@@ -287,6 +308,21 @@ def _map_page(gen, a):
 PATCHES[MAP_PAGE_SITE] = _map_page
 
 
+# ... and its epilogue (the page's layout was updated this frame): the check tracker hides the game's own cursor and
+# button bar there (tracker_overlay.mm map_page_takeover), after the update that may have shown them again.
+MAP_PAGE_END_SITE = A.MAP_PAGE_END_SITE
+
+
+def _map_page_end(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x910203ff, hex(w)  # add sp, sp, #0x80
+    return ('{ extern void rt_map_page_end(Cpu *); rt_map_page_end(c); c->sp += 0x80; }'
+            f'  /* {a:#x}: add sp, sp, #0x80 (map page updated) */')
+
+
+PATCHES[MAP_PAGE_END_SITE] = _map_page_end
+
+
 # Chaos map letters (runtime/ui/chaos_overlay.mm): main+0xe78740 runs once per frame while the DUNGEON map page is
 # shown (fnprof: map open vs closed in Face Shrine); x0 = the dungeon map page.
 DGN_MAP_SITE = A.DGN_MAP_SITE
@@ -300,6 +336,21 @@ def _dgn_map(gen, a):
 
 
 PATCHES[DGN_MAP_SITE] = _dgn_map
+
+
+# ... and its epilogue: the check tracker hides the dungeon map page's own cursor and button bar there
+# (tracker_overlay.mm), after the update that may have shown them again.
+DGN_MAP_END_SITE = A.DGN_MAP_END_SITE
+
+
+def _dgn_map_end(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x910243ff, hex(w)  # add sp, sp, #0x90
+    return ('{ extern void rt_dgnmap_end(Cpu *); rt_dgnmap_end(c); c->sp += 0x90; }'
+            f'  /* {a:#x}: add sp, sp, #0x90 (dungeon map page updated) */')
+
+
+PATCHES[DGN_MAP_END_SITE] = _dgn_map_end
 
 
 # Debug (LARECOMP_LOG_RESNAME=1): main+0x10def30 builds a resource handle from a name (x2 -> {char *name, ...})
@@ -344,6 +395,40 @@ def _frame_steps(gen, a):
 PATCHES[FRAME_STEPS_SITE] = _frame_steps
 
 
+# The game's own dynamic resolution, off: resolution is ours to choose (runtime/nvn/output_scale.c - a fixed choice
+# renders at exactly that size, "Dynamic" is our scaler alone). The game sizes its main pass by a level (renderer
+# +0x6e4c, docked): 1080 - 36 x level lines at 16:9 (f_7001023c10), level 0 = 1920x1080, 9 = 1344x756, 10 = 1280x720.
+# Its scaler (the object at +0x648: enabled byte, table indexes, the level tables - docked [0 3 6 9 10]) is set up at
+# boot (f_700107cb90) at the first table level >= the boot default (8: so 9, 1344x756). Then each frame its frame
+# controller (f_700000c910) turns its GPU timing counters (renderer+0x81c0) into a load figure (GPU time x 100 /
+# (16.67 ms x swap interval)); 6 frames all over 90%: one level down the table (f_700107d110), 6 all under 70%: up.
+# GAME_DYNRES_SITE: the enabled byte reads as 0 - no samples, no steps. GAME_DYNRES_INIT_SITE: the set-up reads the
+# boot default as 0 - it starts (and so stays) at level 0, full size. The rest of the frame controller - the 30 fps
+# mode, which reads the same counters - runs as before. LARECOMP_GAME_DYNRES=1 (test): the game's own again.
+GAME_DYNRES_SITE = A.GAME_DYNRES_SITE
+GAME_DYNRES_INIT_SITE = A.GAME_DYNRES_INIT_SITE
+
+
+def _game_dynres(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x395922e8, hex(w)  # ldrb w8, [x23, #0x648]
+    return ('{ extern int rt_game_dynres(void); '
+            'c->x[8] = rt_game_dynres() ? LD8(c->x[23] + 0x648) : 0; }'
+            f'  /* {a:#x}: ldrb w8, [x23, #0x648] (the game\'s dynamic resolution: off) */')
+
+
+def _game_dynres_init(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xb86d698c, hex(w)  # ldr w12, [x12, x13] (x13 = 0x6e4c)
+    return ('{ extern int rt_game_dynres(void); '
+            'c->x[12] = rt_game_dynres() ? LD32(c->x[12] + c->x[13]) : 0; }'
+            f'  /* {a:#x}: ldr w12, [x12, x13] (the game\'s starting resolution level: full size) */')
+
+
+PATCHES[GAME_DYNRES_SITE] = _game_dynres
+PATCHES[GAME_DYNRES_INIT_SITE] = _game_dynres_init
+
+
 # Digsanity (runtime/hle/digs.c): the shovel's dig commit (f_7000ddc530) spawns the hole actor (ObjHolesDug 0x1cd)
 # through f_7000d228d0(&out, transform x21, zone, &room, ...); right after it the hole (out at [sp+0x10]) and its
 # snapped tile-centre position (x21) tell the runtime which tile was dug - the first dig of a tile gives its item.
@@ -372,6 +457,22 @@ def _bottle3_use(gen, a):
 
 
 PATCHES[BOTTLE3_USE_SITE] = _bottle3_use
+
+
+# Hint Book (runtime/hle/hintbook.c): the same predicate of the FIRST bottle (slot 0xd, main+0xd510c0: owned =
+# PlayerStatus+0xa9 bit 5, empty = +0xc0 bit 0). In randomizer seeds that bottle is the Hint Book: used, the runtime
+# shows the next hint in the game's message box and the answer is no (no swing).
+BOTTLE1_USE_SITE = A.BOTTLE1_USE_SITE
+
+
+def _bottle1_use(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x1a9f17e0, hex(w)  # cset w0, eq
+    return ('{ extern int rt_bottle1_use(void); c->x[0] = COND_NE(c) ? 0 : 1; if (c->x[0] && rt_bottle1_use()) c->x[0] = 0; }'
+            f'  /* {a:#x}: cset w0, eq (first bottle used: Hint Book) */')
+
+
+PATCHES[BOTTLE1_USE_SITE] = _bottle1_use
 
 
 # Boss souls (runtime/hle/souls.c): the actor factory f_70008f5ea0 (x2 = spawn info, type u16 at +8) takes the type's
@@ -429,6 +530,58 @@ def _snap_dir(gen, a):
 
 
 PATCHES[SNAP_DIR_SITE] = _snap_dir
+
+
+# Walk speed (runtime/hle/qol.c, setting walk_speed): Link's walk state (main+0xdcdae0) and shield walk (main+0xdb7d30)
+# put a speed multiplier in s0 right before these loads - 1.0, or 1.15 with a Piece of Power - and scale the ramped
+# walk speed by it (then by the slow-ground factors 0.25 / 0.75). rt_walk_speed multiplies s0 by the setting. The
+# Pegasus Boots dash, swimming and side-view ladders have their own speeds and are untouched, and so is the hop off a
+# ledge (the same multiplier loaded again at main+0xdce508 / 0xdd0254 / 0xdb86e8 / 0xdb8f3c: left alone, so jump
+# distances stay the game's own).
+WALK_SPEED_SITES = {A.WALK_SPEED_SITES_0: (19, 0), A.WALK_SPEED_SITES_1: (19, 1), A.WALK_SPEED_SITES_2: (20, 2),
+                    A.WALK_SPEED_SITES_3: (20, 3)}
+
+
+def _walk_speed(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    rn, site = WALK_SPEED_SITES[a]
+    assert w == 0xf94ca408 | (rn << 5), hex(w)  # ldr x8, [x19|x20, #0x1948]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[0], 4); '
+            f'm_ = rt_walk_speed(c->x[{rn}], m_, {site}); c->v[0] = 0; memcpy(&c->v[0], &m_, 4); '
+            f'c->x[8] = LD64(c->x[{rn}] + 0x1948); }}'
+            f'  /* {a:#x}: ldr x8, [x{rn}, #0x1948] (walk speed multiplier in s0) */')
+
+
+for _a in WALK_SPEED_SITES:
+    PATCHES[_a] = _walk_speed
+
+
+# Walk animation rate: main+0xdce320 (walk state) has the walk animation's play rate in s8 (1, 0.75 on slow ground,
+# x1.15 with a Piece of Power), handed to the animation layers right after.
+def _walk_anim(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94ab668, hex(w)  # ldr x8, [x19, #0x1568]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[8], 4); '
+            'm_ = rt_walk_speed(c->x[19], m_, 100); c->v[8] = 0; memcpy(&c->v[8], &m_, 4); '
+            'c->x[8] = LD64(c->x[19] + 0x1568); }'
+            f'  /* {a:#x}: ldr x8, [x19, #0x1568] (walk animation rate in s8) */')
+
+
+PATCHES[A.WALK_ANIM_SITE_0] = _walk_anim
+
+
+# The same for the shield walk (main+0xdb8168): s0 = 1 or 0.75 on slow ground (times s1 = 1.15 with a Piece of Power
+# right after).
+def _shield_anim(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf94006c8, hex(w)  # ldr x8, [x22, #8]
+    return ('{ extern float rt_walk_speed(uint64_t, float, int); float m_; memcpy(&m_, &c->v[0], 4); '
+            'm_ = rt_walk_speed(c->x[20], m_, 101); c->v[0] = 0; memcpy(&c->v[0], &m_, 4); '
+            'c->x[8] = LD64(c->x[22] + 8); }'
+            f'  /* {a:#x}: ldr x8, [x22, #8] (shield walk animation rate in s0) */')
+
+
+PATCHES[A.WALK_ANIM_SITE_1] = _shield_anim
 
 
 # No Guardian Acorns / Pieces of Power (randomizer no-buff-drops, runtime/hle/qol.c): the drop roll main+0x89b960 reads
@@ -661,6 +814,15 @@ for _a in DELEGATE_FORWARDER_SITES:
 # with Warp tab jumps; same family as NO_HANDLER_SITES (the action dispatcher's).
 EMPTY_HANDLER_SITE = A.EMPTY_HANDLER_SITE  # bl main+0x108dfc0
 
+# Issue #183: the message window's question setup (main+0xef43b0) counts a question's answers as the text's pages
+# after the question's own (pages end at <0.4> and, past the style's line count, at a line break) and shows the
+# InOutChoice2/3/4 pane for it; Selecting (main+0xef2250, main+0xef2300) indexes those panes by the count with no
+# check. Every language's own text gives 2..4. Text of a 2-line language (Chinese, Japanese, Korean) in a 3-line
+# language's folder (a translation patch over the English text) makes the Mermaid's necklace question (Warashibe
+# QuestBra) a 1-answer question: pane "1" is no pane (the 0x10001 read) and the game crashes, on the console too. The
+# hook stops there with a crash message that says so instead.
+CHOICE_COUNT_SITE = A.CHOICE_COUNT_SITE  # str w8, [x19, #0x1cc4]
+
 # Issue #19 (the hang): the per-frame kick-off (main+0x15730, four inlined copies, one per owner X) rebuilds X's frame
 # job J (X+0xc8) in place. The job worker (main+0x13c21e0) runs J (main+0x10cceb0: sets X's done flag, wakes the main
 # thread, unlocks) and only then calls J's finish (main+0x10ccfa0 -> slot +0x00: base vtable, delegate cleared). A
@@ -671,12 +833,34 @@ FRAME_JOB_KICKOFF_SITES = [A.FRAME_JOB_KICKOFF_SITES_0, A.FRAME_JOB_KICKOFF_SITE
                            A.FRAME_JOB_KICKOFF_SITES_3]
 FRAME_JOB_FINISH_SITE = A.FRAME_JOB_FINISH_SITE
 
+# Startup hang (Windows, few cores): a call run on its object's owner thread. main+0x1048cf0 (slot +0x48 of the class
+# whose vtable is 0x7001c490b0; a loader thread calls it for an object O the main thread owns) locks O's mutex (O+0x18),
+# posts a task to the owner's queue ([O+8]) and waits on O's condition variable (O+0x38) once, with no predicate. The
+# task (main+0x1049ed0, on the main thread) stores the result at O+0x10 and calls notify_one without taking O's mutex.
+# If the loader thread is preempted between its post and its wait, the notify finds nobody and the loader waits forever,
+# while the main thread waits for that loader's load (key in its own task queue). The hook takes and drops O's mutex
+# before the notify: the loader holds it from before the post until its wait has begun, so the notify always lands.
+OWNER_CALL_NOTIFY_SITE = A.OWNER_CALL_NOTIFY_SITE
+
 
 # Shadow Link's Appear event (main+0xd157f0: requested once Link is within 3 units, ShadowLink.bfevfl) stops Link and
 # turns the camera to him; on the Field (seeds) the request is skipped and runtime/hle/miniboss.c plays his appearance
 # (Sign glow, then he pops up) without an event. The site is right after the function's already-requested check; the
 # skip goes to its return.
 SHADOW_LINK_APPEAR_SITE = A.SHADOW_LINK_APPEAR_SITE
+
+# Shadow Link's own music: once he is up and Link is in range, his code calls the chamber manager's start
+# (main+0xce8ce0: BGM_PANEL_SHADOW_LINK, the level's music held until his defeat calls main+0xce8f00). Dampe's chamber is
+# the only place he has in the game; in seeds, everywhere else (the Field, dungeons, caves, houses) the call is skipped
+# and the area's own music plays on (runtime/hle/miniboss.c rt_shadow_link_bgm).
+SHADOW_LINK_BGM_SITE = A.SHADOW_LINK_BGM_SITE
+
+# An actor's AI starting one of its events (main+0x94a510, x20 = the AI, flow name at [x29-0x40]): right before it
+# builds the event request (bl main+0x80c290). Any event request holds Link still while it runs; a randomizer item
+# picked up from the ground (a SinkingSword item actor) whose entry only sets its flag and adds a rupee / heart /
+# refill is given by the runtime instead (runtime/hle/quick_pickup.c) and the request skipped: the skip goes to the
+# function's no-event return.
+ACTOR_EVENT_SITE = A.ACTOR_EVENT_SITE
 
 
 # ---- hook sites: the instruction stays as it is; just before it the runtime's rt_hook (runtime/hle/hooks.c) is asked
@@ -693,14 +877,18 @@ HOOKS = {
     MSTALFOS_BODY_SITE: (0x320003e8, (), 'mov w8, #1: Master Stalfos body collision flag, off on the Field'),
     MSTALFOS_JUMP_SITE: (0x1e213800, (), 'fsub s0, s0, s1: Master Stalfos jump arc from his takeoff height'),
     SHADOW_LINK_APPEAR_SITE: (0xf9411809, (A.SHADOW_LINK_APPEAR_SKIP,), 'ldr x9, [x0, #0x230]: Shadow Link, no Appear event on the Field'),
+    SHADOW_LINK_BGM_SITE: (0x97ff5eac, (), 'bl main+0xce8ce0: Shadow Link starts his chamber music, not outside it'),
+    ACTOR_EVENT_SITE: (0x97fb074a, (A.ACTOR_EVENT_SKIP,), 'bl main+0x80c290: an actor\'s event request (quick pickups: none)'),
     MCHIEF_STORY_SITE: (0x37380148, (A.MCHIEF_STORY_SKIP,), 'tbnz w8, #7: Moblin Chief, no story check on the Field'),
     DIG_HOLE_SITE: (0xf94007f6, (), 'ldr x22, [sp, #8]: a hole was dug (digs.c)'),
     HOLE_CAP_SITES[0]: (0xf101451f, (), 'cmp x8, #0x51: dug-hole limit (digs.c)'),
     HOLE_CAP_SITES[1]: (0xf101411f, (), 'cmp x8, #0x50: dug-hole limit (digs.c)'),
     EMPTY_HANDLER_SITE: (0x9400005e, (A.EMPTY_HANDLER_CATCH,), 'bl std::function call: an empty event handler, as its catch'),
+    CHOICE_COUNT_SITE: (0xb91cc668, (), 'str w8, [x19, #0x1cc4]: a question\'s answer count (2..4 in the game\'s own text)'),
     FRAME_JOB_KICKOFF_SITES[0]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_KICKOFF_SITES[1]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_KICKOFF_SITES[2]: (0x910782d3, (), 'add x19, x22, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_KICKOFF_SITES[3]: (0x910782b3, (), 'add x19, x21, #0x1e0: frame job kick-off, previous finish first'),
     FRAME_JOB_FINISH_SITE: (0xf9400008, (), 'ldr x8, [x0]: frame job finish (debug delay)'),
+    OWNER_CALL_NOTIFY_SITE: (0x9100e2a0, (), 'add x0, x21, #0x38: owner-thread call done, the caller is waiting first'),
 }

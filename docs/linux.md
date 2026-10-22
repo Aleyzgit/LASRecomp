@@ -1,13 +1,13 @@
 # LAS Recomp on Linux (x86-64, aarch64)
 
-Status: branch `linux-beta2`. Builds and runs the game on Vulkan (with your own game files) on x86-64, checked before
+Status: builds and runs the game on Vulkan (with your own game files) on x86-64, checked before
 each release by `make smoketest`. aarch64 is **experimental**: cross-compiled, its start screen checked under emulation,
 the game itself untested on real hardware - community reports decide (see the end). `make appimage` / `make appimages`
 package the release AppImages.
 
 ## Running the AppImage
-    chmod +x LAS.Recomp-beta_4-linux-x86_64.AppImage
-    ./LAS.Recomp-beta_4-linux-x86_64.AppImage
+    chmod +x LAS.Recomp-<version>-linux-x86_64.AppImage
+    ./LAS.Recomp-<version>-linux-x86_64.AppImage
 
 Needs: a distribution with glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36, Arch, ...), a Vulkan 1.3 driver
 (Mesa RADV / ANV / NVK / Turnip / Asahi Honeykrisp, or NVIDIA's), and on x86-64 a CPU with AVX2 (2013 or newer).
@@ -66,20 +66,23 @@ The randomizer from a source checkout uses LAS-Randomizer's own venv (Python 3.1
     third_party/LAS-Randomizer/venv/bin/pip install -r third_party/LAS-Randomizer/requirements.txt
 
 ## AppImages
-Needs podman, and for aarch64 QEMU user emulation with binfmt (`sudo apt install podman qemu-user qemu-user-binfmt`).
+Needs podman, and for the other arch's AppImage QEMU user emulation with binfmt (`sudo apt install podman qemu-user
+qemu-user-binfmt`).
 
     make appimage                # this machine's arch -> build/dist/LAS Recomp-<version>-linux-<arch>.AppImage
-    make appimage ARCH=aarch64   # cross-compiled from x86-64
+    make appimage ARCH=aarch64   # on x86-64: cross-compiled
     make appimages               # both
 
 Everything is built in Ubuntu 22.04 containers (`tools/linux/Containerfile`), so the result runs on glibc 2.35+:
 SDL3, an LGPL-only FFmpeg (only the movie codecs, as on Windows / macOS), and shaderc from pinned sources
-(`tools/linux/build_deps.sh`), then the game against them (`tools/linux/package.sh`). aarch64 is cross-compiled in
-the amd64 container against the arm64 image's root filesystem (`build/linux/aarch64/sysroot`). The seed generator
-helper (`tools/linux/rando_helper.sh`, PyInstaller) is frozen in a container of its own arch; on arm64 that runs
-under QEMU and builds oead and keystone-engine from source the first time (no arm64 wheels on PyPI; cached in
-`build/linux/aarch64/wheels`). The generated game code comes from the host (`generated/`, `generated-aarch64/`;
-`make appimage` runs `make gen` for it when missing).
+(`tools/linux/build_deps.sh`), then the game against them (`tools/linux/package.sh`). This machine's arch is built
+natively in one container of that arch (the release does both archs that way, on an arm64 runner for aarch64).
+aarch64 on an x86-64 machine is cross-compiled in the amd64 container against the arm64 image's root filesystem
+(`build/linux/aarch64/sysroot`), with only the seed generator helper (`tools/linux/rando_helper.sh`, PyInstaller
+builds for the machine it runs on) frozen in the arm64 container under QEMU, where pip also builds oead and
+keystone-engine from source the first time (no arm64 wheels on PyPI; cached in `build/linux/aarch64/wheels`). The
+generated game code comes from the host (`generated/`, `generated-aarch64/`; `make appimage` runs `make gen` for it
+when missing).
 
 Release check of the x86-64 AppImage (`make smoketest`, tools/linux/smoketest.sh, ~7 minutes on this kind of machine):
 three launches of the AppImage itself - the start screen; a session from a test save warping to four overworld spots
@@ -116,7 +119,7 @@ The aarch64 AppImage is experimental: built on x86-64, only its start screen has
    an earlier run, that run's `lasrecomp-backup-*.log`, by date modified).
 5. **A crash backtrace with gdb** when the log's isn't enough:
 
-       ./LAS.Recomp-beta_4-linux-aarch64.AppImage --appimage-extract    # -> squashfs-root/
+       ./LAS.Recomp-<version>-linux-aarch64.AppImage --appimage-extract    # -> squashfs-root/
        cd ~/.local/share/lasrecomp
        gdb -batch -ex 'handle SIGSEGV nostop noprint pass' -ex run -ex 'thread apply all bt 20' \
            --args ~/squashfs-root/usr/bin/lasrecomp > gdb.txt 2>&1

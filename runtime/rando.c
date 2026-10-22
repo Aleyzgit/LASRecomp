@@ -101,7 +101,18 @@ static void init(void) {
     char p[600];
     snprintf(p, sizeof p, "%s/exefs/1.0.0.pchtxt", g_seed_dir);
     load_pchtxt(p);
-    LOG("[rando] seed \"%s\" active\n", seed);
+    // the seed ID (the start screen writes it next to a seed it makes): it regenerates the same seed, so a log a
+    // player attaches to an issue is enough to reproduce their seed
+    char id[96] = "";
+    snprintf(p, sizeof p, "%s/seed_id.txt", g_seed_dir);
+    FILE *f = fopen(p, "r");
+    if (f) {
+        if (!fgets(id, sizeof id, f)) id[0] = 0;
+        fclose(f);
+        id[strcspn(id, "\r\n")] = 0;
+    }
+    if (id[0]) LOG("[rando] seed \"%s\" active, seed ID %s\n", seed, id);
+    else LOG("[rando] seed \"%s\" active (no seed ID saved with it)\n", seed);
 }
 
 void rando_init(void) {
