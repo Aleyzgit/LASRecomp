@@ -2117,13 +2117,40 @@ static void bind_textures(int stage, ShaderInfo *si) {
 // draws binding the output as vertex data, later dispatches - find it where the game put it. ~100 KB copied and
 // hashed per frame in the field. LARECOMP_OVERLAP_SNAP=0: off.
 #define SNAP_RING (16u << 20)
-typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen; } SnapEnt;
+typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen; bool stale; } SnapEnt;
 static SnapEnt snap_ents[512];
 static int nsnap_ents;
 static uint64_t snap_ring_base, snap_ring_off;
 static uint32_t snap_gen = 1;  // (bumped when the ring wraps: older copies may be reused by now)
 static int snap_mode;  // LARECOMP_OVERLAP_SNAP=2 (test): compute slots always in place, draws' storage reads copied
-static uint64_t snap_storage(uint64_t addr, uint64_t size) {
+// A slot learned as input-only that the program writes after all: the write lands in the copy (the program was bound
+// to it), the original keeps its snapshot hash. Each compute input copy is compared with that hash once the
+// dispatch's command buffer has completed (no wait: checked on later frames), a difference marks the slot written -
+// kept in place from the next dispatch on, the entry retired - and is logged once per program and slot. A CPU
+// rewrite shows in the original instead (its hash changes) and keeps the snapshot, as intended.
+typedef struct { SnapEnt *e; uint64_t addr, size, cs, seq; int slot; } SnapCheck;
+static SnapCheck snap_checks[64];
+static int nsnap_checks;
+static void cs_note_late_write(uint64_t cs, int slot);
+static void snap_checks_run(void) {
+    int k = 0;
+    for (int i = 0; i < nsnap_checks; i++) {
+        SnapCheck *c = &snap_checks[i];
+        bool done = false;
+        pthread_mutex_lock(&cb_lock);
+        if (c->seq <= submit_seq) done = submit_seq - c->seq >= CB_HIST || !cb_hist[c->seq % CB_HIST] || cb_hist[c->seq % CB_HIST].status >= MTLCommandBufferStatusCompleted;
+        pthread_mutex_unlock(&cb_lock);
+        if (!done) { snap_checks[k++] = *c; continue; }
+        SnapEnt *e = c->e;
+        if (e->gen == snap_gen && !e->stale && e->addr == c->addr && e->size == c->size && range_hash(e->copy, e->size) != e->hash) { cs_note_late_write(c->cs, c->slot); e->stale = true; }
+    }
+    nsnap_checks = k;
+}
+static void snap_check_add(SnapEnt *e, uint64_t cs, int slot) {  // (checked once the dispatch's buffer completes)
+    for (int i = 0; i < nsnap_checks; i++) if (snap_checks[i].e == e && snap_checks[i].cs == cs && snap_checks[i].slot == slot) { snap_checks[i].seq = renderer_fence_seq(); return; }
+    if (nsnap_checks < 64) snap_checks[nsnap_checks++] = (SnapCheck){e, e->addr, e->size, cs, renderer_fence_seq(), slot};
+}
+static uint64_t snap_storage(uint64_t addr, uint64_t size, uint64_t cs, int cs_slot) {
     static int on = -1;
     if (on < 0) {
         const char *e = ENV("LARECOMP_OVERLAP_SNAP");
@@ -2144,9 +2171,10 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size) {
     uint64_t f = renderer_exec_frame();
     SnapEnt *e = NULL;
     for (int i = 0; i < nsnap_ents; i++) if (snap_ents[i].addr == addr && snap_ents[i].size == size) { e = &snap_ents[i]; break; }
-    if (e && e->frame == f && e->gen == snap_gen) return e->copy;  // (bound again this frame)
+    if (e && e->stale && e->frame != f) e->gen = 0;  // (retired: the slot is written by the GPU, kept in place now)
+    if (e && e->frame == f && e->gen == snap_gen) { if (cs_slot >= 0) snap_check_add(e, cs, cs_slot); return e->copy; }  // (bound again this frame)
     uint64_t h = range_hash(addr, size);
-    if (e && e->gen == snap_gen && e->hash == h) { e->frame = f; return e->copy; }  // unchanged: the copy is current
+    if (e && e->gen == snap_gen && e->hash == h) { e->frame = f; if (cs_slot >= 0) snap_check_add(e, cs, cs_slot); return e->copy; }  // unchanged: the copy is current
     if (!e) {
         if (nsnap_ents == 512) { nsnap_ents = 0; snap_gen++; }  // (table full: start over, copies renewed)
         e = &snap_ents[nsnap_ents++];
@@ -2157,7 +2185,8 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size) {
     e->copy = snap_ring_base + aligned;
     memcpy((void *)(uintptr_t)e->copy, (const void *)(uintptr_t)addr, size);
     snap_ring_off = aligned + size;
-    e->hash = h, e->frame = f, e->gen = snap_gen;
+    e->hash = h, e->frame = f, e->gen = snap_gen, e->stale = false;
+    if (cs_slot >= 0) snap_check_add(e, cs, cs_slot);
     return e->copy;
 }
 
@@ -2172,7 +2201,7 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
             for (int i = 0; i < 16; i++) {
                 uint32_t *e = &drv[(base + 16 * i) / 4];
                 uint64_t sa = st.sbuf[stage][i].addr;
-                if (sa && (si->ssbo_read & (1u << i))) { bind_note(2, sa, st.sbuf[stage][i].size); sa = snap_storage(sa, st.sbuf[stage][i].size); }
+                if (sa && (si->ssbo_read & (1u << i))) { bind_note(2, sa, st.sbuf[stage][i].size); sa = snap_storage(sa, st.sbuf[stage][i].size, 0, -1); }
                 e[0] = (uint32_t)sa;
                 e[1] = (uint32_t)(sa >> 32);
                 e[2] = (uint32_t)st.sbuf[stage][i].size;
@@ -2336,6 +2365,12 @@ static uint32_t cs_written_mask(uint64_t cs) {
     CsWrites *w = cs_writes_of(cs);
     return w && w->probes >= 3 ? w->written : 0xFFFFu;
 }
+static void cs_note_late_write(uint64_t cs, int slot) {
+    CsWrites *w = cs_writes_of(cs);
+    if (!w || (w->written & (1u << slot))) return;
+    w->written |= 1u << slot;
+    LOG("[metal] compute %llx also writes slot %d: now kept in place\n", (unsigned long long)cs, slot);
+}
 
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
@@ -2371,7 +2406,8 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                 // a slot this program writes stays in place (its readers - draws binding the output as vertex data,
                 // the next frame's dispatches - take it from there); the others are its inputs: snapshotted
                 uint64_t sa = st.sbuf[5][i].addr;
-                if (sa && snap_mode != 2 && !(cs_written_mask(st.program->stages[5].code_addr) & (1u << i))) sa = snap_storage(sa, st.sbuf[5][i].size);
+                if (sa && snap_mode != 2 && !(cs_written_mask(st.program->stages[5].code_addr) & (1u << i)))
+                    sa = snap_storage(sa, st.sbuf[5][i].size, st.program->stages[5].code_addr, i);
                 e[0] = (uint32_t)sa; e[1] = (uint32_t)(sa >> 32); e[2] = (uint32_t)st.sbuf[5][i].size;
             }
             off = ring_alloc(drv, sizeof drv);
@@ -2468,6 +2504,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             if (r.addr) bind_note(3, r.addr, r.size);
         }
     }
+    if (nsnap_checks) snap_checks_run();
     CsWrites *learn = overlap_on() && snap_mode != 2 ? cs_writes_of(st.program->stages[5].code_addr) : NULL;
     uint64_t learn_before[16];
     if (learn && learn->probes < 3)
