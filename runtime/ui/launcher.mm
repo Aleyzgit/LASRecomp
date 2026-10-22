@@ -812,9 +812,9 @@ static bool menu_tip(float s) {
 }
 
 // The game files page's example: a Finder-style window (the same on every platform) with the folder to choose -
-// exefs opened (its files), romfs closed. All drawn here (shapes and the page's font, sized from the font: sharp at
+// "Game files", opened: exefs in it opened (its files), romfs closed. All drawn here (shapes and the page's font, sized from the font: sharp at
 // any scale), up to w wide, at the cursor; it takes its space with a Dummy.
-enum { FOLDER_EXAMPLE_ROWS = 8 };
+enum { FOLDER_EXAMPLE_ROWS = 9 };
 static float folder_example_height(void) {  // (its window, without the Dummy's gap under it)
     float fs = ImGui::GetFontSize();
     return fs * 1.45f + fs * 0.35f * 2 + FOLDER_EXAMPLE_ROWS * fs * 1.12f;
@@ -825,8 +825,8 @@ static void draw_folder_example(float w) {
     float fs = ImGui::GetFontSize(), ts = fs * 0.82f;  // (the rows' text a little under the page's)
     float rh = fs * 1.12f, bar = fs * 1.45f, pad = fs * 0.35f, r = fs * 0.45f;
     struct Item { const char *name; int depth; int kind; };  // kind: 0 file, 1 folder opened, 2 folder closed
-    static const Item items[] = {{"exefs", 0, 1}, {"main", 1, 0}, {"main.npdm", 1, 0}, {"rtld", 1, 0}, {"sdk", 1, 0},
-                                 {"subsdk0", 1, 0}, {"subsdk1", 1, 0}, {"romfs", 0, 2}};
+    static const Item items[] = {{"Game files", 0, 1}, {"exefs", 1, 1}, {"main", 2, 0}, {"main.npdm", 2, 0},
+                                 {"rtld", 2, 0}, {"sdk", 2, 0}, {"subsdk0", 2, 0}, {"subsdk1", 2, 0}, {"romfs", 1, 2}};
     const int n = FOLDER_EXAMPLE_ROWS;
     static_assert(sizeof items / sizeof items[0] == FOLDER_EXAMPLE_ROWS, "one row per item");
     w = fminf(w, fs * 15);
@@ -841,11 +841,11 @@ static void draw_folder_example(float w) {
     dl->AddRectFilled(a, ImVec2(b.x, a.y + bar), title, r, ImDrawFlags_RoundCornersTop);
     dl->AddLine(ImVec2(a.x, a.y + bar), ImVec2(b.x, a.y + bar), IM_COL32(0, 0, 0, 90), 1.0f);
     dl->AddRect(a, b, edge, r, 0, 1.0f);
-    // the title bar: three dots on the left, the folder's name in the middle
+    // the title bar: three dots on the left, the folder it's in (a typical one) in the middle
     static const ImU32 dots[] = {IM_COL32(255, 95, 87, 255), IM_COL32(254, 188, 46, 255), IM_COL32(40, 200, 64, 255)};
     float dr = fs * 0.21f, cy = a.y + bar * 0.5f;
     for (int i = 0; i < 3; i++) dl->AddCircleFilled(ImVec2(a.x + fs * 0.65f + i * fs * 0.62f, cy), dr, dots[i]);
-    const char *t = "Game files";
+    const char *t = "Documents";
     ImVec2 tsz = font->CalcTextSizeA(ts, FLT_MAX, 0, t);
     dl->AddText(font, ts, ImVec2(a.x + (w - tsz.x) * 0.5f, cy - tsz.y * 0.5f), text, t);
     // the list: a disclosure triangle on folders, the folder / file glyph, the name
@@ -1878,7 +1878,7 @@ extern "C" void launcher_run(const char *root) {
                     dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
                 };
                 std::string src_d = "The folder with your own game folders (exefs/romfs) of The Legend of Zelda: Link's "
-                                    "Awakening for Nintendo Switch, version 1.0.0, 1.0.1 or 1.1.0. The game isn't included with LAS Recomp.";
+                                    "Awakening for Nintendo Switch. The game isn't included with LAS Recomp.";
                 if (!src.empty()) src_d += "\n\nChosen: " + src;
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;
