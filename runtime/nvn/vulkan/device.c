@@ -109,6 +109,8 @@ static bool lazy_heap_predicted(bool budget_ext, bool *probe) {
 }
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
+static bool validating;  // the validation layer is on (validation_exit)
+static void exit_after_shot(void);  // (UI thread section)
 
 // ================================================================== instance / device
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
@@ -156,6 +158,7 @@ static void create_instance(void) {
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
+    validating = validate;
     if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
@@ -798,7 +801,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)frame + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
-        if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
     } else {
         renderer_submit();
     }
@@ -843,7 +846,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                  (unsigned long long)frame);
         renderer_save_texture_tex(b, path);
         // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
-        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
+        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) exit_after_shot();
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
@@ -914,6 +917,39 @@ void backend_present(NvnTexture *t) {
 void vk_exec_init(void);
 void vk_shaders_init(void);
 
+// The end of a validation run (LARECOMP_VK_VALIDATION, after backend_quit: the GPU idle, the pipeline cache kept):
+// the debug messenger goes, then the process ends at once - no vkDestroyDevice / vkDestroyInstance, no atexit
+// handlers, no DLL teardown. _exit() alone isn't enough on Windows: it ends in ExitProcess, which runs the layer's
+// and the driver's DLL teardown after every other thread is gone, and with the Khronos layer on NVIDIA that left the
+// process hung there and unkillable (one thread waiting, gigabytes of the layer's state).
+static _Noreturn void validation_exit(void) {
+    if (messenger) {
+        PFN_vkDestroyDebugUtilsMessengerEXT f =
+            (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkDestroyDebugUtilsMessengerEXT");
+        VkDebugUtilsMessengerEXT m = messenger;
+        messenger = VK_NULL_HANDLE;
+        if (f) f(g_vk.inst, m, NULL);
+    }
+    LOG("[vk] validation run: ending without GPU teardown\n");
+    fflush(stdout);
+    fflush(stderr);
+#if defined(_WIN32) || defined(__linux__)
+    plat_terminate();
+#endif
+    _Exit(0);
+}
+
+// LARECOMP_EXIT_AFTER_SHOT: the test run ends with its shot. As it always did (_exit: no cache save), except under
+// validation: backend_quit, then validation_exit.
+static void exit_after_shot(void) {
+    fflush(stderr);
+    if (validating) {
+        backend_quit();
+        validation_exit();
+    }
+    _exit(0);
+}
+
 // Quitting, before exit() (the window closed; also from exit() itself, quick_exit_handler): the render thread stops
 // between items, so no image is acquired or presented any more; then the GPU finishes and the pipeline cache is
 // kept. All of it before exit() runs the atexit handlers and the libraries' destructors: a Vulkan layer loaded with
@@ -938,6 +974,7 @@ void backend_quit(void) {
 // teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
 static void quick_exit_handler(void) {
     backend_quit();
+    if (validating) validation_exit();
     fflush(stdout);
     fflush(stderr);
 #if defined(_WIN32) || defined(__linux__)
