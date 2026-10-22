@@ -2322,15 +2322,18 @@ static CsProg *compute_program(NvnProgram *p) {
 typedef struct { uint64_t cs; uint32_t written; int probes; } CsWrites;
 static CsWrites cs_writes[64];
 static int ncs_writes;
-static CsWrites *cs_writes_of(CsProg *cp) {
-    for (int i = 0; i < ncs_writes; i++) if (cs_writes[i].cs == cp->code_addr) return &cs_writes[i];
+// (keyed by the NVN program's code address: a CsProg prepared on the start screen has none of its own, and keying
+// by that shared 0 made every program take the first one's mask - BowWow's skinning output snapshotted away)
+static CsWrites *cs_writes_of(uint64_t cs) {
+    if (!cs) return NULL;
+    for (int i = 0; i < ncs_writes; i++) if (cs_writes[i].cs == cs) return &cs_writes[i];
     if (ncs_writes == 64) return NULL;
     CsWrites *w = &cs_writes[ncs_writes++];
-    w->cs = cp->code_addr, w->written = 0, w->probes = 0;
+    w->cs = cs, w->written = 0, w->probes = 0;
     return w;
 }
-static uint32_t cs_written_mask(CsProg *cp) {
-    CsWrites *w = cs_writes_of(cp);
+static uint32_t cs_written_mask(uint64_t cs) {
+    CsWrites *w = cs_writes_of(cs);
     return w && w->probes >= 3 ? w->written : 0xFFFFu;
 }
 
@@ -2368,7 +2371,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                 // a slot this program writes stays in place (its readers - draws binding the output as vertex data,
                 // the next frame's dispatches - take it from there); the others are its inputs: snapshotted
                 uint64_t sa = st.sbuf[5][i].addr;
-                if (sa && snap_mode != 2 && !(cs_written_mask(cp) & (1u << i))) sa = snap_storage(sa, st.sbuf[5][i].size);
+                if (sa && snap_mode != 2 && !(cs_written_mask(st.program->stages[5].code_addr) & (1u << i))) sa = snap_storage(sa, st.sbuf[5][i].size);
                 e[0] = (uint32_t)sa; e[1] = (uint32_t)(sa >> 32); e[2] = (uint32_t)st.sbuf[5][i].size;
             }
             off = ring_alloc(drv, sizeof drv);
@@ -2465,7 +2468,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             if (r.addr) bind_note(3, r.addr, r.size);
         }
     }
-    CsWrites *learn = overlap_on() && snap_mode != 2 ? cs_writes_of(cp) : NULL;
+    CsWrites *learn = overlap_on() && snap_mode != 2 ? cs_writes_of(st.program->stages[5].code_addr) : NULL;
     uint64_t learn_before[16];
     if (learn && learn->probes < 3)
         for (int i = 0; i < 16; i++) learn_before[i] = st.sbuf[5][i].addr ? range_hash(st.sbuf[5][i].addr, st.sbuf[5][i].size) : 0;
@@ -2475,7 +2478,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         renderer_flush();
         for (int i = 0; i < 16; i++)
             if (st.sbuf[5][i].addr && range_hash(st.sbuf[5][i].addr, st.sbuf[5][i].size) != learn_before[i]) learn->written |= 1u << i;
-        if (++learn->probes == 3) LOG("[metal] compute %llx writes storage slots %#x\n", (unsigned long long)cp->code_addr, learn->written);
+        if (++learn->probes == 3) LOG("[metal] compute %llx writes storage slots %#x\n", (unsigned long long)learn->cs, learn->written);
     }
     if (probe) {
         extern int nvn_pool_flags_at(uint64_t addr);
