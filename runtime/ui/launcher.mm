@@ -468,10 +468,26 @@ done:
 }
 
 // ------------------------------------------------------------------ folder dialog (SDL calls back on any thread)
+// files NULL: no window could be shown (an empty list is a cancel). Linux shows it through the desktop's file chooser
+// portal or zenity, and a desktop with neither (a bare window manager) has none: say so instead of Choose doing nothing.
+static const char *const PICKER_FAILED = "Couldn't open a folder window";
+static std::string picker_hint(const char *what) {
+    std::string err = SDL_GetError();
+    fprintf(stderr, "[launcher] %s window: %s\n", what, err.c_str());
+#ifdef __linux__
+    return std::string("LAS Recomp opens the ") + what + " window through your desktop's file chooser "
+           "(xdg-desktop-portal) or zenity. Install either one, then try again.";
+#else
+    return err;
+#endif
+}
+
 static void SDLCALL picked(void *, const char *const *files, int) {
-    if (!files || !files[0]) return;
+    if (!files) { set_job(PICKER_FAILED, true, picker_hint("folder")); return; }
+    if (!files[0]) return;
     pthread_mutex_lock(&g_lock);
     g_src = files[0];
+    if (g_job == PICKER_FAILED) g_job.clear(), g_job_hint.clear(), g_job_failed = false;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -487,7 +503,7 @@ static const char *FONT_LANG[] = {"nintendo_udsg-r_org_zh-cn_003.bfttf", "ninten
                                   "nintendo_udsg-r_ko_003.bfttf", "nintendo_udsg-r_ko_003.ttf"};
 static const char *FONT_EXT[] = {"nintendo_ext_003.bfttf", "nintendo_ext_003.ttf"};
 static std::vector<std::string> g_font_picks;
-static std::string g_font_msg;
+static std::string g_font_msg, g_font_err;  // (g_font_err: the file window couldn't open; from the dialog's thread)
 
 static bool have_font(const char *const *names, int n) {
     for (int i = 0; i < n; i++)
@@ -496,9 +512,10 @@ static bool have_font(const char *const *names, int n) {
 }
 
 static void SDLCALL picked_fonts(void *, const char *const *files, int) {
-    if (!files) return;
+    std::string err = files ? "" : std::string("Couldn't open a file window. ") + picker_hint("file");
     pthread_mutex_lock(&g_lock);
-    for (int i = 0; files[i]; i++) g_font_picks.push_back(files[i]);
+    for (int i = 0; files && files[i]; i++) g_font_picks.push_back(files[i]);
+    if (!files) g_font_err = err;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -506,6 +523,7 @@ static void import_fonts() {
     pthread_mutex_lock(&g_lock);
     std::vector<std::string> picks;
     picks.swap(g_font_picks);
+    if (!g_font_err.empty()) g_font_msg = g_font_err, g_font_err.clear();
     pthread_mutex_unlock(&g_lock);
     if (picks.empty()) return;
     mkdir("fonts", 0755);
@@ -972,6 +990,121 @@ static void draw_busy_overlay(ImVec2 ds, const std::string &job, bool test_busy,
     }
 }
 
+// ------------------------------------------------------------------ the data folder (runtime/paths.h): another one
+// picked (Settings > Prelaunch, the Game Files window), the data moved there or a fresh start, then a restart there
+enum { DF_NONE, DF_ASK, DF_MOVING, DF_FAILED };
+static int g_df;                  // (main thread)
+static std::string g_df_pick;     // the folder picked (g_lock: the dialog calls back on any thread)
+static RtDataTarget g_df_t;
+static std::atomic<int> g_df_step{0}, g_df_result{0};  // result: 0 running, 1 moved, -1 failed
+static std::atomic<float> g_df_frac{0};
+static char g_df_err[600];
+static bool g_df_auto_move, g_df_auto_fresh;  // (test: LARECOMP_LAUNCHER_DATA_PICK=<folder>:move / :fresh)
+
+static void SDLCALL picked_data(void *, const char *const *files, int) {
+    if (!files || !files[0]) return;
+    pthread_mutex_lock(&g_lock);
+    g_df_pick = files[0];
+    pthread_mutex_unlock(&g_lock);
+}
+static void choose_data_folder(void) { SDL_ShowOpenFolderDialog(picked_data, NULL, g_launcher_win, NULL, false); }
+static void df_progress(int step, double f) { g_df_step = step, g_df_frac = (float)f; }
+static void *df_move_thread(void *) {
+    g_df_result = rt_data_move(g_df_t.path, df_progress, g_df_err, sizeof g_df_err) ? 1 : -1;
+    return NULL;
+}
+static void df_restart(void) {
+    unsetenv("LARECOMP_LAUNCHER_DATA_PICK");
+    rt_paths_restart();
+    snprintf(g_df_err, sizeof g_df_err, "Couldn't restart LAS Recomp. Start it again to use the new folder.");
+    g_df = DF_FAILED;
+}
+
+// The question / the move's progress, in front of everything (called at the start screen's top level)
+static void data_folder_popup(float s) {
+    float sc = s * 720.0f / 1080.0f;
+    pthread_mutex_lock(&g_lock);
+    std::string pick;
+    pick.swap(g_df_pick);
+    bool busy = g_busy;
+    pthread_mutex_unlock(&g_lock);
+    if (!pick.empty() && g_df == DF_NONE && !busy) {
+        rt_data_target(pick.c_str(), &g_df_t);
+        g_df = DF_ASK;
+        ImGui::OpenPopup("##datafolder");
+    }
+    if (!ImGui::BeginPopupModal("##datafolder", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar))
+        return;
+    const RtDataTarget &t = g_df_t;
+    const ImVec4 red(1, 0.5f, 0.4f, 1);
+    ImVec2 bw(240 * sc, 0);
+    ImGui::PushFont(g_font_small);
+    ImGui::PushFont(g_font_menu);
+    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), g_df == DF_MOVING ? "Moving your data" : "Data folder");
+    ImGui::PopFont();
+    ImGui::PushTextWrapPos(900 * sc);
+    bool close = false, esc = ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+    auto use_it = [&] {
+        stop_background_prep();
+        settings_save();
+        if (rt_data_use(t.path, g_df_err, sizeof g_df_err)) df_restart();
+        else g_df = DF_FAILED;
+    };
+    if (g_df == DF_ASK) {
+        ImGui::TextDisabled("%s", t.path);
+        ImGui::Spacing();
+        if (t.refuse[0]) {
+            ImGui::TextColored(red, "%s", t.refuse);
+            ImGui::Spacing();
+            close = ImGui::Button("OK", bw) || esc;
+        } else if (t.has_data) {
+            ImGui::Text("This folder already has LAS Recomp data. Use it?");
+            ImGui::Spacing();
+            if (ImGui::Button("Use it", bw) || g_df_auto_fresh) g_df_auto_fresh = false, use_it();
+            ImGui::SameLine();
+            close = ImGui::Button("Cancel", bw) || esc;
+        } else {
+            bool room = t.free >= t.need;
+            ImGui::Text("Move your saves, seeds, settings and game files (%.1f GB) there, or start fresh?", t.bytes / 1e9);
+            if (!room) ImGui::TextColored(red, "Not enough free space there to move them (%.1f GB free).", t.free / 1e9);
+            ImGui::Spacing();
+            ImGui::BeginDisabled(!room);
+            if ((ImGui::Button("Move", bw) || g_df_auto_move) && room) {
+                g_df_auto_move = false;
+                stop_background_prep();
+                settings_save();
+                g_df = DF_MOVING, g_df_step = 0, g_df_frac = 0, g_df_result = 0;
+                pthread_t th;
+                if (pthread_create(&th, NULL, df_move_thread, NULL) == 0) pthread_detach(th);
+                else snprintf(g_df_err, sizeof g_df_err, "Couldn't start the move."), g_df = DF_FAILED;
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Start fresh", bw) || g_df_auto_fresh) g_df_auto_fresh = false, use_it();
+            ImGui::SameLine();
+            ImGui::SetItemDefaultFocus();
+            close = ImGui::Button("Cancel", bw) || esc;
+        }
+    } else if (g_df == DF_MOVING) {
+        static const char *const steps[] = {"Copying...", "Checking the copy...", "Removing the old copy..."};
+        int r = g_df_result, k = g_df_step;
+        ImGui::Text("%s", r == 1 ? "Restarting..." : steps[k < 0 ? 0 : k > 2 ? 2 : k]);
+        ImGui::ProgressBar(r == 1 ? 1.0f : g_df_frac.load(), ImVec2(900 * sc, 0));
+        ImGui::TextDisabled("%s", t.path);
+        if (r == 1) df_restart();
+        else if (r == -1) g_df = DF_FAILED;
+    } else {
+        ImGui::TextColored(red, "%s", g_df_err);
+        ImGui::Text("Your data is still in %s", rt_data_root());
+        ImGui::Spacing();
+        close = ImGui::Button("OK", bw) || esc;
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::PopFont();
+    if (close) g_df = DF_NONE, ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 static bool g_files_deleted;  // set here: the start screen goes back to setting the game files up
 static void prelaunch_tab(float sc) {
     const ImVec4 gold(0.93f, 0.76f, 0.33f, 1);
@@ -1024,6 +1157,17 @@ static void prelaunch_tab(float sc) {
     }
     ImGui::Spacing();
     ImGui::Spacing();
+    heading("Data folder");
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("%s", rt_data_root());
+    ImGui::PopTextWrapPos();
+    const char *fixed = rt_data_root_fixed();
+    ImGui::BeginDisabled(fixed != NULL);
+    if (ImGui::Button("Change...")) choose_data_folder();
+    ImGui::EndDisabled();
+    if (fixed) ImGui::SameLine(), ImGui::TextDisabled("%s", fixed);
+    ImGui::Spacing();
+    ImGui::Spacing();
     heading("Game font");
     import_fonts();
     bool fs = have_font(FONT_STD, 4), fl = have_font(FONT_LANG, 8), fe = have_font(FONT_EXT, 2);
@@ -1037,7 +1181,7 @@ static void prelaunch_tab(float sc) {
                         "nintendo_udsg-r_ko_003) and nintendo_ext_003.bfttf (button icons). "
                         ".ttf versions with the same names work too.");
     ImGui::PopTextWrapPos();
-    if (!g_font_msg.empty()) ImGui::Text("%s", g_font_msg.c_str());
+    if (!g_font_msg.empty()) ImGui::TextWrapped("%s", g_font_msg.c_str());
     static const SDL_DialogFileFilter font_f[] = {{"Switch fonts", "bfttf;ttf"}};
     if (ImGui::Button("Import fonts")) SDL_ShowOpenFileDialog(picked_fonts, NULL, g_launcher_win, font_f, 1, NULL, true);
     if (fs || fl || fe) {
@@ -1158,6 +1302,13 @@ extern "C" void launcher_run(const char *root) {
         pthread_detach(th);
     }
     runs++;
+    if (const char *t = getenv("LARECOMP_LAUNCHER_DATA_PICK")) {  // (test) <folder>[:move / :fresh]: picked as the data folder
+        std::string p = t;
+        size_t c = p.rfind(':');
+        if (c != std::string::npos && (p.substr(c) == ":move" || p.substr(c) == ":fresh"))
+            g_df_auto_move = p.substr(c) == ":move", g_df_auto_fresh = p.substr(c) == ":fresh", p.resize(c);
+        g_df_pick = p;
+    }
     if (const char *t = getenv("LARECOMP_LAUNCHER_EXTRACT")) {  // (test) <folder>: set the game files up, log, exit
         g_src = t;
         g_busy = true;
@@ -1637,6 +1788,14 @@ extern "C" void launcher_run(const char *root) {
                         if (opt_action("Cancel", "", "Keeps the game files.", true)) g_confirm_delete = false;
                     }
                 }
+                {  // where all of it is kept: another folder (a bigger drive)
+                    const char *fixed = rt_data_root_fixed();
+                    std::string d = std::string("Where LAS Recomp keeps game files, saves, seeds and settings.\n\n") +
+                                    rt_data_root() + (fixed ? std::string("\n\n") + fixed : "");
+                    opt_section("Storage");
+                    if (busy || fixed) opt_disable_next();
+                    if (opt_action("Data folder", "Change...", d.c_str(), true)) choose_data_folder();
+                }
                 if (!busy && has_build_cache()) {
                     opt_section("Build cache");
                     if (opt_action("Clear build cache", "", "Removes the saved game-code build files. The next setup compiles "
@@ -1668,8 +1827,8 @@ extern "C" void launcher_run(const char *root) {
                 if (g_confirm_delete && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
                                          ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
                     g_confirm_delete = false;  // (B / Esc: back out of the question first)
-                else if (!busy && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
-                                              ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
+                else if (!busy && !typing && g_df == DF_NONE && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) ||
+                                                                 ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
                     back = true;
                 ImGui::PopFont();
                 ImGui::EndChild();
@@ -1753,6 +1912,7 @@ extern "C" void launcher_run(const char *root) {
             ImGui::PopFont();
             }
             ImGui::EndDisabled();
+            data_folder_popup(s);  // (another data folder picked: move / start fresh, then restart)
             ImGui::End();
             ImGui::PopStyleColor();
             if (waiting) draw_busy_overlay(ds, "", false, true);
