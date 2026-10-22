@@ -166,6 +166,8 @@ Where files live (game files, saves, seeds, settings, caches, imported fonts):
 - macOS app: `~/Library/Application Support/com.peiikai.lasrecomp/` (the app itself is never written to).
 - Windows: next to `lasrecomp.exe`, so put the `LAS Recomp` folder somewhere writable (not Program Files).
 - Linux: `~/.local/share/lasrecomp/` (`$XDG_DATA_HOME/lasrecomp`).
+- Another folder (e.g. a bigger drive): Settings > Prelaunch > Data folder, or the Game Files window, moves everything
+  there (or starts fresh there); the folder above then only keeps `data_root.txt` with its path (and on Windows the logs).
 - Dev / portable mode: if the folder you start from has `extracted/` (a source checkout), that folder is used, as above.
 - `LARECOMP_DATA_ROOT=<dir>` overrides all of these.
 - The log (started without a terminal) is `lasrecomp.log` in that folder, always the latest run; up to five recent
