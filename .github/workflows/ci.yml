@@ -76,6 +76,10 @@ jobs:
         run: |
           clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led
           build/test-led
+      - name: Controller rumble (HID bridge to SDL, fake gamepad)
+        run: |
+          clang -std=gnu11 -O2 -I"$HOME/sdl3/include" tools/test_rumble.c -L"$HOME/sdl3/lib" -Wl,-rpath,"$HOME/sdl3/lib" -lSDL3 -lm -o build/test-rumble
+          build/test-rumble
       - name: Vulkan fence sequence regression
         run: python3 tools/test_fence_sequence.py
       - name: Guest heap import on low-memory machines
@@ -142,6 +146,10 @@ jobs:
         run: |
           clang -std=gnu11 -O1 tools/test_led.c -lm -o build/test-led
           build/test-led
+      - name: Controller rumble (HID bridge to SDL, fake gamepad)
+        run: |
+          clang -std=gnu11 -O2 -I"$(brew --prefix sdl3)/include" -L"$(brew --prefix sdl3)/lib" tools/test_rumble.c -lSDL3 -o build/test-rumble
+          build/test-rumble
       - name: Game address table tests
         run: python3 tools/test_game_addresses.py
       - name: Vulkan synchronization failure regression
@@ -188,6 +196,10 @@ jobs:
         run: |
           clang -O2 -pthread tools/test_condvar.c -o build/test-condvar.exe
           build/test-condvar.exe
+      - name: Controller rumble (HID bridge to SDL, fake gamepad)
+        run: |
+          clang -std=gnu11 -O2 $(pkg-config --cflags sdl3) tools/test_rumble.c $(pkg-config --libs sdl3) -o build/test-rumble.exe
+          build/test-rumble.exe
       - name: Vulkan fence sequence regression
         run: python tools/test_fence_sequence.py
       - name: Guest heap import on low-memory machines

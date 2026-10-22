@@ -110,6 +110,9 @@ void rec_CmdSetCullMode(VkCommandBuffer cb, VkCullModeFlags mode);
 void rec_CmdSetFrontFace(VkCommandBuffer cb, VkFrontFace ff);
 void rec_CmdSetPrimitiveTopology(VkCommandBuffer cb, VkPrimitiveTopology topo);
 void rec_CmdSetPrimitiveRestartEnable(VkCommandBuffer cb, VkBool32 on);
+// (dynamic vertex input: exec.c set_vertex_input, after the pipeline bind; the arrays are copied)
+void rec_CmdSetVertexInputEXT(VkCommandBuffer cb, uint32_t nb, const VkVertexInputBindingDescription2EXT *b, uint32_t na,
+                              const VkVertexInputAttributeDescription2EXT *v);
 void rec_CmdClearAttachments(VkCommandBuffer cb, uint32_t na, const VkClearAttachment *a, uint32_t nr, const VkClearRect *r);
 void rec_CmdClearColorImage(VkCommandBuffer cb, VkImage img, VkImageLayout layout, const VkClearColorValue *c, uint32_t n,
                             const VkImageSubresourceRange *rg);

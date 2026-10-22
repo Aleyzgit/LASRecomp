@@ -841,6 +841,27 @@ void rec_CmdSetScissor(VkCommandBuffer cb, uint32_t first, uint32_t n, const VkR
     ENQ_END();
 }
 
+// (VK_EXT_vertex_input_dynamic_state, exec.c set_vertex_input: through g_vk.set_vertex_input; pNext must be NULL)
+CMD_ARGS(CmdSetVertexInputEXT, uint32_t nb, na;)  // then VkVertexInputBindingDescription2EXT[nb], VkVertexInputAttributeDescription2EXT[na]
+static void CmdSetVertexInputEXT_run(const void *p) {
+    const CmdSetVertexInputEXTArgs *a = p;
+    const VkVertexInputBindingDescription2EXT *b = after(a, sizeof *a);
+    const VkVertexInputAttributeDescription2EXT *v = after(b, a->nb * sizeof *b);
+    g_vk.set_vertex_input(a->cb, a->nb, b, a->na, v);
+}
+void rec_CmdSetVertexInputEXT(VkCommandBuffer cb, uint32_t nb, const VkVertexInputBindingDescription2EXT *b, uint32_t na,
+                              const VkVertexInputAttributeDescription2EXT *v) {
+    if (on <= 0) { g_vk.set_vertex_input(cb, nb, b, na, v); return; }
+    ENQ_T0();
+    CmdSetVertexInputEXTArgs *a = push(CmdSetVertexInputEXT_run, sizeof *a, AL16(nb * sizeof *b) + na * sizeof *v);
+    *a = (CmdSetVertexInputEXTArgs){cb, nb, na};
+    VkVertexInputBindingDescription2EXT *bd = after(a, sizeof *a);
+    memcpy(bd, b, nb * sizeof *b);
+    memcpy(after(bd, nb * sizeof *bd), v, na * sizeof *v);
+    commit();
+    ENQ_END();
+}
+
 CMD_ARGS(CmdClearAttachments, uint32_t na, nr;)  // then VkClearAttachment[na], VkClearRect[nr]
 static void CmdClearAttachments_run(const void *p) {
     const CmdClearAttachmentsArgs *a = p;
