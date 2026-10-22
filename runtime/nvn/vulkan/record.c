@@ -67,6 +67,7 @@ static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t cv_work = PTHREAD_COND_INITIALIZER, cv_done = PTHREAD_COND_INITIALIZER;
 static _Atomic int asleep;
 static _Atomic uint64_t submitted, presents_done;
+static _Atomic bool quitting;  // (rec_quit) packets are dropped instead of run
 static _Atomic int present_recreate;
 static uint64_t presents_queued;  // (T)
 static int on = -1;               // 1: the thread records, 0: calls at once, -1: not started
@@ -176,7 +177,7 @@ static void *run(void *arg) {
         uint64_t t0 = prof ? NOW() : 0;
         while (t != h) {
             const PktHdr *p = (const PktHdr *)(ring + (t & (ring_cap - 1)));
-            if (p->fn) p->fn(p + 1);
+            if (p->fn && !atomic_load_explicit(&quitting, memory_order_relaxed)) p->fn(p + 1);  // (rec_quit: dropped)
             t += p->size;
             atomic_store_explicit(&tail, t, memory_order_release);
         }
@@ -270,6 +271,12 @@ void rec_drain_published(void) {
     pthread_mutex_lock(&mu);  // (bounded: at exit a recorder stuck in the driver must not keep the process alive)
     while (atomic_load_explicit(&tail, memory_order_acquire) < upto && NOW() - t0 < 5000000000ull) timed_wait(&cv_done, 2000000);
     pthread_mutex_unlock(&mu);
+}
+
+void rec_quit(void) {
+    if (on <= 0) return;
+    atomic_store(&quitting, true);
+    rec_drain_published();  // (the packet it is in finishes; the rest are skipped)
 }
 
 // ================================================================== stats

@@ -32,6 +32,11 @@ uint64_t rq_current_item(void);  // on the render thread: the item being run; el
 uint64_t rq_frame(void);
 void rq_drain(void);   // every queued item done (QueueFinish; reboot)
 void rq_flush(void);   // drain, then the backend's full flush, on the render thread (nvnSyncWait with LARECOMP_SYNC_FLUSH)
+// Quitting (the window closed, exit()): the render thread stops after the item it runs; true from then on (the
+// backends present nothing more). backend_quit: rq_stop, the GPU idle, caches saved - before exit(); idempotent.
+void rq_stop(void);
+bool rq_stopping(void);
+void backend_quit(void);
 
 // (backends) called on the render thread
 void backend_present_now(NvnTexture *t, uint64_t frame);

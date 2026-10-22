@@ -843,6 +843,13 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
 }
 
+// (the slow-frame log, slowframe.h; the game thread) running totals this file keeps anyway
+void renderer_slow_counters(uint64_t *submits, uint64_t *gpu_wait_ns, uint64_t *imports) {
+    *submits = __atomic_load_n(&cum_submits, __ATOMIC_RELAXED);
+    *gpu_wait_ns = __atomic_load_n(&cum_wait, __ATOMIC_RELAXED);
+    *imports = (uint64_t)__atomic_load_n(&gc_imported, __ATOMIC_RELAXED);
+}
+
 // LARECOMP_LOG_SKIPS=1: the skipped draws and dispatches of each stats interval by reason, and the top offenders
 // (shader code addresses and content hashes, as in "[shader] slow build" / shader_variants.txt, and how long they
 // have been skipped without a break). "building" for tens of seconds is a build that never finishes.
@@ -1662,9 +1669,19 @@ static void save_glsl(const char *src, uint64_t addr, const char *suffix) {
     if (f) { fputs(src, f); fclose(f); }
 }
 
+void slow_note_build(const char *what, uint64_t ns);  // (slowframe.h: the slow-frame log's counts; every build,
+void slow_note_cache_hit(void);                       // and the pipelines the driver's cache had)
+ShaderInfo *slow_translate(const uint8_t *code, size_t max_size, int stage, const ShaderKey *key);
+#define maxwell_translate slow_translate  // (the translations below: counted and timed for the slow-frame log)
+#define SLOW_FEEDBACK(info) VkPipelineCreationFeedback fb_ = {0}; VkPipelineCreationFeedbackCreateInfo fbi_ = \
+    {.sType = VK_STRUCTURE_TYPE_PIPELINE_CREATION_FEEDBACK_CREATE_INFO, .pNext = (info).pNext, .pPipelineCreationFeedback = &fb_}; \
+    (info).pNext = &fbi_
+#define SLOW_FEEDBACK_HIT() do { if (fb_.flags & VK_PIPELINE_CREATION_FEEDBACK_APPLICATION_PIPELINE_CACHE_HIT_BIT) slow_note_cache_hit(); } while (0)
+
 // A build the driver takes over a second for is logged with its shaders: draws and dispatches are skipped until it
 // is done, which looked like a rendering bug (the chain chomps' compute with the heap in chunks: never ready).
 static void slow_build(uint64_t t0, const char *what, uint64_t code0, uint64_t code1) {
+    slow_note_build(what, SDL_GetTicksNS() - t0);
     uint64_t ms = (SDL_GetTicksNS() - t0) / 1000000;
     if (ms < 1000) return;
     static int n;
@@ -2223,7 +2240,9 @@ static void build_pipeline(void *arg) {
     uint64_t t0 = SDL_GetTicksNS();
     int bs = build_begin("pipeline vs/fs", k->prog->code[0] ? k->prog->code[0] : k->prog->prep_vh,
                          k->prog->code[1] ? k->prog->code[1] : k->prog->prep_fh);
+    SLOW_FEEDBACK(pi);
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
+    SLOW_FEEDBACK_HIT();
     build_end(bs);
     if (r != VK_SUCCESS) {
         static int n;
@@ -4075,7 +4094,9 @@ static void build_compute(void *arg) {
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};
+    SLOW_FEEDBACK(ci);
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
+    SLOW_FEEDBACK_HIT();
     atomic_fetch_add(&stat_compiles, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
     build_end(bs);

@@ -47,6 +47,10 @@ uint64_t rec_presents_queued(void);
 // recording into a command buffer directly (ImGui), before using the queue outside the ring.
 void rec_drain(void);
 void rec_drain_published(void);  // (any thread, exit) what the translating thread had published so far
+// Quitting (device.c backend_quit, after rq_stop; any thread): from now on the recorder makes no driver call - the
+// packets it still has or gets are dropped, so nothing is submitted or presented after the window closed - and this
+// returns once it is idle (bounded: 5 s for a recorder stuck in the driver). Waits for submissions never end after it.
+void rec_quit(void);
 
 // ---- pipelines
 // A graphics pipeline still being built (exec.c Pipe): the recorder resolves obj through this at the bind, waiting
