@@ -49,11 +49,39 @@ static LONG CALLBACK vectored_handler(EXCEPTION_POINTERS *ep) {
 // CPU wrote, runtime/nvn/vulkan/exec.c). Without it (refused): no tracking, the renderer reads guest memory in place.
 static bool g_write_watch;
 
+// (the reservation failed: main.c starts the process again) what holds part of the range, for the new process's log
+// (main.c, LARECOMP_REEXEC_WHY: this one can't log yet). Windows places heaps, stacks and DLLs' allocations at random
+// addresses in the lower terabyte (high-entropy ASLR), so now and then one lands in the guest's 12.5 GB.
+static void note_guest_conflict(uint64_t lo, uint64_t hi) {
+    char why[200];
+    snprintf(why, sizeof why, "VirtualAlloc error %lu, nothing found in the range", GetLastError());
+    MEMORY_BASIC_INFORMATION mi;
+    for (uint64_t a = lo; a < hi && VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi); ) {
+        uint64_t base = (uint64_t)(uintptr_t)mi.BaseAddress, end = base + mi.RegionSize;
+        if (mi.State != MEM_FREE) {
+            char mod[MAX_PATH] = "";
+            if (mi.Type == MEM_IMAGE && !GetModuleFileNameA((HMODULE)mi.AllocationBase, mod, sizeof mod)) mod[0] = 0;
+            const char *name = strrchr(mod, '\\');
+            snprintf(why, sizeof why, "%s %s at %llx-%llx%s%s",
+                     mi.State == MEM_COMMIT ? "committed" : "reserved",
+                     mi.Type == MEM_IMAGE ? "module" : mi.Type == MEM_MAPPED ? "mapped file" : "private memory",
+                     (unsigned long long)base, (unsigned long long)end, mod[0] ? " " : "", name ? name + 1 : mod);
+            break;
+        }
+        if (end <= a) break;
+        a = end;
+    }
+    _putenv_s("LARECOMP_REEXEC_WHY", why);
+}
+
 bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
     void *p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE);
     if (p == (void *)(uintptr_t)lo) g_write_watch = true;
     else p = VirtualAlloc((void *)(uintptr_t)lo, hi - lo, MEM_RESERVE, PAGE_READWRITE);
-    if (p != (void *)(uintptr_t)lo) return false;
+    if (p != (void *)(uintptr_t)lo) {
+        note_guest_conflict(lo, hi);
+        return false;
+    }
     g_lo = lo;
     g_hi = hi;
     AddVectoredExceptionHandler(1, vectored_handler);
@@ -582,7 +610,9 @@ static void append_arg(char *out, size_t cap, const char *a) {
     out[n] = 0;
 }
 
-// No exec() on Windows: start the new process with the same console / standard handles, then exit.
+// No exec() on Windows: start the new process with the same console / standard handles, wait for it, and exit with
+// its exit code. (Exiting at once ended the process a launcher, Steam or a test script started about a second in,
+// with code 0, while the game ran on in another process.)
 void plat_exec(char *const argv[]) {
     STARTUPINFOW si = {.cb = sizeof si};
     PROCESS_INFORMATION pi;
@@ -601,8 +631,11 @@ void plat_exec(char *const argv[]) {
     }
     if (!ok) return;
     CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    if (!GetExitCodeProcess(pi.hProcess, &code)) code = 1;
     CloseHandle(pi.hProcess);
-    ExitProcess(0);
+    ExitProcess(code);
 }
 
 // ---- diagnostics

@@ -195,6 +195,11 @@ static void log_startup_info(void) {
 int main(int argc, char **argv) {
     plat_init();
     log_startup_info();
+    if (getenv("LARECOMP_REEXEC")) {  // (reserve_guest_space started this process again)
+        const char *why = getenv("LARECOMP_REEXEC_WHY");
+        LOG("[boot] started again (try %s): the guest address range was in use%s%s\n", getenv("LARECOMP_REEXEC"),
+            why ? ": " : "", why ? why : "");
+    }
 #ifdef _WIN32
     setvbuf(stderr, NULL, _IONBF, 0);  // the Windows CRT treats _IOLBF as full buffering
 #else
