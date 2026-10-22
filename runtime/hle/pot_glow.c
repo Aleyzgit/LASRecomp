@@ -14,8 +14,8 @@
 #include "../platform.h"
 #include "../rando.h"
 
-// GA_PLAYER_STATUS_PTR: PlayerStatus*: current level name at +0
-#define EVENT_FLAGS (GA_LIVE_SAVE + 0x5DC0)  // live save: GlobalFlags bitfield (2048 bits)
+// GA(PLAYER_STATUS_PTR): PlayerStatus*: current level name at +0
+#define EVENT_FLAGS (GA(LIVE_SAVE) + 0x5DC0)  // live save: GlobalFlags bitfield (2048 bits)
 
 // bushes.tsv rows may add: cut flag, hidden item scale, full item scale, room file (and the item's record offset in it,
 // unused: see pot_regrow_tick)
@@ -56,7 +56,7 @@ static void load(void) {
 }
 
 static const char *current_level(void) {
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     return ps ? (const char *)(uintptr_t)ps : "";
 }
 
@@ -246,7 +246,7 @@ static void weak_drop(Cpu *c, uint64_t *slot) {
     if (!*slot) return;
     c->x[0] = *slot;
     *slot = 0;
-    guest_call(c, GA_WEAK_RELEASE);
+    guest_call(c, GA(WEAK_RELEASE));
 }
 
 static bool spawn_bush_item(Cpu *c, int i) {
@@ -264,17 +264,19 @@ static bool spawn_bush_item(Cpu *c, int i) {
         c->x[0] = s;
         c->x[1] = s + 0x10;
         c->x[2] = info;
-        guest_call(c, GA_CREATE_ACTOR);
+        guest_call(c, GA(CREATE_ACTOR));
         uint64_t ictrl = LD64(s + 8);
         if (LD64(s) && ictrl) {
             __atomic_fetch_add((int64_t *)(uintptr_t)(ictrl + 0x10), 1, __ATOMIC_ACQ_REL);  // (our weak ref)
             g_item[i] = ictrl;
             c->x[0] = ictrl;
-            guest_call(c, GA_SP_RELEASE);
+            guest_call(c, GA(SP_RELEASE));
         }
         LOG("[pots] bush %s cut: its item (flag %d) %s\n", p->room, p->flag, LD64(s) ? "spawned" : "failed to spawn");
+        { extern void pace_hitch(const char *why);  // nvn/pace.c
+          pace_hitch("an item spawn"); }
     }
-    if (sctrl) { c->x[0] = sctrl; guest_call(c, GA_SP_RELEASE); }
+    if (sctrl) { c->x[0] = sctrl; guest_call(c, GA(SP_RELEASE)); }
     return loaded;
 }
 

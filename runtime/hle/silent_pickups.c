@@ -20,10 +20,10 @@
 #define SILENT_BASE 3000  // (tools/rando/silent_pickups.py)
 #define MARK_FLAG 432     // unused0432: set around the add of a native Secret Seashell (silent_pickups.py MARK_FLAG)
 enum { IT_SEASHELL = 22, IT_HEART_PIECE = 58, IT_HEART_CONTAINER = 59 };
-#define HP (GA_LIVE_SAVE + 0x5544)          // s16 quarter hearts
-#define SHELLS (GA_LIVE_SAVE + 0x5548)      // u64 bits 0-49
-#define PIECES (GA_LIVE_SAVE + 0x5550)      // u64 bits 0-31
-#define CONTAINERS (GA_LIVE_SAVE + 0x5558)  // u16 bits 0-8
+#define HP (GA(LIVE_SAVE) + 0x5544)          // s16 quarter hearts
+#define SHELLS (GA(LIVE_SAVE) + 0x5548)      // u64 bits 0-49
+#define PIECES (GA(LIVE_SAVE) + 0x5550)      // u64 bits 0-31
+#define CONTAINERS (GA(LIVE_SAVE) + 0x5558)  // u16 bits 0-8
 
 typedef struct { int item, count, index, held; } Pick;  // held: heart pieces / seashells once it is added
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -125,7 +125,7 @@ void silent_pickups_tick(uint64_t frame) {
         extern bool flags_ext_get(int idx);
         LOG("[silent] save: pieces %#llx (%d) shells %#llx (%d) containers %#x rupees %u health %d / %d\n",
             (unsigned long long)LD64(PIECES), __builtin_popcountll(LD64(PIECES) & 0xFFFFFFFFull), (unsigned long long)LD64(SHELLS),
-            __builtin_popcountll(LD64(SHELLS) & ((1ull << 50) - 1)), LD16(CONTAINERS), LD32(GA_LIVE_SAVE + 0x5540),
+            __builtin_popcountll(LD64(SHELLS) & ((1ull << 50) - 1)), LD16(CONTAINERS), LD32(GA(LIVE_SAVE) + 0x5540),
             (int)(int16_t)LD16(HP), max_hp());
         const char *f = strchr(ENV("LARECOMP_SILENT_DUMP_AT"), ':');
         for (; f && *f; f = strchr(f, ',')) {
