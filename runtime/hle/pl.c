@@ -43,21 +43,31 @@ static uint8_t *read_file(const char *path, size_t *len) {
 }
 
 // .bfttf -> TTF in place (returns the new length, 0 if it isn't one). Read as little-endian words: the first is
-// 0x7F9A0218 ^ key, the second the font's size ^ key, then the font itself, each word XORed with the key and stored
-// byte-swapped (issue #48: the console's own files; decoded without the swap they never matched)
+// 0x7F9A0218 ^ key, the second the font's size ^ key, then the font itself, each word XORed with the key. The words
+// come in either byte order: swapped (issue #48's files; decoded without the swap they never matched), or in the
+// font's own order (the font archives of a firmware dump, e.g. from an emulator's installed firmware). The magic word
+// says which.
 static size_t bfttf_decode(uint8_t *d, size_t len) {
     static const uint32_t KEY = 0x49621806, MAGIC = 0x7F9A0218;
     if (len < 12) return 0;
     uint32_t w0, w1;
     memcpy(&w0, d, 4);
     memcpy(&w1, d + 4, 4);
-    uint32_t size = w1 ^ KEY;
+    bool swap;
+    if ((w0 ^ KEY) == MAGIC) swap = true;
+    else if ((w0 ^ __builtin_bswap32(KEY)) == __builtin_bswap32(MAGIC)) swap = false;
+    else return 0;
+    uint32_t key = swap ? KEY : __builtin_bswap32(KEY);
+    uint32_t size = w1 ^ key;
+    if (!swap) size = __builtin_bswap32(size);
     size_t words = ((size_t)size + 3) & ~(size_t)3;  // (the last word is padded)
-    if ((w0 ^ KEY) != MAGIC || size < 4 || words > len - 8) return 0;
+    if (size < 4 || words > len - 8) return 0;
     for (size_t i = 0; i < words; i += 4) {
         uint32_t w;
         memcpy(&w, d + 8 + i, 4);
-        put32(d + i, w ^ KEY);  // (big-endian: the font's own byte order)
+        w ^= key;
+        if (swap) put32(d + i, w);  // (big-endian: the font's own byte order)
+        else memcpy(d + i, &w, 4);
     }
     uint32_t ver = be32(d);
     return ver == 0x00010000u || ver == 0x4F54544Fu || ver == 0x74727565u ? size : 0;  // TrueType / 'OTTO' / 'true'
