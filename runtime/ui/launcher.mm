@@ -468,10 +468,26 @@ done:
 }
 
 // ------------------------------------------------------------------ folder dialog (SDL calls back on any thread)
+// files NULL: no window could be shown (an empty list is a cancel). Linux shows it through the desktop's file chooser
+// portal or zenity, and a desktop with neither (a bare window manager) has none: say so instead of Choose doing nothing.
+static const char *const PICKER_FAILED = "Couldn't open a folder window";
+static std::string picker_hint(const char *what) {
+    std::string err = SDL_GetError();
+    fprintf(stderr, "[launcher] %s window: %s\n", what, err.c_str());
+#ifdef __linux__
+    return std::string("LAS Recomp opens the ") + what + " window through your desktop's file chooser "
+           "(xdg-desktop-portal) or zenity. Install either one, then try again.";
+#else
+    return err;
+#endif
+}
+
 static void SDLCALL picked(void *, const char *const *files, int) {
-    if (!files || !files[0]) return;
+    if (!files) { set_job(PICKER_FAILED, true, picker_hint("folder")); return; }
+    if (!files[0]) return;
     pthread_mutex_lock(&g_lock);
     g_src = files[0];
+    if (g_job == PICKER_FAILED) g_job.clear(), g_job_hint.clear(), g_job_failed = false;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -487,7 +503,7 @@ static const char *FONT_LANG[] = {"nintendo_udsg-r_org_zh-cn_003.bfttf", "ninten
                                   "nintendo_udsg-r_ko_003.bfttf", "nintendo_udsg-r_ko_003.ttf"};
 static const char *FONT_EXT[] = {"nintendo_ext_003.bfttf", "nintendo_ext_003.ttf"};
 static std::vector<std::string> g_font_picks;
-static std::string g_font_msg;
+static std::string g_font_msg, g_font_err;  // (g_font_err: the file window couldn't open; from the dialog's thread)
 
 static bool have_font(const char *const *names, int n) {
     for (int i = 0; i < n; i++)
@@ -496,9 +512,10 @@ static bool have_font(const char *const *names, int n) {
 }
 
 static void SDLCALL picked_fonts(void *, const char *const *files, int) {
-    if (!files) return;
+    std::string err = files ? "" : std::string("Couldn't open a file window. ") + picker_hint("file");
     pthread_mutex_lock(&g_lock);
-    for (int i = 0; files[i]; i++) g_font_picks.push_back(files[i]);
+    for (int i = 0; files && files[i]; i++) g_font_picks.push_back(files[i]);
+    if (!files) g_font_err = err;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -506,6 +523,7 @@ static void import_fonts() {
     pthread_mutex_lock(&g_lock);
     std::vector<std::string> picks;
     picks.swap(g_font_picks);
+    if (!g_font_err.empty()) g_font_msg = g_font_err, g_font_err.clear();
     pthread_mutex_unlock(&g_lock);
     if (picks.empty()) return;
     mkdir("fonts", 0755);
@@ -1037,7 +1055,7 @@ static void prelaunch_tab(float sc) {
                         "nintendo_udsg-r_ko_003) and nintendo_ext_003.bfttf (button icons). "
                         ".ttf versions with the same names work too.");
     ImGui::PopTextWrapPos();
-    if (!g_font_msg.empty()) ImGui::Text("%s", g_font_msg.c_str());
+    if (!g_font_msg.empty()) ImGui::TextWrapped("%s", g_font_msg.c_str());
     static const SDL_DialogFileFilter font_f[] = {{"Switch fonts", "bfttf;ttf"}};
     if (ImGui::Button("Import fonts")) SDL_ShowOpenFileDialog(picked_fonts, NULL, g_launcher_win, font_f, 1, NULL, true);
     if (fs || fl || fe) {
