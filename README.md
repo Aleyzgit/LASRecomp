@@ -23,7 +23,7 @@ native Windows, macOS and Linux application.
 
 > [!NOTE]
 > **No game files are included.** LAS Recomp needs your own legally obtained copy of the extracted game files of
-> *Link's Awakening* **v1.0.0**, with no updates applied. When setting up, choose a folder that contains the `exefs`
+> *Link's Awakening* **v1.0.0, v1.0.1 or v1.1.0**. When setting up, choose a folder that contains the `exefs`
 > and `romfs` folders, or their contents. Instructions on how to obtain these files will **NOT** be provided.
 > On first launch the app sets up what it needs, including the actual recompilation locally. No game files, assets or fonts are included.
 > The screenshot shows the start screen after setup; no Nintendo artwork is included until provided by the user.
@@ -116,7 +116,7 @@ Known issues and their status are on the [GitHub issues page](https://github.com
 
 ## Building from source
 
-Every platform needs your own v1.0.0 game files: build first, then use the start screen's game-file setup.
+Every platform needs your own game files (v1.0.0, v1.0.1 or v1.1.0): build first, then use the start screen's game-file setup.
 `make gen` then recompiles the game code from your own game files into `generated/`, and `make` builds it into its own
 library next to the app (`build/lasgame.*`); without it the start screen builds that library itself, as it does for
 players. Release builds hold none of the game's code: the start screen builds it on each player's machine from their

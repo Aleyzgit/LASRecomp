@@ -1,7 +1,7 @@
 // Start screen, shown before the game boots (user 2026-10-08, styled after Dusklight's launcher): PLAY (with
 // ‹ Vanilla / seed › picker), SETTINGS, QUIT, game-files status at the lower left. Nothing of the game ships with
-// LAS Recomp: on first launch the user picks the folder with their own game files (v1.0.0), we check the main
-// module's build id, copy the files and build the game's data image; PLAY stays disabled until that worked. The background is a frame of the game's own title movie (from the user's files) once extracted.
+// LAS Recomp: on first launch the user picks the folder with their own game files (1.0.0, 1.0.1 or 1.1.0), we check
+// the main module's build id (runtime/game_addresses/versions.h), copy the files and build the game's data image; PLAY stays disabled until that worked. The background is a frame of the game's own title movie (from the user's files) once extracted.
 //
 // Skipped with --play, LARECOMP_NO_LAUNCHER=1, or any scripted test run (LARECOMP_INPUT): tests boot straight in
 // (with LARECOMP_NO_LAUNCHER, set by tools/game_slot.sh, the app exits rather than show it: runtime/main.c).
@@ -41,6 +41,7 @@ extern "C" {
 #include "paths.h"
 #include "gamebuild.h"
 #include "build_cache.h"
+#include "game_addresses.h"
 #include "gamelib.h"
 #include "romfs_build.h"
 #include "settings.h"
@@ -86,7 +87,6 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 }
 #endif
 
-static const uint8_t BUILD_ID[8] = {0xae, 0x16, 0xf7, 0x1e, 0x00, 0x2a, 0xf8, 0xcb};  // Link's Awakening v1.0.0 main
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it): beta_<n> until 1.0, then v<major>.<minor>.<patch>. A test build (a pre-release for a few players to try a fix)
 // is test-<name>: the start screen says "Test build <name>", and it previews LARECOMP_TEST_OF - the update check
@@ -178,7 +178,7 @@ static bool file_exists(const std::string &p) {
     return stat(p.c_str(), &st) == 0;
 }
 
-// The game's RomFS (v1.0.0) has exactly ROMFS_FILES files: a copy with fewer is incomplete (a copy or unzip that
+// The game's RomFS (the same in every supported version) has exactly ROMFS_FILES files: a copy with fewer is incomplete (a copy or unzip that
 // stopped partway) and the game crashes on the first one it misses (issues #24, #35). Only the number ships.
 enum { ROMFS_FILES = 3836 };
 static int count_files(const std::string &dir, int depth = 0) {
@@ -199,7 +199,8 @@ static int count_files(const std::string &dir, int depth = 0) {
 // up, deleted)
 static int g_romfs_count = -1;
 static std::atomic<bool> g_build_cache_changed{true};
-static void game_files_changed(void) { g_romfs_count = -1; g_build_cache_changed = true; }
+static std::atomic<int> g_files_changes{0};  // (the version label on the start screen is read again)
+static void game_files_changed(void) { g_romfs_count = -1; g_build_cache_changed = true; ++g_files_changes; }
 // The setup page redraws every frame; read the build cache's disk state only after the files/build state changes.
 static bool g_resumable, g_has_build_cache;
 static void read_build_cache(void) {
@@ -218,13 +219,8 @@ static std::string incomplete(int have) {
 
 // The copied game files alone ("" = there), without the game code built from them
 static std::string check_copied_files(const std::string &root) {
-    FILE *f = fopen((root + "/exefs/main").c_str(), "rb");
-    if (!f) return "No game files yet";
-    uint8_t id[8] = {0};
-    fseek(f, 0x40, SEEK_SET);
-    size_t n = fread(id, 1, 8, f);
-    fclose(f);
-    if (n != 8 || memcmp(id, BUILD_ID, 8)) return "Wrong version of the game";
+    if (!file_exists(root + "/exefs/main")) return "No game files yet";
+    if (!game_version_of(root.c_str())) return "Wrong version of the game";
     if (!file_exists(root + "/romfs/region_common")) return incomplete(0);
     if (g_romfs_count < 0) g_romfs_count = count_files(root + "/romfs");
     if (g_romfs_count < ROMFS_FILES) return incomplete(g_romfs_count);
@@ -243,7 +239,7 @@ static const char *status_hint(const std::string &why) {
     if (why.rfind("Game files incomplete", 0) == 0)
         return "Some of the game's files are missing, usually from a copy or unzip that stopped partway. Copy your game "
                "files again, then choose that folder and set them up again.";
-    if (why == "Wrong version of the game") return "LAS Recomp needs version 1.0.0 of the game, without updates.";
+    if (why == "Wrong version of the game") return "LAS Recomp needs version 1.0.0, 1.0.1 or 1.1.0 of the game.";
     if (why == "Game code not built yet") return "Set up the game files to build it (a few minutes, only once).";
     return "Set up the game files to play.";
 }
@@ -277,7 +273,7 @@ static void set_failure(int k, int have = -1, const char *reason = NULL) {
         "Choose the folder that has the game's exefs and romfs folders in it.",
         "LAS Recomp needs the game's own files (the exefs and romfs folders), not .xci / .nsp / .nca files.",
         "Make sure there's about 12 GB free and try again.",
-        "LAS Recomp needs version 1.0.0 of the game, without updates.",
+        "LAS Recomp needs version 1.0.0, 1.0.1 or 1.1.0 of the game.",
         "Some of the game's files are missing - usually a copy or unzip that stopped partway. Copy the game files "
         "again so none are missing, then choose the folder again.",
         "Make sure there's about 2 GB free and try again. If it keeps happening, report it on GitHub."};
@@ -320,14 +316,12 @@ static void find_game(const std::string &dir, int depth, std::string &exefs, std
     for (auto &s : sub) find_game(s, depth + 1, exefs, romfs, unusable);
 }
 
-static bool build_id_ok(const std::string &main_path) {
-    FILE *f = fopen(main_path.c_str(), "rb");
-    if (!f) return false;
-    uint8_t id[8] = {0};
-    fseek(f, 0x40, SEEK_SET);
-    size_t n = fread(id, 1, 8, f);
-    fclose(f);
-    return n == 8 && !memcmp(id, BUILD_ID, 8);
+// A supported game version (runtime/game_addresses/versions.h)? Logs which one.
+static bool build_id_ok(const std::string &exefs) {
+    char label[32];
+    const char *v = game_release_label(exefs.c_str(), label, sizeof label);
+    fprintf(stderr, "[launcher] game files: %s\n", v ? (std::string("version ") + v).c_str() : "an unsupported version");
+    return v != NULL;
 }
 
 // progress (the overlay's bar): the romfs copy (bytes)
@@ -418,7 +412,7 @@ static void *extract_thread(void *) {
     set_job("Looking for the game files...");
     find_game(src, 0, exefs, romfs, unusable);
     if (exefs.empty() || romfs.empty()) { set_failure(unusable ? FAIL_UNUSABLE : FAIL_NOT_FOUND); goto done; }
-    if (!build_id_ok(exefs + "/main")) { set_failure(FAIL_VERSION); goto done; }
+    if (!build_id_ok(exefs)) { set_failure(FAIL_VERSION); goto done; }
     if (int have = count_files(romfs); have < ROMFS_FILES) {  // (an incomplete copy: refused before copying it)
         fprintf(stderr, "[launcher] %s: %d of %d romfs files\n", romfs.c_str(), have, (int)ROMFS_FILES);
         set_failure(FAIL_MISSING, have);
@@ -1811,7 +1805,7 @@ extern "C" void launcher_run(const char *root) {
                     dl->AddLine(ImVec2(x + u * 0.35f, cy + u * 0.35f), ImVec2(x + u, cy - u * 0.4f), g, fs * 0.11f);
                 };
                 std::string src_d = "The folder with your own game folders (exefs/romfs) of The Legend of Zelda: Link's "
-                                    "Awakening for Nintendo Switch, version 1.0.0. The game isn't included with LAS Recomp.";
+                                    "Awakening for Nintendo Switch, version 1.0.0, 1.0.1 or 1.1.0. The game isn't included with LAS Recomp.";
                 if (!src.empty()) src_d += "\n\nChosen: " + src;
                 // the step that's running / its result, under the rows and in the Set up row's explanation
                 const std::string &job_line = job;
@@ -1951,7 +1945,15 @@ extern "C" void launcher_run(const char *root) {
                 }
                 ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.55f, 1), "Game files ready.");
                 ImGui::SetCursorPosX(x0);
-                ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "Nintendo Switch  \xc2\xb7  v1.0.0");
+                static std::string version_label;  // (the copied files' release: "1.0.1")
+                static int label_of = -1;
+                if (label_of != g_files_changes.load()) {
+                    label_of = g_files_changes.load();
+                    char label[32];
+                    const char *v = game_release_label((g_root + "/exefs").c_str(), label, sizeof label);
+                    version_label = v ? v : "?";
+                }
+                ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "Nintendo Switch  \xc2\xb7  v%s", version_label.c_str());
             } else {
                 ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  %s", busy ? "Setting up the game files..." : status.c_str());
                 ImGui::SetCursorPosX(x0);

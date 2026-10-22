@@ -80,7 +80,7 @@ static bool hold_30(bool on) {
     extern uint64_t pace_test_game_mgr;
     uint64_t fw = pace_test_game_mgr;
 #else
-    uint64_t fw = *(volatile uint64_t *)(uintptr_t)GA_GAME_MGR;
+    uint64_t fw = *(volatile uint64_t *)(uintptr_t)GA(GAME_MGR);
 #endif
     if (!fw) return held = false;  // (between boots / before the game set up)
     volatile uint8_t *min = (volatile uint8_t *)(uintptr_t)(fw + FW_MIN_EXTRA_VSYNCS), *max = min + 1;

@@ -66,7 +66,7 @@ int rt_actor_event(Cpu *c) {
     if (off < 0) off = getenv("LARECOMP_QUICK_PICKUPS") && !atoi(getenv("LARECOMP_QUICK_PICKUPS"));
     if (off) return 0;
     uint64_t actor = LD64(c->x[20] + 0x58);
-    if (!actor || LD64(actor) != GA_SINKING_SWORD_VTABLE) return 0;
+    if (!actor || LD64(actor) != GA(SINKING_SWORD_VTABLE)) return 0;
     uint64_t name = LD64(c->x[29] - 0x40), len = LD64(c->x[29] - 0x38);
     if (!name || !len || len > 47) return 0;
     const Quick *q = find((const char *)(uintptr_t)name, (size_t)len);
@@ -95,18 +95,18 @@ int rt_actor_event(Cpu *c) {
         memcpy(&c->v[0], &one, 4);
         memcpy(&c->v[1], &one, 4);
         c->x[0] = ref, c->x[1] = 0;
-        guest_call(c, GA_PLAY_SYSTEM_SE);
+        guest_call(c, GA(PLAY_SYSTEM_SE));
         c->sp = saved.sp;
     }
-    uint32_t rupees = LD32(GA_LIVE_SAVE + 0x5540);
-    int16_t hp = (int16_t)LD16(GA_LIVE_SAVE + 0x5544);
+    uint32_t rupees = LD32(GA(LIVE_SAVE) + 0x5540);
+    int16_t hp = (int16_t)LD16(GA(LIVE_SAVE) + 0x5544);
     c->x[0] = (uint64_t)q->item, c->x[1] = (uint64_t)q->count, c->x[2] = (uint64_t)(int64_t)q->index, c->x[3] = 0;
-    guest_call(c, GA_ADD_ITEM);  // Inventory.AddItemByKey (through the AddItem hook: refills, silent pickups' cards)
+    guest_call(c, GA(ADD_ITEM));  // Inventory.AddItemByKey (through the AddItem hook: refills, silent pickups' cards)
     c->x[0] = actor;
-    guest_call(c, GA_ACTOR_KILL);  // SinkingSword.Destroy
+    guest_call(c, GA(ACTOR_KILL));  // SinkingSword.Destroy
     *c = saved;
     LOG("[quick] f%llu %.*s: item %d x%d (index %d), flag %d%s%s - no event (rupees %u -> %u, health %d -> %d)\n",
         (unsigned long long)frame, (int)len, (const char *)(uintptr_t)name, q->item, q->count, q->index, q->flag,
-        q->se[0] ? ", sound " : "", q->se, rupees, LD32(GA_LIVE_SAVE + 0x5540), hp, (int16_t)LD16(GA_LIVE_SAVE + 0x5544));
+        q->se[0] ? ", sound " : "", q->se, rupees, LD32(GA(LIVE_SAVE) + 0x5540), hp, (int16_t)LD16(GA(LIVE_SAVE) + 0x5544));
     return 2;
 }
