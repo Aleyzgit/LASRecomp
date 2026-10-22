@@ -143,7 +143,7 @@ void widescreen_backdrop_seen(uint64_t hash) {
 static bool level_is_interior(void) {
     extern int game_in_play(void);
     if (!game_in_play()) return false;
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);  // PlayerStatus*: current level name at +0
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));  // PlayerStatus*: current level name at +0
     if (!ps) return false;
     const char *lv = (const char *)(uintptr_t)ps;
     return lv[0] && strcmp(lv, "Field") != 0;
@@ -204,7 +204,7 @@ static bool view_point(float x, float y, bool side, float zc, float p[3]) {
 
 // Current camera zone's box; false when there is none (title, overworld, loading).
 static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
-    uint64_t o = LD64(GA_SDK_SYSTEM_OBJECT);
+    uint64_t o = LD64(GA(SDK_SYSTEM_OBJECT));
     if (!heap_ptr(o)) return false;
     uint64_t z = LD64(o + 0x680);
     if (!heap_ptr(z)) return false;
@@ -222,7 +222,7 @@ static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
 uint64_t game_camera_zone(void) {
     float lo[3], hi[3];
     uint32_t id;
-    return current_zone(lo, hi, &id) ? LD64(LD64(GA_SDK_SYSTEM_OBJECT) + 0x680) : 0;
+    return current_zone(lo, hi, &id) ? LD64(LD64(GA(SDK_SYSTEM_OBJECT)) + 0x680) : 0;
 }
 
 // Horizontal crop (uv of the wide image): ROOM_CROP for a room wider than one screen (u0..u1), ROOM_BOX for a
@@ -330,6 +330,6 @@ void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double
 // Current level name for logs ("-" when not in play).
 const char *game_level_name(void) {
     extern int game_in_play(void);
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     return game_in_play() && ps && *(const char *)(uintptr_t)ps ? (const char *)(uintptr_t)ps : "-";
 }

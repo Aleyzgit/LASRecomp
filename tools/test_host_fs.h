@@ -54,8 +54,14 @@ static int notices;  // save-failed warnings shown (fs.c tells the player once p
 void plat_notice(const char *text) { notices++; }
 #include "../runtime/game_addresses.h"
 static uint8_t live_save[0x6000];
-#undef GA_LIVE_SAVE
-#define GA_LIVE_SAVE ((uintptr_t)live_save)
+static GameAddrs test_ga = {  // the 1.0.0 table, with the live save in host memory
+#define GA_ADDR(name, value) .name = UINT64_C(value),
+#include "../runtime/game_addresses/patches_v1_0_0.h"
+#include "../runtime/game_addresses/runtime_v1_0_0.h"
+#undef GA_ADDR
+};
+const GameAddrs *g_ga = &test_ga;
+__attribute__((constructor)) static void test_ga_init(void) { test_ga.LIVE_SAVE = (uintptr_t)live_save; }
 #include "../runtime/hle/flags_ext.c"
 Service *service_new(const char *name, ServiceHandler handler, void *state) {
     Service *s = calloc(1, sizeof *s); s->name = name; s->handler = handler; s->state = state; return s;

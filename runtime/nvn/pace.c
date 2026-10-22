@@ -64,7 +64,7 @@ static uint64_t stat_pace_over;
 static bool hold_30(bool on) {
     static bool held;
     static uint8_t saved;
-    uint64_t fw = *(volatile uint64_t *)(uintptr_t)GA_GAME_MGR;
+    uint64_t fw = *(volatile uint64_t *)(uintptr_t)GA(GAME_MGR);
     if (!fw) return held = false;  // (between boots / before the game set up)
     volatile uint8_t *min = (volatile uint8_t *)(uintptr_t)(fw + FW_MIN_EXTRA_VSYNCS), *max = min + 1;
     if (on && *max >= 1) {
