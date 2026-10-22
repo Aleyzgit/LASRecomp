@@ -198,6 +198,14 @@ static bool current_zone(float lo[3], float hi[3], uint32_t *id) {
     return true;
 }
 
+// The current camera zone record (a dungeon room, an interior), 0 when there is none (overworld, title, loading).
+// (Frame pacing: runtime/nvn/pace.c - a room change is a new scene.)
+uint64_t game_camera_zone(void) {
+    float lo[3], hi[3];
+    uint32_t id;
+    return current_zone(lo, hi, &id) ? LD64(LD64(GA_SDK_SYSTEM_OBJECT) + 0x680) : 0;
+}
+
 // Horizontal crop (uv of the wide image): ROOM_CROP for a room wider than one screen (u0..u1), ROOM_BOX for a
 // single-screen room (16:9 box), ROOM_FULL when the zone doesn't match the camera (no box: the game's camera clamps
 // for the wide view, so a 16:9 box around a stale zone's centre cut Link out - user 2026-10-09), ROOM_KEEP when

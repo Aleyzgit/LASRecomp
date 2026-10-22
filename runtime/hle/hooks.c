@@ -32,6 +32,10 @@ int rt_hook(Cpu *c, uint64_t site) {
         return rt_shadow_link_appear(c->x[0]) ? 2 : 0;
     case GA_SHADOW_LINK_BGM_SITE:  // SHADOW_LINK_BGM_SITE - bl main+0xce8ce0: his chamber music, only in the chamber
         return rt_shadow_link_bgm();
+    case GA_ACTOR_EVENT_SITE: {  // ACTOR_EVENT_SITE - bl main+0x80c290: an actor's event request (quick pickups)
+        extern int rt_actor_event(Cpu *c);
+        return rt_actor_event(c);
+    }
     case GA_CRASHOUT_SITE:  // CRASHOUT_SITE - str wzr, [x0, #0xb8]: Blaino's knock-out, no crash-out for copies
         if (!rt_crashout_skip(c->x[0])) return 0;
         ST32(c->x[0] + 0xb8, 0);

@@ -17,6 +17,7 @@
 #include "pace.h"
 #include "shader_prep.h"
 #include "recolour.h"
+#include "slowframe.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandBuffer> cmdbuf;
@@ -31,6 +32,10 @@ static double stat_gpu_s;
 // GPU busy time (dynamic resolution: output_scale.c; the "gpu" of the [metal] stats line), ns so far: the game's
 // command buffers, the window image's (metal.m backend_present), and the plain sum of their spans (diagnostics)
 uint64_t g_gpu_total_ns, g_gpu_win_ns, g_gpu_sum_ns;
+// Frame pacing (pace.c): the GPU's busy time so far, the game's command buffers and the window image's (renderer_gpu_busy).
+int64_t pace_gpu_ns(void) {
+    return (int64_t)(__atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED) + __atomic_load_n(&g_gpu_win_ns, __ATOMIC_RELAXED));
+}
 // (forward: texture-lifetime cleanup and stats, defined further down)
 static int g_views_live;
 static void views_forget(void *base);
@@ -100,7 +105,8 @@ bool renderer_origin_lower_left(void) { return nvn_window_origin() == 0; }
 static double stat_compile_ms;  // time spent building shaders/pipelines (first-use stutter)
 static int stat_compiles;
 static inline double now_ms(void) { return (double)clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1e6; }
-#define TIMED_COMPILE(expr) ({ double t0_ = now_ms(); __auto_type r_ = (expr); stat_compile_ms += now_ms() - t0_; stat_compiles++; r_; })
+#define TIMED_COMPILE(expr) ({ double t0_ = now_ms(); __auto_type r_ = (expr); stat_compile_ms += now_ms() - t0_; stat_compiles++; \
+                               slow_note_build("pipeline", (uint64_t)((now_ms() - t0_) * 1e6)); r_; })
 
 static uint64_t stat_counters_gpu;  // timing counters given the GPU's time (the game's 30 / 60 fps choice)
 const char *renderer_stats(void) {
@@ -361,6 +367,7 @@ static bool counters_want_next(void) {
 }
 
 static int g_wait_kind;
+static uint64_t cum_wait_ticks;  // GPU waits so far (mach ticks; never reset)
 static void wait_cb(id<MTLCommandBuffer> c) {
     if (!c) return;
     uint64_t t0 = mach_absolute_time();
@@ -370,6 +377,7 @@ static void wait_cb(id<MTLCommandBuffer> c) {
     rq_watch(NULL, 0);
     uint64_t d = mach_absolute_time() - t0;
     stat_wait_ns += d;
+    __atomic_fetch_add(&cum_wait_ticks, d, __ATOMIC_RELAXED);  // (the slow-frame log)
     stat_wait_by[g_wait_kind] += d;
     if (d > 24000) stat_wait_n[g_wait_kind]++;  // (> ~1 ms counts as a real wait)
     counters_resolve();
@@ -468,6 +476,15 @@ void renderer_sync(void) {
     g_wait_kind = 2;
     wait_cb(c);
     g_wait_kind = 0;
+}
+
+// (the slow-frame log, slowframe.h; the game thread) running totals: no heap imports here (the heap is shared once)
+void renderer_slow_counters(uint64_t *submits, uint64_t *gpu_wait_ns, uint64_t *imports) {
+    static mach_timebase_info_data_t tb;
+    if (!tb.denom) mach_timebase_info(&tb);
+    *submits = __atomic_load_n(&submit_seq, __ATOMIC_RELAXED);
+    *gpu_wait_ns = (uint64_t)((unsigned __int128)__atomic_load_n(&cum_wait_ticks, __ATOMIC_RELAXED) * tb.numer / tb.denom);
+    *imports = 0;
 }
 
 uint64_t renderer_submit_seq(void) {
@@ -1332,7 +1349,7 @@ static id<MTLRenderPipelineState> archive_render_pipeline_(MTLRenderPipelineDesc
     pd.binaryArchives = @[archive];
     id<MTLRenderPipelineState> ps = [dev newRenderPipelineStateWithDescriptor:pd options:MTLPipelineOptionFailOnBinaryArchiveMiss
                                                                     reflection:nil error:nil];
-    if (ps) { g_archive_hits++; return ps; }
+    if (ps) { g_archive_hits++; slow_note_cache_hit(); return ps; }
     bool added = false;  // (not while a save runs: it can take a while - this one goes in a later run)
     if (!pthread_rwlock_tryrdlock(&g_archive_lock)) {
         added = [archive addRenderPipelineFunctionsWithDescriptor:pd error:nil];
@@ -1358,7 +1375,7 @@ static id<MTLComputePipelineState> archive_compute_pipeline(id<MTLFunction> f, N
     cd.binaryArchives = @[archive];
     id<MTLComputePipelineState> ps = [dev newComputePipelineStateWithDescriptor:cd options:MTLPipelineOptionFailOnBinaryArchiveMiss
                                                                       reflection:nil error:nil];
-    if (ps) { g_archive_hits++; return ps; }
+    if (ps) { g_archive_hits++; slow_note_cache_hit(); return ps; }
     bool added = false;  // (not while a save runs: it can take a while - this one goes in a later run)
     if (!pthread_rwlock_tryrdlock(&g_archive_lock)) {
         added = [archive addComputePipelineFunctionsWithDescriptor:cd error:nil];
@@ -1392,6 +1409,7 @@ static void compile_program(Prog *pr) {
     __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
     double dt = now_ms() - t0;
     @synchronized(cache) { stat_compile_ms += dt; }
+    slow_note_build("program", (uint64_t)(dt * 1e6));
     pr->ready = true;
 }
 
@@ -1401,7 +1419,7 @@ static bool translate_program(Prog *pr, const uint8_t *vcode, size_t vmax, const
                               ShaderKey *vkey, ShaderKey *fkey, uint64_t vaddr, uint64_t faddr) {
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
-    pr->vi = maxwell_translate(vcode, vmax, STAGE_VERTEX, vkey);
+    pr->vi = slow_translate(vcode, vmax, STAGE_VERTEX, vkey);
     if (!pr->vi->msl) {
         LOG("[shader] VS translate failed: %s (code %llx)\n", pr->vi->error, vaddr);
         if (vaddr) {
@@ -1414,7 +1432,7 @@ static bool translate_program(Prog *pr, const uint8_t *vcode, size_t vmax, const
         return false;
     }
     fkey->vs_out_mask = pr->vi->out_mask;
-    pr->fi = maxwell_translate(fcode, fmax, STAGE_FRAGMENT, fkey);
+    pr->fi = slow_translate(fcode, fmax, STAGE_FRAGMENT, fkey);
     if (!pr->fi->msl) { LOG("[shader] FS translate failed: %s\n", pr->fi->error); pr->failed = true; return false; }
     if (getenv("LARECOMP_SAVE_MSL") && vaddr) {
         mkdir("build/msl", 0755);
@@ -1611,6 +1629,63 @@ static MTLTextureType mtl_type_for(int t) {
     case TEXTYPE_1D_ARRAY: return MTLTextureType1DArray;
     default: return MTLTextureType2D;
     }
+}
+
+// Shadow slots (depth2d, sample_compare) need a depth texture: with nothing usable bound they get a 1x1 Depth32Float
+// cleared to 1.0 (lit under the usual less / less-equal compare, as an empty shadow map) instead of the RGBA8 dummy,
+// which compared as 0 (in shadow) and is not a depth texture. The Vulkan side does the same (exec.c shadow_slot_check).
+static id<MTLTexture> dummy_depth_texture(int type) {
+    static id<MTLTexture> t[10];
+    if (type < 0 || type >= 10) type = TEXTYPE_2D;
+    if (type != TEXTYPE_2D && type != TEXTYPE_2D_ARRAY && type != TEXTYPE_CUBE && type != TEXTYPE_CUBE_ARRAY)
+        return dummy_texture(type);  // (3D has no shadow form; 1D depth textures don't exist)
+    if (!t[type]) {
+        MTLTextureDescriptor *d = [MTLTextureDescriptor new];
+        d.pixelFormat = MTLPixelFormatDepth32Float;
+        d.width = d.height = 1;
+        d.textureType = mtl_type_for(type);
+        d.storageMode = MTLStorageModePrivate;
+        d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+        id<MTLTexture> tex = [dev newTextureWithDescriptor:d];
+        if (!tex) return dummy_texture(type);
+        NSUInteger slices = type == TEXTYPE_CUBE || type == TEXTYPE_CUBE_ARRAY ? 6 : 1;
+        id<MTLCommandBuffer> cb = [renderer_queue() commandBuffer];  // (committed now: runs before the current one)
+        for (NSUInteger s = 0; s < slices; s++) {
+            MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
+            rp.depthAttachment.texture = tex;
+            rp.depthAttachment.slice = s;
+            rp.depthAttachment.loadAction = MTLLoadActionClear;
+            rp.depthAttachment.storeAction = MTLStoreActionStore;
+            rp.depthAttachment.clearDepth = 1.0;
+            [[cb renderCommandEncoderWithDescriptor:rp] endEncoding];
+        }
+        [cb commit];
+        t[type] = tex;
+    }
+    return t[type];
+}
+
+static bool mtl_depth_comparable(id<MTLTexture> t) {
+    switch (t.pixelFormat) {
+    case MTLPixelFormatDepth16Unorm: case MTLPixelFormatDepth32Float: case MTLPixelFormatDepth32Float_Stencil8:
+        return true;  // (depth targets are never D24S8 here)
+    default: return false;
+    }
+}
+
+// The texture for a shadow slot: tex if it is a comparable depth texture, else the depth dummy (logged once per cause).
+static id<MTLTexture> shadow_slot_texture(id<MTLTexture> tex, const ShaderTexture *st_, int i, uint64_t h) {
+    if (tex && mtl_depth_comparable(tex) && tex.textureType != MTLTextureType2DMultisample) return tex;
+    static bool logged[3];
+    int why = !h ? 0 : !tex ? 1 : 2;
+    if (!logged[why]) {
+        logged[why] = true;
+        static const char *names[3] = {"handle 0 (nothing bound)", "no texture (unregistered / finalized / type mismatch)",
+                                       "not a comparable depth texture"};
+        LOG("[mtl] shadow slot t%d (type %d): %s - handle %#llx, pixel format %lu: 1x1 depth dummy instead (once per cause)\n",
+            i, st_->type, names[why], (unsigned long long)h, tex ? (unsigned long)tex.pixelFormat : 0ul);
+    }
+    return dummy_depth_texture(st_->type);
 }
 
 // NVN texture/view component swizzle (same enum values as MTLTextureSwizzle), applied as a view.
@@ -1881,6 +1956,7 @@ static void bind_textures(int stage, ShaderInfo *si) {
         }
         NvnSamplerDesc *sd = h && st.spool && tsc < (uint32_t)st.spool->count ? &((NvnSamplerDesc *)st.spool->entries)[tsc] : NULL;
         if (sd) smp = sampler_for(sd);
+        if (st_->shadow) tex = shadow_slot_texture(tex, st_, i, h);
         if (!tex) tex = dummy_texture(st_->type);
         if (!smp) smp = default_sampler();
         if (g_debug_frame && tex.textureType == MTLTextureType2D && stage == 1) {
@@ -1977,6 +2053,7 @@ static void compile_compute(CsProg *cp) {
     id<MTLFunction> f = lib ? [lib newFunctionWithName:@"main0"] : nil;
     id<MTLComputePipelineState> pipe = f ? archive_compute_pipeline(f, &err) : nil;
     @synchronized(cache) { stat_compile_ms += now_ms() - t0; }
+    slow_note_build("pipeline cs", (uint64_t)((now_ms() - t0) * 1e6));
     __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
     if (!pipe) {
         LOG("[compute] compile failed: %s\n%s\n", err.localizedDescription.UTF8String, cp->si->msl);
@@ -1999,7 +2076,7 @@ static bool translate_compute(CsProg *cp, const uint8_t *code, size_t max) {
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
     ShaderKey k = {0};
-    cp->si = maxwell_translate(code, max, STAGE_COMPUTE, &k);
+    cp->si = slow_translate(code, max, STAGE_COMPUTE, &k);
     if (!cp->si->msl) { LOG("[compute] translate failed: %s (code %llx)\n", cp->si->error, cp->code_addr); cp->failed = true; return false; }
     return true;
 }
@@ -2139,6 +2216,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         NvnSamplerDesc *sd = h && st.spool && tsc < (uint32_t)st.spool->count ? &((NvnSamplerDesc *)st.spool->entries)[tsc] : NULL;
         if (sd) smp = sampler_for(sd);
         if (!smp) smp = default_sampler();
+        if (st_->shadow) tex = shadow_slot_texture(tex, st_, i, h);
         [ce setTexture:tex ? tex : dummy_texture(st_->type) atIndex:i];
         if (cmapped) { msmp[i] = smp; mdesc[i] = sd; }
         else [ce setSamplerState:smp atIndex:i];
@@ -2596,6 +2674,7 @@ static void draw(CmdRec *r, bool indexed) {
                 if (!ps) { static int n; if (n++ < 10) LOG("[metal] pipeline failed: %s\n", e.localizedDescription.UTF8String); }
                 @synchronized(ready_pipes) { ready_pipes[k] = ps ? (id)ps : (id)[NSNull null]; }
                 @synchronized(cache) { stat_compile_ms += now_ms() - t0; }
+                slow_note_build("pipeline", (uint64_t)((now_ms() - t0) * 1e6));
                 __atomic_fetch_add(&stat_compiles, 1, __ATOMIC_RELAXED);
             });
             stat_skipped++;

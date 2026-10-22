@@ -109,6 +109,7 @@ static bool lazy_heap_predicted(bool budget_ext, bool *probe) {
 }
 static atomic_bool ui_ready;
 static VkDebugUtilsMessengerEXT messenger;
+static void exit_after_shot(void);  // (UI thread section)
 
 // ================================================================== instance / device
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
@@ -128,6 +129,7 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
 
 // LARECOMP_VK_VALIDATION=1: Khronos validation layer (MSYS2 package vulkan-validation-layers)
 // LARECOMP_VK_VALIDATION_STOP=1: require that layer and its callback, and exit nonzero on the first error.
+static bool validating;  // the validation layer is on (validation_exit)
 static void create_instance(void) {
     Uint32 n_sdl = 0;
     const char *const *sdl_ext = SDL_Vulkan_GetInstanceExtensions(&n_sdl);
@@ -156,6 +158,7 @@ static void create_instance(void) {
         validate = false;
         r = vkCreateInstance(&ci, NULL, &g_vk.inst);
     }
+    validating = validate;
     if (r != VK_SUCCESS) FATAL("vkCreateInstance: %d (is a Vulkan 1.3 driver installed?)\n", r);
     if (validate) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
@@ -295,6 +298,7 @@ static void *pipeline_cache_saver(void *a) {  // every 3 minutes, when it grew
     (void)a;
     for (;;) {
         SDL_Delay(180000);
+        if (rq_stopping()) break;  // (quitting: backend_quit saves it)
         vk_pipeline_cache_save();
     }
     return NULL;
@@ -319,6 +323,15 @@ static void create_device(void) {
     g_fault_ext = fault;
     bool budget = has_ext(ep, ne, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);  // (real per-heap budgets: vk_log_memory)
     if (budget) ext[n_ext++] = VK_EXT_MEMORY_BUDGET_EXTENSION_NAME;
+    // pipeline-building features: logged below (issue #92); dynamic vertex input used, the library one only measured
+    bool vids_ext = has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+#ifdef VK_EXT_graphics_pipeline_library
+    bool gpl_ext = has_ext(ep, ne, VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME) &&
+                   has_ext(ep, ne, VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME);
+#endif
+#ifdef VK_EXT_extended_dynamic_state3
+    bool eds3_ext = has_ext(ep, ne, VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME);
+#endif
 #ifdef __linux__
     // the guest heap as driver memory mapped at HEAP_BASE (exec.c backend_guest_heap_prepare)
     g_vk.dmabuf = has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
@@ -342,7 +355,75 @@ static void create_device(void) {
     VkPhysicalDeviceMapMemoryPlacedFeaturesEXT have_placed = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAP_MEMORY_PLACED_FEATURES_EXT};
     if (placed_ext) have12.pNext = &have_placed;
 #endif
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT have_vids = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    if (vids_ext) have_vids.pNext = have.pNext, have.pNext = &have_vids;
+#ifdef VK_EXT_graphics_pipeline_library
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT have_gpl = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT};
+    if (gpl_ext) have_gpl.pNext = have.pNext, have.pNext = &have_gpl;
+#endif
+#ifdef VK_EXT_extended_dynamic_state3
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT have_eds3 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    if (eds3_ext) have_eds3.pNext = have.pNext, have.pNext = &have_eds3;
+#endif
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
+    {   // what the driver offers for building pipelines (one line, for #92 reports)
+        VkPhysicalDeviceDriverProperties drv = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 pr = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv};
+        char gpl[96] = "no extension", eds3[160] = "no extension";
+#ifdef VK_EXT_graphics_pipeline_library
+        VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT gplp = {
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT};
+        if (gpl_ext) gplp.pNext = pr.pNext, pr.pNext = &gplp;
+#else
+        snprintf(gpl, sizeof gpl, "not in this build's headers");
+#endif
+#ifndef VK_EXT_extended_dynamic_state3
+        snprintf(eds3, sizeof eds3, "not in this build's headers");
+#endif
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &pr);
+#ifdef VK_EXT_graphics_pipeline_library
+        if (gpl_ext)
+            snprintf(gpl, sizeof gpl, "%s (fast linking %s, independent interpolation decoration %s)",
+                     have_gpl.graphicsPipelineLibrary ? "yes" : "no", gplp.graphicsPipelineLibraryFastLinking ? "yes" : "no",
+                     gplp.graphicsPipelineLibraryIndependentInterpolationDecoration ? "yes" : "no");
+#endif
+#ifdef VK_EXT_extended_dynamic_state3
+        if (eds3_ext)
+            snprintf(eds3, sizeof eds3, "polygon mode %d, samples %d, alpha to coverage %d, blend enable %d, "
+                     "blend equation %d, write mask %d", have_eds3.extendedDynamicState3PolygonMode,
+                     have_eds3.extendedDynamicState3RasterizationSamples, have_eds3.extendedDynamicState3AlphaToCoverageEnable,
+                     have_eds3.extendedDynamicState3ColorBlendEnable, have_eds3.extendedDynamicState3ColorBlendEquation,
+                     have_eds3.extendedDynamicState3ColorWriteMask);
+#endif
+        LOG("[vk] driver %s %s; graphics pipeline library: %s; vertex input dynamic state: %s; extended dynamic state 3: %s\n",
+            drv.driverName, drv.driverInfo, gpl, vids_ext ? (have_vids.vertexInputDynamicState ? "yes" : "no") : "no extension",
+            eds3);
+    }
+    {   // dynamic vertex input (exec.c): fewer pipelines; LARECOMP_VK_DYN_VERTEX=0 keeps the layout in each pipeline
+        const char *e = getenv("LARECOMP_VK_DYN_VERTEX");
+        bool off = e && !atoi(e);
+        g_vk.vids = vids_ext && have_vids.vertexInputDynamicState && !off;
+        if (g_vk.vids) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+        else LOG("[vk] vertex input: in each pipeline (%s)\n", off ? "LARECOMP_VK_DYN_VERTEX=0" :
+                 !vids_ext ? "no VK_EXT_vertex_input_dynamic_state" : "vertexInputDynamicState not supported");
+    }
+#ifdef VK_EXT_graphics_pipeline_library
+    {   // LARECOMP_VK_GPL_PROBE=1: library builds timed after shader preparation (exec.c gpl_probe); nothing else uses it
+        const char *e = getenv("LARECOMP_VK_GPL_PROBE");
+        if (e && atoi(e)) {
+            g_vk.gpl_probe = gpl_ext && have_gpl.graphicsPipelineLibrary;
+            if (g_vk.gpl_probe) {
+                ext[n_ext++] = VK_KHR_PIPELINE_LIBRARY_EXTENSION_NAME;
+                ext[n_ext++] = VK_EXT_GRAPHICS_PIPELINE_LIBRARY_EXTENSION_NAME;
+            } else LOG("[gpl] probe: the driver has no graphics pipeline library; skipped\n");
+        }
+    }
+#else
+    if (getenv("LARECOMP_VK_GPL_PROBE") && atoi(getenv("LARECOMP_VK_GPL_PROBE"))) LOG("[gpl] probe: this build's Vulkan headers have no graphics pipeline library; skipped\n");
+#endif
 #if defined(__linux__) && defined(VK_EXT_map_memory_placed)
     have12.pNext = NULL;
     g_vk.map_placed = placed_ext && have_placed.memoryMapPlaced;
@@ -382,6 +463,14 @@ static void create_device(void) {
                                                          .pNext = f.pNext};
     if (g_vk.map_placed) f.pNext = &placed;
 #endif
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT en_vids = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT, .vertexInputDynamicState = VK_TRUE};
+    if (g_vk.vids) en_vids.pNext = f.pNext, f.pNext = &en_vids;
+#ifdef VK_EXT_graphics_pipeline_library
+    VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT en_gpl = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT, .graphicsPipelineLibrary = VK_TRUE};
+    if (g_vk.gpl_probe) en_gpl.pNext = f.pNext, f.pNext = &en_gpl;
+#endif
     VkPhysicalDeviceFeatures *b = &f.features, *h = &have.features;
     b->independentBlend = h->independentBlend;
     b->dualSrcBlend = h->dualSrcBlend;
@@ -408,6 +497,12 @@ static void create_device(void) {
                              .pQueueCreateInfos = &qi, .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext};
     VK_CHECK(vkCreateDevice(g_vk.phys, &di, NULL, &g_vk.dev));
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);
+    if (g_vk.vids) {
+        g_vk.set_vertex_input = (PFN_vkCmdSetVertexInputEXT)vkGetDeviceProcAddr(g_vk.dev, "vkCmdSetVertexInputEXT");
+        if (!g_vk.set_vertex_input) g_vk.vids = false;
+        LOG("[vk] vertex input: %s\n", g_vk.vids ? "dynamic (VK_EXT_vertex_input_dynamic_state)" :
+            "in each pipeline (vkCmdSetVertexInputEXT missing)");
+    }
 
     VmaAllocatorCreateInfo ai = {.physicalDevice = g_vk.phys, .device = g_vk.dev, .instance = g_vk.inst,
                                  .vulkanApiVersion = VK_API_VERSION_1_3,
@@ -585,6 +680,7 @@ static Frame cur_frame;
 // nothing to draw into (minimised window).
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
+    if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
     if (!w || !h) return false;  // minimised
@@ -829,7 +925,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         bool shot = win_shot && (long)frame + 1 == win_shot;
         vk_frame_end(shot ? "build/window.png" : NULL);
-        if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) { fflush(stderr); _exit(0); }
+        if (shot && getenv("LARECOMP_EXIT_AFTER_SHOT")) exit_after_shot();
     } else {
         renderer_submit();
     }
@@ -876,7 +972,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                  (unsigned long long)frame);
         renderer_save_texture_tex(b, path);
         // a series (SCREENSHOT_FROM) runs on until LARECOMP_WINDOW_SHOT exits
-        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) { fflush(stderr); _exit(0); }
+        if (getenv("LARECOMP_EXIT_AFTER_SHOT") && !shot_from) exit_after_shot();
     }
     double now = SDL_GetTicks() / 1000.0;
     static double fps_iv = -1, prev_present, max_gap;
@@ -908,8 +1004,8 @@ static void present_hooks(void) {
     pace_frame();  // (pace.c: the game's 30 fps mode when frames don't fit 60)
     extern void input_frame(uint64_t frame);
     input_frame(total_frames);
-    static long slow_ms = -1;
-    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SLOW_FRAME_MS")) : 0;
+    static long slow_ms = -1;  // LARECOMP_SIM_SLOW_FRAME_MS=<ms>: sleep per presented frame (simulate a slow machine)
+    if (slow_ms < 0) slow_ms = getenv("LARECOMP_SIM_SLOW_FRAME_MS") ? atol(getenv("LARECOMP_SIM_SLOW_FRAME_MS")) : 0;
     static long slow_until = -1;  // LARECOMP_SLOW_FRAME_UNTIL=<frame>: the stall ends there (frame pacing recovery tests)
     if (slow_until < 0) slow_until = getenv("LARECOMP_SLOW_FRAME_UNTIL") ? atol(getenv("LARECOMP_SLOW_FRAME_UNTIL")) : 0;
     if (slow_ms > 0 && total_frames > 2600 && (!slow_until || (long)total_frames < slow_until)) SDL_Delay((Uint32)slow_ms);
@@ -948,18 +1044,64 @@ void backend_present(NvnTexture *t) {
 void vk_exec_init(void);
 void vk_shaders_init(void);
 
-// exit() from any thread: let the GPU finish, keep the pipeline cache, then end the process without the DLL
-// teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
-static void quick_exit_handler(void) {
+// The end of a validation run (LARECOMP_VK_VALIDATION, after backend_quit: the GPU idle, the pipeline cache kept):
+// the debug messenger goes, then the process ends at once - no vkDestroyDevice / vkDestroyInstance, no atexit
+// handlers, no DLL teardown. _exit() alone isn't enough on Windows: it ends in ExitProcess, which runs the layer's
+// and the driver's DLL teardown after every other thread is gone, and with the Khronos layer on NVIDIA that left the
+// process hung there and unkillable (one thread waiting, gigabytes of the layer's state).
+static _Noreturn void validation_exit(void) {
+    if (messenger) {
+        PFN_vkDestroyDebugUtilsMessengerEXT f =
+            (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.inst, "vkDestroyDebugUtilsMessengerEXT");
+        VkDebugUtilsMessengerEXT m = messenger;
+        messenger = VK_NULL_HANDLE;
+        if (f) f(g_vk.inst, m, NULL);
+    }
+    LOG("[vk] validation run: ending without GPU teardown\n");
+    fflush(stdout);
+    fflush(stderr);
+#if defined(_WIN32) || defined(__linux__)
+    plat_terminate();
+#endif
+    _Exit(0);
+}
+
+// LARECOMP_EXIT_AFTER_SHOT: the test run ends with its shot. As it always did (_exit: no cache save), except under
+// validation: backend_quit, then validation_exit.
+static void exit_after_shot(void) {
+    fflush(stderr);
+    if (validating) {
+        backend_quit();
+        validation_exit();
+    }
+    _exit(0);
+}
+
+// Quitting, before exit() (the window closed; also from exit() itself, quick_exit_handler): the render thread stops
+// between items, so no image is acquired or presented any more; then the GPU finishes and the pipeline cache is
+// kept. All of it before exit() runs the atexit handlers and the libraries' destructors: a Vulkan layer loaded with
+// the instance (the Steam overlay on the Steam Deck, #40) tears its swapchain state down there, and a present from
+// the render thread after that crashed in vkQueuePresentKHR. The swapchain, surface and window are never destroyed
+// explicitly: the process ends with them.
+void backend_quit(void) {
+    static atomic_flag once = ATOMIC_FLAG_INIT;
+    if (atomic_flag_test_and_set(&once)) return;
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
-    if (trace) LOG("[vk] exit: waiting for the GPU\n");
-    if (g_vk.dev) {
-        vkDeviceWaitIdle(g_vk.dev);
-        if (trace) LOG("[vk] exit: saving the pipeline cache\n");
-        vk_pipeline_cache_save();
-    }
-    if (trace) LOG("[vk] exit: terminating\n");
+    if (trace) LOG("[vk] quit: stopping the render thread\n");
+    rq_stop();
+    if (!g_vk.dev) return;
+    if (trace) LOG("[vk] quit: waiting for the GPU\n");
+    vkDeviceWaitIdle(g_vk.dev);
+    if (trace) LOG("[vk] quit: saving the pipeline cache\n");
+    vk_pipeline_cache_save();
+}
+
+// exit() from any thread: backend_quit (when the window close didn't already), then end the process without the DLL
+// teardown (driver / validation-layer threads can stall it for minutes while the game's threads still run).
+static void quick_exit_handler(void) {
+    backend_quit();
+    if (validating) validation_exit();
     fflush(stdout);
     fflush(stderr);
 #if defined(_WIN32) || defined(__linux__)
@@ -1019,6 +1161,7 @@ void backend_reset(void) {
 }
 void backend_guest_memory_reset(void) {}  // (exec.c re-imports the heap on first use)
 void backend_clear_window(void) {
+    if (rq_stopping()) return;
     rq_drain();
     static const float black[4] = {0, 0, 0, 1};
     if (g_vk.dev && vk_frame_begin(black)) vk_frame_end(NULL);
@@ -1036,6 +1179,7 @@ int ui_run(void) {
                 input_rumble_stop();
                 input_led_stop();
                 LOG("window closed\n");
+                backend_quit();  // (before exit(): see there)
                 exit(0);
             }
             extern bool input_user_blocked(const SDL_Event *e);
