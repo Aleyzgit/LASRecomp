@@ -311,6 +311,31 @@ static pthread_mutex_t cb_lock = PTHREAD_MUTEX_INITIALIZER;
 #define CB_HIST 256
 static uint64_t submit_seq;
 static id<MTLCommandBuffer> cb_hist[CB_HIST];
+// CPU / GPU overlap. The game's frame loop submits a frame, presents it, and at once waits on that frame's fence
+// (measured: every SyncWait is on the newest submission, one call site, never already done) - so it builds frame
+// N+1 only once the GPU has finished frame N, and a frame costs CPU + GPU time in series (M3 Max 5120x1440 MetalFX:
+// ~5 ms of CPU + 13 ms of GPU missed 60 fps with the GPU under half busy). The Switch's own structure; there the two
+// fit. Here the wait is taken one fence late: SyncWait(fence N) waits for fence N-1's submission and returns, and
+// the next SyncWait waits for N. The CPU builds frame N+1 while the GPU draws N; at most two frames of GPU work
+// are queued; a fence that is already complete is never waited for. What the game may touch in that one frame
+// while the GPU still reads it: its per-frame vertex / index data in the guest heap (bound in place), which an
+// engine built to overlap double-buffers anyway; uniform data is snapshotted at translation (ring_alloc). GPU
+// results the CPU reads (texture-to-buffer and buffer-to-buffer copies) are flushed synchronously at translation,
+// so they don't depend on the fence. The frame timing counters would be read a frame before their GPU time is
+// known: in this mode an end counter reports the latest completed frame's GPU span (counters_resolve keeps it host
+// side and no longer writes the game's memory late - the game may have reused the slot). LARECOMP_GPU_OVERLAP=0:
+// off (the wait on the fence's own submission, as before).
+static uint64_t deferred_seq;  // (cb_lock) the fence the game was told is done but whose submission wasn't waited for
+static bool overlap_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_GPU_OVERLAP");
+        on = !e || atoi(e) != 0;
+        LOG("[metal] GPU overlap %s (the game's frame fence waited one frame late; LARECOMP_GPU_OVERLAP=0: off)\n", on ? "on" : "off");
+    }
+    return on;
+}
+static uint64_t g_last_gpu_frame_ticks;  // (overlap) the latest resolved counter pair's GPU span, in Switch GPU ticks
 
 // ---- the game's GPU timing counters (nvnCommandBufferReportCounter, two per frame)
 // The game times its GPU work with these and takes its 30 fps mode when frames look slow (pace.c). They used to get
@@ -347,7 +372,19 @@ static void counters_resolve(void) {
         if (a && a.GPUStartTime > t) t = a.GPUStartTime;
         if (t > 0) {
             uint64_t *out = ctr_pend[i].out;
-            out[1] = pace_end_counter(ctr_pend[i].start, out, ns_to_gpu_ticks((uint64_t)(t * 1e9)));  // (host time base)
+            uint64_t ticks = ns_to_gpu_ticks((uint64_t)(t * 1e9));  // (host time base)
+            if (overlap_on()) {
+                // kept host side: the pair's span becomes the next end counter's reading (the game has read this
+                // pair already, and may have reused the slot for the next frame's counters)
+                static const uint64_t *last_out;
+                static uint64_t last_ticks;
+                if (ctr_pend[i].start && ctr_pend[i].start == last_out && out - ctr_pend[i].start == 2 && ticks >= last_ticks &&
+                    ticks - last_ticks < 614400000ull)  // (an end counter 16 bytes after its start; under a second)
+                    g_last_gpu_frame_ticks = ticks - last_ticks;
+                last_out = out, last_ticks = ticks;
+            } else {
+                out[1] = pace_end_counter(ctr_pend[i].start, out, ticks);
+            }
             stat_counters_gpu++;
         }
     }
@@ -464,6 +501,9 @@ void renderer_flush(void) {
     g_wait_kind = 1;
     wait_cb(c);
     g_wait_kind = 0;
+    pthread_mutex_lock(&cb_lock);
+    deferred_seq = 0;  // (everything committed so far is done)
+    pthread_mutex_unlock(&cb_lock);
     ring_reset();
 }
 
@@ -476,6 +516,9 @@ void renderer_sync(void) {
     g_wait_kind = 2;
     wait_cb(c);
     g_wait_kind = 0;
+    pthread_mutex_lock(&cb_lock);
+    deferred_seq = 0;
+    pthread_mutex_unlock(&cb_lock);
 }
 
 // (the slow-frame log, slowframe.h; the game thread) running totals: no heap imports here (the heap is shared once)
@@ -524,6 +567,27 @@ void renderer_wait_seq(uint64_t seq) {
                 (unsigned long long)frames_seen, hist[0], hist[1], hist[2], hist[3], hist[4], hist[5], (unsigned long long)submit_seq);
             memset(hist, 0, sizeof hist);
             f0 = f;
+        }
+    }
+    if (overlap_on()) {  // (see deferred_seq) wait for the fence deferred last time, defer this one
+        pthread_mutex_lock(&cb_lock);
+        bool done = seq <= submit_seq && submit_seq - seq < CB_HIST && cb_hist[seq % CB_HIST] &&
+                    cb_hist[seq % CB_HIST].status >= MTLCommandBufferStatusCompleted;
+        uint64_t prev = deferred_seq;
+        if (done) {
+            if (seq >= prev) deferred_seq = 0;  // (in order: the older one is complete too)
+            pthread_mutex_unlock(&cb_lock);
+            counters_resolve();
+            return;
+        }
+        if (seq > prev) {  // a newer fence: the deferred one is waited for now, this one at the next call
+            deferred_seq = seq;
+            pthread_mutex_unlock(&cb_lock);
+            if (!prev) { counters_resolve(); return; }
+            seq = prev;
+        } else {  // the deferred fence again, or an older one: a real wait on it
+            if (seq == prev) deferred_seq = 0;
+            pthread_mutex_unlock(&cb_lock);
         }
     }
     pthread_mutex_lock(&cb_lock);
@@ -3567,7 +3631,11 @@ static void exec_list(uint64_t handle, int depth) {
             if (gpu < 0) gpu = !(getenv("LARECOMP_MTL_COUNTER") && !strcmp(getenv("LARECOMP_MTL_COUNTER"), "cpu"));
             static uint64_t *prev_out;  // (frame pacing: the pair's start)
             out[0] = 0;
-            out[1] = pace_end_counter(prev_out, out, ns_to_gpu_ticks(plat_now_ns()));
+            uint64_t now_ticks = ns_to_gpu_ticks(plat_now_ns());
+            // (overlap) the game reads this pair before its GPU work is done: the end counter reports the latest
+            // completed pair's GPU span after this pair's start (the frame before, as a frame-late measurement)
+            if (gpu && overlap_on() && prev_out && out - prev_out == 2) now_ticks = prev_out[1] + g_last_gpu_frame_ticks;
+            out[1] = pace_end_counter(prev_out, out, now_ticks);
             if (gpu && type == 0) {  // (type 0: timestamp) the GPU's time at this point, once it's done
                 renderer_submit();
                 pthread_mutex_lock(&ctr_lock);
