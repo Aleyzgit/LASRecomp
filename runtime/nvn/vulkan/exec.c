@@ -2918,12 +2918,16 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
         e->cs_bound = cs_slot;
         if (!cs_slot) { e->mode = RS_COPY; e->draw_bound = true; }  // a draw's storage read: copied for good (see above)
-        rs_log(e, cs_slot ? "new: probe" : "new: copy (a draw's storage read)", cs_slot, f);
         // the probe frame (or the first copy): every binder this frame takes this copy (frame == f below); a probe's
         // decision is at the next frame's use, when a CPU rewrite can have happened
         c = rs_copy_make(e, range_hash(addr, size));
-        if (!c) nrs--;                                 // (no copy possible now: not probed yet)
-        return c ? c : addr;
+        if (!c) {  // (no copy possible now: the entry is dropped - not probed yet - and the range is created again next time)
+            nrs--;
+            rs_log(e, "no copy now (the ring's other half is still in flight): in place this once", cs_slot, f);
+            return addr;
+        }
+        rs_log(e, cs_slot ? "new: probe" : "new: copy (a draw's storage read)", cs_slot, f);
+        return c;
     }
     if (cs_slot) e->cs_bound = true; else e->draw_bound = true;
     if (e->frame == f) {  // (bound again this frame)
