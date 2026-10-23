@@ -10,7 +10,11 @@
 #pragma once
 #include "vk.h"
 
-#define VK_SUBS 8  // submissions in flight (exec.c's ring of Sub slots; the recorder's descriptor pools follow them)
+// Submissions in flight (exec.c's ring of Sub slots; the recorder's descriptor pools follow them). A frame is ~10
+// submissions with the render thread (LARECOMP_CHUNK_PASSES) plus the window's; with the game's frame fence waited
+// one frame late (exec.c overlap_on) two frames are queued, so 8 slots would have had sub() wait for the GPU on
+// every slot reuse within the frame. 24: two frames and a margin.
+#define VK_SUBS 24
 
 // ---- start / mode (exec.c vk_exec_init, before any command)
 void rec_init(bool prof);

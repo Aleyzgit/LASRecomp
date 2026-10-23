@@ -285,6 +285,7 @@ void plat_thread_realtime(uint64_t period_ns) {
     (void)period_ns;
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
 }
+int plat_thread_realtime_check(uint64_t period_ns) { (void)period_ns; return -1; }
 
 // ---- process
 // GUI launches keep their own append-only log; lasrecomp.log names the latest run, with five recent backups.

@@ -1238,6 +1238,7 @@ void backend_represent(void) {
 
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
+static int g_presents_inflight;  // present command buffers committed and not yet completed (each holds a drawable)
 void backend_present_now(NvnTexture *t, uint64_t frame) {
     if (rq_stopping()) return;  // quitting: no drawable after the window closed (#40, as Vulkan)
     extern void renderer_submit(void);
@@ -1255,10 +1256,13 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern __thread uint64_t g_blocked_ns;  // (kernel.c: waiting, not work - for the frame pacer, as Vulkan's acquire)
         g_blocked_ns += nd;
         if (nd > 30000000) {
-            static int warned;
-            if (warned++ < 20) LOG("[metal] nextDrawable blocked %llums\n", (unsigned long long)(nd / 1000000));
+            static int warned, warned_long;  // (a block of half a second or more - the layer's timeout - has its own cap)
+            if (warned++ < 20 || (nd >= 500000000 && warned_long++ < 20)) LOG("[metal] nextDrawable blocked %llums%s (frame %llu, %d presents still on the GPU)\n",
+                                   (unsigned long long)(nd / 1000000), drawable ? "" : ", none (timed out)", (unsigned long long)frame,
+                                   __atomic_load_n(&g_presents_inflight, __ATOMIC_RELAXED));
         }
-        if (!drawable) return;
+        if (!drawable) return;  // (timed out: this frame isn't shown; the window keeps the last one)
+        __atomic_add_fetch(&g_presents_inflight, 1, __ATOMIC_RELAXED);
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = drawable.texture;
@@ -1378,6 +1382,64 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             deadline = !getenv("LARECOMP_PRESENT_DEADLINE") || atoi(getenv("LARECOMP_PRESENT_DEADLINE"));
             LOG("[metal] presents %s\n", deadline ? "carry a one-frame deadline (GPU clock)" : "without a deadline");
         }
+        // (debug) LARECOMP_ASYNC_SHOTS=<from>,<every>,<count>: the window image of those frames -> build/aframes/, copied
+        // on the GPU inside this command buffer and encoded to PNG on a background thread once it has completed: no CPU
+        // wait, so the frames show what overlapping CPU / GPU work really produced (a waited shot hides it)
+        {
+            static long af_from = -2, af_every, af_count;
+            if (af_from == -2) {
+                const char *e = getenv("LARECOMP_ASYNC_SHOTS");
+                af_from = -1;
+                if (e && sscanf(e, "%ld,%ld,%ld", &af_from, &af_every, &af_count) == 3) mkdir("build/aframes", 0755);
+                else af_from = -1;
+            }
+            if (af_from >= 0 && (long)frame >= af_from && af_every > 0 && ((long)frame - af_from) % af_every == 0 && ((long)frame - af_from) / af_every < af_count) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:drawable.texture.pixelFormat
+                                             width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
+                td.usage = MTLTextureUsageShaderRead;
+                td.storageMode = MTLStorageModeShared;
+                id<MTLTexture> at = [dev newTextureWithDescriptor:td];
+                id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
+                [bl copyFromTexture:drawable.texture toTexture:at];
+                [bl endEncoding];
+                uint64_t fno = frame;
+                static dispatch_queue_t bg;
+                if (!bg) bg = dispatch_queue_create("larecomp.aframes", DISPATCH_QUEUE_SERIAL);
+                [cb addCompletedHandler:^(id<MTLCommandBuffer> done) {
+                    (void)done;
+                    dispatch_async(bg, ^{
+                        NSUInteger w = at.width, h = at.height;
+                        uint8_t *px = malloc(w * h * 4);
+                        [at getBytes:px bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
+                        bool bgra = at.pixelFormat == MTLPixelFormatBGRA8Unorm || at.pixelFormat == MTLPixelFormatBGRA8Unorm_sRGB;
+                        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+                        CGContextRef ctx = CGBitmapContextCreate(px, w, h, 8, w * 4, cs,
+                            bgra ? (kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
+                        CGImageRef img = CGBitmapContextCreateImage(ctx);
+                        char path[256];
+                        static int raw = -1;  // LARECOMP_ASYNC_RAW=1: RGBA8 rows as they are (frame_N_WxH.raw), no encoding - keeps up at 60 fps
+                        if (raw < 0) raw = getenv("LARECOMP_ASYNC_RAW") != NULL;
+                        if (raw) {
+                            snprintf(path, sizeof path, "build/aframes/frame_%05llu_%lux%lu%s.raw", (unsigned long long)fno, (unsigned long)w, (unsigned long)h, bgra ? "_bgra" : "");
+                            FILE *rf = fopen(path, "wb"); if (rf) { fwrite(px, 1, w * h * 4, rf); fclose(rf); }
+                            CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); free(px);
+                            return;
+                        }
+                        snprintf(path, sizeof path, "build/aframes/frame_%05llu.png", (unsigned long long)fno);
+                        CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
+                        CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
+                        if (dest) { CGImageDestinationAddImage(dest, img, NULL); CGImageDestinationFinalize(dest); CFRelease(dest); }
+                        CFRelease(url); CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs);
+                        free(px);
+                    });
+                }];
+            }
+        }
+        if (!(b && b->tex)) {  // (nothing drawn into the cleared drawable: a black frame would show)
+            static int n;
+            if (n++ < 20) LOG("[metal] present of frame %llu without an image (texture %p backend %p)\n", (unsigned long long)frame, t, b);
+        }
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) { (void)done; __atomic_sub_fetch(&g_presents_inflight, 1, __ATOMIC_RELAXED); }];
         if (deadline) [cb presentDrawable:drawable atTime:CACurrentMediaTime() + 1.0 / 60.0];
         else [cb presentDrawable:drawable];
         [cb commit];
@@ -1526,6 +1588,7 @@ void ui_window_init(void) {
 }
 
 SDL_Window *ui_window(void) { return window; }
+bool ui_window_focused(void) { return window && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS); }  // (any thread, for a log)
 void *ui_metal_layer(void) { return (__bridge void *)layer; }
 void *ui_metal_device(void) { return (__bridge void *)dev; }
 

@@ -143,9 +143,23 @@ static Watch *watch_self(void) {
     return w;
 }
 
+static _Atomic(const char *) r_longest_what;  // the render thread's longest watched wait since the last ask (slowframe.c)
+static _Atomic uint64_t r_longest_ns;
+uint64_t rq_render_longest(const char **what) {
+    *what = atomic_exchange(&r_longest_what, NULL);
+    return atomic_exchange(&r_longest_ns, 0);
+}
 void rq_watch(const char *what, uint64_t arg) {
     Watch *w = watch_self();
     if (!w) return;
+    if (!what && is_render) {  // (a section ends: the longest one is what a slow frame reports)
+        const char *was = atomic_load_explicit(&w->what, memory_order_relaxed);
+        uint64_t dur = plat_now_ns() - atomic_load_explicit(&w->since, memory_order_relaxed);
+        if (was && dur > atomic_load_explicit(&r_longest_ns, memory_order_relaxed)) {
+            atomic_store_explicit(&r_longest_ns, dur, memory_order_relaxed);
+            atomic_store_explicit(&r_longest_what, was, memory_order_relaxed);
+        }
+    }
     if (what) {
         atomic_store_explicit(&w->arg, arg, memory_order_relaxed);
         atomic_store_explicit(&w->since, plat_now_ns(), memory_order_relaxed);

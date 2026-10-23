@@ -87,6 +87,55 @@ static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 static int passes_in_sub;  // render passes in the submission being recorded (LARECOMP_CHUNK_PASSES, begin_pass)
 
+// CPU / GPU overlap (as renderer.m: the Metal backend, metal-overlap). The game's frame loop submits a frame, presents
+// it, and at once waits on that frame's fence (every SyncWait is on the newest submission), so it builds frame N+1
+// only once the GPU has finished frame N: a frame costs CPU + GPU time in series. Here the wait is taken one fence
+// late: SyncWait(fence N) waits for fence N-1's submission and returns, and the next SyncWait waits for N. The CPU
+// builds frame N+1 while the GPU draws N; at most two frames of GPU work are queued; a fence already complete is never
+// waited for. Everything this backend recycles is keyed on the timeline (sub(), vk_transient, the set pools after the
+// slot's wait, readbacks and screenshots wait on their own submission), not on the game's fence, so only the game
+// thread's wait changes. What the game may touch in that frame while the GPU still reads it: its per-frame vertex /
+// index data in the guest heap (bound in place; an engine built to overlap double-buffers it anyway), uniform data is
+// copied at translation (guest_copy), GPU results the CPU reads (texture / buffer copies) are flushed synchronously,
+// and the storage buffers it rewrites one frame ahead get copies (snap_storage). The timing counters are read a frame
+// before their GPU time is known: in this mode an end counter reports the latest completed frame's GPU span
+// (cq_resolve keeps it host side and no longer writes the game's memory late - the game may have reused the slot).
+// LARECOMP_GPU_OVERLAP=0: off (the wait on the fence's own submission, as before); =1: on.
+#define VK_OVERLAP_DEFAULT 1  // on where the write watch can run (overlap_on: off by itself without page write tracking)
+static uint64_t deferred_seq;   // (seq_lock) the fence the game was told is done but whose submission wasn't waited for
+static uint64_t stat_deferred;  // SyncWaits returned without waiting (stats)
+static uint64_t stat_snap_bytes, stat_snap_copies;  // storage copies made (snap_storage; stats, per period)
+// The overlap needs the storage write watch (snap_storage: the OS's page write tracking), the only thing that catches
+// the game rewriting its light lists with the same bytes while the GPU reads them. Where the OS gives no tracking
+// (Linux over a userptr or dma-buf heap - AMD, the Steam Deck -, a kernel before 6.7 without PAGEMAP_SCAN, a
+// container without userfaultfd, a Windows window reserved without write watch) the overlap turns itself off: the
+// full fence wait as before. LARECOMP_GPU_OVERLAP=1 forces it on anyway (tests; the hash probe stands in for the
+// watch then), =0 turns it off.
+static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);  // (the page tables below)
+static const char *heap_tracking_reason(void);  // (why the heap has no page write tracking, for the log)
+static bool overlap_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_GPU_OVERLAP"), *w = getenv("LARECOMP_OVERLAP_WATCH");
+        uint32_t g;
+        bool tracked = (!w || atoi(w) != 0) && pages_cpu_written(HEAP_BASE, 4096, 0, &g) >= 0;
+        if (e) on = atoi(e) != 0;
+        else if (VK_OVERLAP_DEFAULT && !tracked) {
+            on = 0;
+            LOG("[vk] GPU overlap off: no page write tracking on this system (%s); LARECOMP_GPU_OVERLAP=1 forces it on\n",
+                w && atoi(w) == 0 ? "LARECOMP_OVERLAP_WATCH=0" : heap_tracking_reason());
+            return on;
+        } else on = VK_OVERLAP_DEFAULT;
+        LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; LARECOMP_GPU_OVERLAP=%d: %s%s)\n", on ? "on" : "off",
+            !on, on ? "off" : "on", on && !tracked ? "; forced without page write tracking: the hash probe instead of the write watch" : "");
+    }
+    return on;
+}
+static _Atomic uint64_t g_last_gpu_frame_ticks;  // (overlap) the latest resolved counter pair's GPU span, in Switch GPU ticks
+static const uint64_t *cq_last_out;              // (cq_lock) the counter resolved last and its GPU ticks: a pair may straddle
+static uint64_t cq_last_ticks;                   // two submissions
+static uint64_t snap_ring_end(void);             // (snap_storage: the copies' ring after the game's heap, for gmem_heap_size)
+
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
     VK_CHECK(vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v));
@@ -192,16 +241,30 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
             uint64_t gpu = ns_to_gpu_ticks((uint64_t)((int64_t)((double)t[k] * per) + cq_offset));
             if (log) LOG("[counter] seq %llu #%u at %llx host %.3f gpu %.3f ms\n", (unsigned long long)q->seq, k,
                          (unsigned long long)(uintptr_t)q->out[k], q->out[k][1] * 625.0 / 384 / 1e6, gpu * 625.0 / 384 / 1e6);
-            q->out[k][1] = pace_end_counter(k ? q->out[k - 1] : NULL, q->out[k], gpu);
+            if (overlap_on()) {
+                // kept host side: the pair's span becomes the next end counter's reading (the game has read this pair
+                // already - its fence wait returned a frame early - and may have reused the slot for the next frame)
+                if (cq_last_out && q->out[k] - cq_last_out == 2 && gpu >= cq_last_ticks && gpu - cq_last_ticks < 614400000ull)
+                    atomic_store(&g_last_gpu_frame_ticks, gpu - cq_last_ticks);  // (an end counter 16 bytes after its start; under a second)
+                cq_last_out = q->out[k], cq_last_ticks = gpu;
+            } else {
+                q->out[k][1] = pace_end_counter(k ? q->out[k - 1] : NULL, q->out[k], gpu);
+            }
         }
         stat_counters_gpu += q->n;
     }
     q->n = 0;
 }
 
-static void cq_resolve_done(uint64_t done) {  // every slot whose submission is done
+static void cq_resolve_done(uint64_t done) {  // every slot whose submission is done, in submission order
     pthread_mutex_lock(&cq_lock);
-    for (int i = 0; i < SUBS; i++) if (cq[i].n && cq[i].seq <= done) cq_resolve(i);
+    for (;;) {
+        int best = -1;
+        for (int i = 0; i < SUBS; i++)
+            if (cq[i].n && cq[i].seq <= done && (best < 0 || cq[i].seq < cq[best].seq)) best = i;
+        if (best < 0) break;
+        cq_resolve(best);
+    }
     pthread_mutex_unlock(&cq_lock);
 }
 
@@ -469,10 +532,17 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
 
+static void overlap_clear(void) {  // (a full wait was made: everything queued so far is done)
+    pthread_mutex_lock(&seq_lock);
+    deferred_seq = 0;
+    pthread_mutex_unlock(&seq_lock);
+}
+
 void renderer_flush(void) {
     renderer_submit();
     if (!wait_why) wait_why = "flush";
     vk_wait_seq(submit_seq);
+    overlap_clear();
 }
 
 // The latest submission the driver has (rqueue.h): with the recorder, behind renderer_issued_seq until it catches up.
@@ -493,6 +563,25 @@ void renderer_sync(void) {
     pthread_mutex_unlock(&seq_lock);
     wait_why = "QueueFinish / sync all";
     vk_wait_seq(s);
+    overlap_clear();
+}
+
+// (overlap) The game's SyncWait on submission seq: done is the latest complete submission, *deferred the one a previous
+// call returned early for (0: none). Returns the submission to wait for now (0: none); updates *deferred. A fence
+// that is complete is never waited for; a newer fence than the deferred one waits for the deferred one and takes its
+// place; the deferred fence itself, or an older one, is waited for. (tools/test_vulkan_overlap.py)
+static uint64_t overlap_defer(uint64_t seq, uint64_t done, uint64_t *deferred) {
+    uint64_t prev = *deferred;
+    if (seq <= done) {  // complete (in order: a deferred one no newer than it is complete too)
+        if (seq >= prev) *deferred = 0;
+        return 0;
+    }
+    if (seq > prev) {  // a newer fence: the deferred one is waited for now, this one at the next call
+        *deferred = seq;
+        return prev > done ? prev : 0;
+    }
+    if (seq == prev) *deferred = 0;  // the deferred fence again, or an older one: a real wait on it
+    return seq;
 }
 
 uint64_t renderer_fence_seq(void) {
@@ -512,7 +601,21 @@ void renderer_wait_seq(uint64_t seq) {
     uint64_t s = submit_seq;
     pthread_mutex_unlock(&seq_lock);
     wait_why = seq > s ? "SyncWait (fence not submitted yet)" : "SyncWait";
-    vk_wait_seq(seq > s ? s : seq);  // not queued yet (other thread): everything queued so far (vk_wait_seq: the recorder, then the GPU)
+    if (seq > s) seq = s;  // not queued yet (other thread): everything queued so far (vk_wait_seq: the recorder, then the GPU)
+    if (overlap_on()) {  // (see deferred_seq) wait for the fence deferred last time, defer this one
+        uint64_t done = vk_completed_seq();  // (the timeline's value: a submission the recorder hasn't made yet isn't done)
+        pthread_mutex_lock(&seq_lock);
+        uint64_t w = overlap_defer(seq, done, &deferred_seq);
+        pthread_mutex_unlock(&seq_lock);
+        if (!w) {
+            __atomic_fetch_add(&stat_deferred, 1, __ATOMIC_RELAXED);  // (the game thread; stats read on the render thread)
+            wait_why = NULL;
+            cq_resolve_done(done);  // (the game reads its timing counters now: what is complete so far)
+            return;
+        }
+        seq = w;
+    }
+    vk_wait_seq(seq);
 }
 
 // A descriptor set for the pending submission (record.c: the slot's pools, allocated in batches per layout). With
@@ -964,11 +1067,14 @@ const char *renderer_stats(void) {
         LOG("\n");
     }
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB",
+             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, "
+             "deferred %llu, snap %lluKB/%llu",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
-             atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
-    stat_feedback_copies = stat_upload_bytes = 0;
+             atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
+             (unsigned long long)__atomic_exchange_n(&stat_deferred, 0, __ATOMIC_RELAXED), (unsigned long long)(stat_snap_bytes >> 10),
+             (unsigned long long)stat_snap_copies);  // (overlap: SyncWaits returned early; storage copies made)
+    stat_feedback_copies = stat_upload_bytes = stat_snap_bytes = stat_snap_copies = 0;
     {
         extern void vk_alias_stats(void);
         vk_alias_stats();
@@ -2678,6 +2784,450 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
     prof_cb_copied++;
     return s;
 }
+// ---- storage buffers the game rewrites one frame ahead (overlap; renderer.m snap_storage)
+// The game's tiled light / exposure lists: each frame its CPU memcpys the list for the frame after this one into the
+// buffer the frame being drawn reads (7281e33500+32640 and 7281e3bd00+2040, alternating by frame), which the Switch's
+// fence made safe. With the fence deferred that copy lands while the GPU still reads the list: screen-aligned tiles
+// without shadow, a dark saturated picture when the exposure program (72a8da6000) reads it - worse the slower the GPU.
+// Other storage data (the skinning program 72a8da0000's outputs, read in place by the exposure program and by draws
+// binding them as vertex data from an offset into the pool: BowWow's body) is only ever written by the GPU and must
+// stay where the game put it.
+// Which is which is decided per memory range, with no wait and no probe of the programs (renderer.m 660bead). A range
+// a draw reads as storage is shader-consumed game data (the lists): COPY for good - every binder of it, the compute
+// dispatches that read or modify it too, works on a copy taken at translation, refreshed whenever its data changes
+// (hash) and otherwise kept, so the GPU's own modifications stay. The CPU's rewrite can't be told from the data:
+// standing still it rewrites the same bytes, and the boxes come from the GPU reading the list while it is rewritten
+// (an M6 at 4x in the woods), so no hash decides this case - and on the title screen a probe would have settled the
+// lists in place for good. A range only compute slots bind gets a one-frame PROBE on its first use in a level (all
+// binders on the copy, the GPU can't touch the original) and its next use looks at the original: changed, the CPU
+// rewrites it - COPY; unchanged, a GPU output or static (the skinning outputs, which draws then bind as vertex data
+// from an offset into the pool) - IN PLACE for good, probed again when the level changes or after 10 s unused. With
+// the write watch below (the default where the heap import allows it) a compute-only range starts in place and is
+// copied from the first CPU store into it instead - the probe is the fallback; a copied range is never demoted. Each
+// range's decision is logged once ("[snap] ...", the small per-object ranges capped). ~100 KB copied and hashed per
+// frame in the field.
+// Where the copies live: shaders address storage by guest address through the heap import (one buffer, lazy chunks,
+// gfast's copy of the bound ranges), which covers only the heap the game set up (gmem_heap_size; Metal has the whole
+// range in one buffer and uses its top). So the ring sits right after the game's heap and gmem_heap_size includes it:
+// the one-buffer import takes it in, lazy mode imports its chunk when a copy is first bound (gmem_chunk_bind touches
+// the effective addresses), gfast copies from it. Windows commits it (a userptr import needs committed pages).
+// The ring is two halves: copies fill one; when it is full the submission pending then is noted for it and the other
+// half is taken, after waiting for the submission noted when that half was left - so its freed slots are idle. Live
+// copies stay where they are across switches (the allocator walks past them; rs_copy_make), so the GPU's own writes
+// into a copy survive; a copy unused for 10 s is released. At ~100 KB a frame that wait is long satisfied; a half
+// filling within one submission (not a real case) binds the original for that draw.
+// LARECOMP_OVERLAP_SNAP=0: off (everything in place, as before: shows the race).
+#define SNAP_HALF (8ull << 20)
+#define SNAP_RING (2 * SNAP_HALF)
+enum { RS_PROBE, RS_COPY, RS_PLACE };
+typedef struct { uint64_t addr, size, copy, pristine, hash, frame; uint32_t gen, level, wgen; uint8_t mode; bool cs_bound, draw_bound; } RangeState;  // (wgen: watch_check; pristine: rs_copy_make)
+static RangeState rs_tab[512];
+static uint64_t rs_store_frame[512];  // (watch: the frame of the previous CPU write seen on a range's own pages)
+static int nrs;
+static int snap_state = -1;        // -1 not decided (the heap not set up yet), 0 off, 1 on
+static uint64_t snap_base;         // heap offset of the ring (on)
+static uint64_t snap_off;          // used bytes of the current half
+static int snap_half;              // the half being filled
+static uint64_t snap_half_seq[2];  // the submission pending when each half was last left (its copies may be in use until then)
+static uint32_t snap_gen = 1;      // (bumped at a half switch: older copies are never bound again)
+static uint32_t rs_level_gen = 1;
+static Range sb_eff[6][16];        // the current draw's / dispatch's storage table with the copies' addresses (snap_apply)
+static bool sb_eff_on;
+static inline const Range *sbufs(int stage) { return sb_eff_on ? sb_eff[stage] : st.sbuf[stage]; }
+
+static uint64_t range_hash(uint64_t addr, uint64_t size) {
+    const uint64_t *w = (const uint64_t *)(uintptr_t)addr;
+    uint64_t h = 1469598103934665603ull, n = size / 8;
+    for (uint64_t i = 0; i < n; i++) h = (h ^ w[i]) * 1099511628211ull;
+    return h;
+}
+static void snap_ring_import_tail(void);  // (with the lazy chunks below)
+// Decided once the game's heap is set up (SetHeapSize), which is before anything is drawn: the ring follows the heap.
+static bool snap_on(void) {
+    if (snap_state >= 0) return snap_state;
+    uint64_t heap = kernel_heap_size();
+    if (!heap) return false;  // (not decided yet)
+    const char *e = getenv("LARECOMP_OVERLAP_SNAP");
+    snap_state = (!e || atoi(e) != 0) && overlap_on();
+    if (snap_state) {
+        snap_base = (heap + 0xFFFF) & ~0xFFFFull;  // (minImportedHostPointerAlignment: 64 KB at most)
+        if (snap_base + SNAP_RING > HEAP_MAX) {
+            snap_state = 0;
+            LOG("[vk] storage snapshots off: the game's heap fills the range\n");
+        } else {
+            plat_commit(HEAP_BASE + snap_base, SNAP_RING);  // (Windows: backed before the import pins it)
+            LOG("[vk] storage buffers the CPU rewrites: copies at %llx (%llu MB ring after the game's heap)\n",
+                (unsigned long long)(HEAP_BASE + snap_base), (unsigned long long)(SNAP_RING >> 20));
+            snap_ring_import_tail();  // (lazy chunks: one imported short of the ring already is imported again over it)
+        }
+    }
+    return snap_state;
+}
+static uint64_t snap_ring_end(void) { return snap_on() ? snap_base + SNAP_RING : 0; }  // (heap offset; 0: no ring)
+static void snap_reset(void) {  // (vk_exec_reset: a reboot - the heap is set up again, its pages replaced)
+    snap_state = -1;
+    snap_base = snap_off = 0;
+    snap_half = 0;
+    snap_half_seq[0] = snap_half_seq[1] = 0;
+    snap_gen++;
+    nrs = 0;
+    sb_eff_on = false;
+}
+static void rs_level_tick(void) {  // (a new level: every range is probed again on its next use)
+    extern const char *game_level_name(void);
+    static char last[64];
+    const char *lv = game_level_name();
+    if (lv && strncmp(lv, last, sizeof last - 1)) { snprintf(last, sizeof last, "%s", lv); rs_level_gen++; }
+}
+static void rs_log(RangeState *e, const char *what, bool cs_slot, uint64_t f) {  // (rare: a new range, a decision)
+    static int n;
+    if (e->size >= 2040 ? n < 100000 : n++ < 200)  // (the small per-object ranges are many: capped)
+        LOG("[snap] %llx+%llu %s (%s bind, frame %llu)\n", (unsigned long long)e->addr, (unsigned long long)e->size, what, cs_slot ? "compute" : "draw", (unsigned long long)f);
+}
+// A copy lives until its entry remakes it (the original changed) or releases it (unused for 10 s): a half switch no
+// longer remakes every copy from its original, which lost the GPU's own writes into a copy - the exposure program's
+// into the lists - for a frame (renderer.m 1ea4b16). The allocator moves forward through the current half and walks
+// past live copies; a slot freed by a remake (the GPU may still read it) is reused only after the half is left and
+// taken again, which waits for the submission pending when it was left - the same guarantee as before.
+// The offset in the current half where `need` bytes fit from `at` on, skipping live copies (with their pristine
+// images); ~0 when none
+static uint64_t rs_ring_fit(uint64_t at, uint64_t need) {
+    uint64_t half_lo = HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF;
+    for (bool moved = true; moved && at + need <= SNAP_HALF;) {
+        moved = false;
+        for (int i = 0; i < nrs; i++) {
+            const RangeState *o = &rs_tab[i];
+            if (!o->copy || o->copy < half_lo || o->copy >= half_lo + SNAP_HALF) continue;
+            uint64_t olo = o->copy - half_lo, ohi = (olo + o->size * (o->pristine ? 2 : 1) + 255) & ~255ull;
+            if (at < ohi && at + need > olo) { at = ohi; moved = true; }
+        }
+    }
+    return at + need <= SNAP_HALF ? at : ~0ull;
+}
+// `need` bytes (256-aligned) of the ring past the live copies: their guest address, or 0 when none can be taken now
+// (see the half switch above). A copy being remade is skipped too: the merge in rs_copy_make reads it.
+static uint64_t ring_take(uint64_t need) {
+    uint64_t at = rs_ring_fit((snap_off + 255) & ~255ull, need);
+    if (at == ~0ull) {  // this half is full: the other one, once the GPU is done with what it held
+        int other = snap_half ^ 1;
+        uint64_t seq = snap_half_seq[other], done = vk_completed_seq();
+        if (seq > done) {
+            if (seq > renderer_issued_seq()) return 0;  // (still being recorded: can't be waited for - in place this once)
+            wait_why = "storage snapshot ring";
+            vk_wait_seq(seq);
+        }
+        snap_half_seq[snap_half] = vk_pending_seq();
+        snap_half = other;
+        snap_off = 0;
+        at = rs_ring_fit(0, need);
+        if (at == ~0ull) {  // (the half is all live copies: not in practice - 512 entries, most far smaller)
+            static int warned;
+            if (warned++ < 3) LOG("[snap] copy ring full: %llu bytes in place\n", (unsigned long long)need);
+            return 0;
+        }
+    }
+    snap_off = at + need;
+    return HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF + at;
+}
+// A copy a compute dispatch binds carries the GPU's own writes into it (the exposure program 72a8da6000 keeps its
+// adaptation state in the 2040-byte exposure list it reads and writes; the lists' tile data beside it is the CPU's).
+// When the CPU changes the original the copy is remade from it - and the GPU's state went back to whatever the
+// original held when the copy was first taken: the screen at half brightness for one frame (the path by the Face
+// Shrine; two frames three apart, one per list buffer; renderer.m 69a3524). So such a copy keeps a pristine image of
+// what it was copied from right behind it, and a remake merges: a byte the GPU changed (copy != pristine) that the
+// CPU didn't (original == pristine) keeps the GPU's value; everything else is the original's, the CPU's write winning
+// where both changed (its write is the later one, as in place). Draw-only copies have no GPU state and no image.
+// A copy of e's range in the ring: its guest address, or 0 when none can be made now
+static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
+    bool keep = e->cs_bound;
+    uint64_t old = e->copy, old_p = e->pristine;
+    uint64_t at = ring_take((e->size * (keep ? 2 : 1) + 255) & ~255ull);
+    if (!at) return 0;
+    uint8_t *dst = (uint8_t *)(uintptr_t)at;
+    const uint8_t *src = (const uint8_t *)(uintptr_t)e->addr;
+    memcpy(dst, src, e->size);
+    if (keep && old && old_p) {
+        const uint8_t *oc = (const uint8_t *)(uintptr_t)old, *op = (const uint8_t *)(uintptr_t)old_p;
+        uint64_t kept = 0;
+        for (uint64_t i = 0; i < e->size; i++) if (oc[i] != op[i] && src[i] == op[i]) { dst[i] = oc[i]; kept++; }
+        if (kept) {
+            static int n;
+            extern uint64_t renderer_exec_frame(void);
+            if (n++ < 20 || getenv("LARECOMP_LOG_BINDS"))
+                LOG("[snap] %llx+%llu remade: %llu bytes of the GPU's kept (frame %llu)\n", (unsigned long long)e->addr,
+                    (unsigned long long)e->size, (unsigned long long)kept, (unsigned long long)renderer_exec_frame());
+        }
+    }
+    e->copy = at;
+    if (keep) { e->pristine = at + e->size; memcpy((void *)(uintptr_t)e->pristine, src, e->size); }
+    else e->pristine = 0;
+    e->hash = h, e->gen = snap_gen;
+    stat_snap_bytes += e->size;
+    stat_snap_copies++;
+    return e->copy;
+}
+static void rs_release_unused(uint64_t f) {  // (every 600 frames) copies of entries unbound for 10 s go back to the ring
+    static uint64_t last;
+    if (f - last < 600) return;
+    last = f;
+    for (int i = 0; i < nrs; i++) if (rs_tab[i].copy && f - rs_tab[i].frame > 600) rs_tab[i].copy = rs_tab[i].pristine = 0;
+}
+// Write watch (compute-only ranges; renderer.m cf98fff / c3580a8). The CPU's rewrite of a range can't be seen in its
+// bytes (the light lists are rewritten with the same bytes while the view stands still, and the race is the GPU reading
+// them mid-rewrite), so a range bound only by compute slots starts in place and the OS's page write tracking tells,
+// at its first bind of each frame, whether the CPU wrote any of its pages since the last look: then it is copied from
+// then on. The tracking is the vertex cache's and the texture upload checks' (plat_written_pages, the shared page
+// generations vc_page_gen): Windows GetWriteWatch over the guest window reserved with MEM_WRITE_WATCH, Linux the
+// userfaultfd asynchronous write-protect bits read with PAGEMAP_SCAN. Neither changes a page's protection, and
+// neither sees the GPU's own writes (DMA sets no dirty bit): a GPU output stays in place. The Metal backend
+// write-protects the pages and catches the store in the fault handler instead; on Windows that (VirtualProtect on
+// pages imported with VK_EXT_external_memory_host, NVIDIA) left the GPU reading wrong data - the picture at half
+// brightness, grass and HUD digits missing - so the Vulkan backend never changes the protection of imported memory.
+// Where the OS gives no tracking (Linux over a userptr or dma-buf heap: the tracking is off there, a kernel without
+// PAGEMAP_SCAN, a Windows window reserved without write watch) the one-frame hash probe is the fallback, logged.
+// Page granularity (4 KB; 16 KB and 64 KB kernels on arm64 Linux as the kernel reports): a store into a neighbour on
+// the same page marks the range too (the lists share a page) - copied, the safe side - except a page shared with a
+// small parameter block (watch_check), and a single write (an initialisation) doesn't copy (snap_storage).
+// LARECOMP_OVERLAP_WATCH=0: off (compute-only ranges get the one-frame hash probe, as before).
+static bool heap_is_userptr(void);  // (with the heap import below)
+static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);  // (the page tables below)
+#define WATCH_PAGE 4096ull  // (the page tables' page, VC_PAGE below)
+static bool watch_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_OVERLAP_WATCH");
+        uint32_t g;
+        on = !e || atoi(e) != 0;
+        if (on && pages_cpu_written(HEAP_BASE, 4096, 0, &g) < 0) {
+            on = 0;
+            LOG("[vk] storage write watch off: no page write tracking%s (the hash probe instead)\n", heap_is_userptr() ? " over a userptr heap import" : "");
+        } else LOG("[vk] storage write watch %s (compute-bound ranges copied once the OS's page write tracking sees a CPU write; no page protection)\n",
+                   on ? "on" : "off (LARECOMP_OVERLAP_WATCH=0)");
+    }
+    return on;
+}
+// Did the CPU write any page of the range since the range last looked (e->wgen)? The look stamps the pages (every
+// look resets the OS bits, so the generation table carries what other lookers saw). 1 written, 0 not, -1 no tracking.
+// A page dirty bit can't tell which range on the page was stored to. A store into a small parameter block (the
+// skinning dispatch's 12-byte slot 5, rewritten every frame) says nothing about the buffers beside it: counted as
+// theirs, it copied BowWow's skinning output - a GPU output the CPU reads back every frame (his chain) - so the
+// dispatch wrote the copy, the CPU read the frozen original, and his body came apart as a companion indoors (Metal
+// 1ea4b16). So a range of 256 bytes or more counts only its dirty pages that no watched range under 256 bytes shares;
+// the light / exposure lists (32640 / 2040 bytes, one allocation the CPU memcpys) share pages only with each other
+// and keep their coverage. A small range counts every dirty page of its own.
+static int watch_check(RangeState *e) {
+    uint32_t since = e->wgen, now = e->wgen;
+    int w = pages_cpu_written(e->addr, e->size, since, &now);
+    e->wgen = now;
+    if (w != 1 || e->size < 256) return w;
+    for (uint64_t plo = e->addr & ~(WATCH_PAGE - 1); plo < e->addr + e->size; plo += WATCH_PAGE) {
+        bool small_mate = false;
+        for (int k = 0; k < nrs && !small_mate; k++) {
+            const RangeState *o = &rs_tab[k];
+            if (o != e && o->size < 256 && o->cs_bound && o->addr < plo + WATCH_PAGE && plo < o->addr + o->size) small_mate = true;
+        }
+        if (small_mate) continue;
+        uint32_t pg_now;  // (this page written since the range's last look? The look above stamped it: no OS bits left)
+        if (pages_cpu_written(plo, WATCH_PAGE, since, &pg_now) == 1) return 1;  // (a dirty page of its own)
+    }
+    return 0;  // (only pages shared with small parameter blocks were written: theirs)
+}
+
+// The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
+static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
+    if (!snap_on() || !addr || !size || addr < HEAP_BASE || addr - HEAP_BASE + size > snap_base) return addr;
+    if (size > SNAP_HALF / 2) {  // (the tile lists grow with the render resolution: ~1.2 MB at 7680x4320; a half holds two of these)
+        static int logged;
+        if (logged++ < 4) LOG("[vk] storage range %llx+%llu too large for a snapshot: read in place\n", (unsigned long long)addr, (unsigned long long)size);
+        return addr;
+    }
+    if (kernel_heap_size() > snap_base) {  // (the game grew its heap into the ring: off from now on)
+        static bool logged;
+        if (!logged) { logged = true; LOG("[vk] storage snapshots off: the game's heap grew into the ring\n"); }
+        snap_state = 0;
+        return addr;
+    }
+    extern int nvn_pool_flags_at(uint64_t addr);
+    int pf = nvn_pool_flags_at(addr);
+    if (pf < 0 || (pf & 1)) return addr;  // (CPU_NO_ACCESS: static data, nothing to race with)
+    rs_level_tick();
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    rs_release_unused(f);
+    // A draw's storage read from the game's per-frame pools (CPU_UNCACHED | GPU_UNCACHED, 0x12: the 64-byte per-object
+    // blocks at changing addresses, hundreds a frame) is copied without an entry: a fresh range every frame filled the
+    // table in a few minutes, and the table starting over remade every copy from its original - the exposure list's
+    // GPU state with it (one dark frame per list buffer, see rs_copy_make). Its slot is free again at once: reused only
+    // after the half is left and taken again (the wait in ring_take), as a remade copy's old slot.
+    if (!cs_slot && (pf & 0x13) == 0x12 && size <= 65536) {
+        uint64_t at = ring_take((size + 255) & ~255ull);
+        if (!at) return addr;
+        memcpy((void *)(uintptr_t)at, (const void *)(uintptr_t)addr, size);
+        stat_snap_bytes += size;
+        stat_snap_copies++;
+        return at;
+    }
+    RangeState *e = NULL;
+    for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == addr && rs_tab[i].size == size) { e = &rs_tab[i]; break; }
+    uint64_t c;
+    if (!e) {
+        int k = nrs;
+        if (nrs == 512) {  // table full: the entry bound longest ago makes room (never the whole table at once)
+            k = 0;
+            for (int i = 1; i < nrs; i++) if (rs_tab[i].frame < rs_tab[k].frame) k = i;
+            rs_log(&rs_tab[k], "evicted (table full, bound longest ago)", cs_slot, f);
+        } else nrs++;
+        e = &rs_tab[k];
+        memset(e, 0, sizeof *e);
+        rs_store_frame[e - rs_tab] = 0;
+        e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
+        e->cs_bound = cs_slot;
+        if (!cs_slot) e->mode = RS_COPY, e->draw_bound = true;  // a draw's storage read: copied for good (see above)
+        else if (watch_on()) {  // a compute-only range: in place; the first CPU write its pages' tracking shows makes it a copy
+            e->mode = RS_PLACE;
+            watch_check(e);  // (from now: the look stamps its pages)
+            rs_log(e, "new: in place, CPU writes tracked", cs_slot, f);
+            return addr;
+        }
+        // the probe frame (or the first copy): every binder this frame takes this copy (frame == f below); a probe's
+        // decision is at the next frame's use, when a CPU rewrite can have happened
+        c = rs_copy_make(e, range_hash(addr, size));
+        if (!c) {  // (no copy possible now: the entry is dropped - not probed yet - and the range is created again next time)
+            rs_log(e, "no copy now (the ring's other half is still in flight): in place this once", cs_slot, f);
+            if (k != --nrs) { rs_tab[k] = rs_tab[nrs]; rs_store_frame[k] = rs_store_frame[nrs]; }  // (an evicted slot: the last entry moves in)
+            return addr;
+        }
+        rs_log(e, cs_slot ? "new: probe" : "new: copy (a draw's storage read)", cs_slot, f);
+        return c;
+    }
+    if (cs_slot) e->cs_bound = true; else e->draw_bound = true;
+    if (e->frame == f) {  // (bound again this frame)
+        if (e->mode == RS_PLACE && cs_slot) return addr;
+        if (!cs_slot && e->mode != RS_COPY) {  // (a draw's storage read of a range probed / settled in place this frame: copied for good)
+            e->mode = RS_COPY;
+            rs_log(e, "-> copy (a draw's storage read)", cs_slot, f);
+            c = rs_copy_make(e, range_hash(addr, size));
+            return c ? c : addr;
+        }
+        if (e->copy) return e->copy;
+        c = rs_copy_make(e, e->hash);
+        return c ? c : addr;
+    }
+    // probe again on a new level or after 10 s unused - only the hash fallback's in-place ranges: a copied range stays
+    // copied (a draw's storage read, a CPU store seen), a watched one just gets its pages armed again
+    bool again = !watch_on() && e->mode == RS_PLACE && (e->level != rs_level_gen || f - e->frame > 600);
+    e->level = rs_level_gen;
+    e->frame = f;
+    if (!cs_slot && e->mode != RS_COPY) {  // a draw reads it as storage: copied for good (see above)
+        e->mode = RS_COPY;
+        rs_log(e, "-> copy (a draw's storage read)", cs_slot, f);
+        c = rs_copy_make(e, range_hash(addr, size));
+        return c ? c : addr;
+    }
+    if (e->mode == RS_PLACE && e->cs_bound && watch_on()) {  // (tracked: the OS's dirty bits decide, no hash)
+        if (watch_check(e) != 1) return addr;
+        // A write once (an initialisation: BowWow's skinning buffers at his spawn) stays in place; writes that keep
+        // coming (within 8 frames of the previous one) are the CPU rewriting it: copied from now on (renderer.m 1ea4b16)
+        int k = (int)(e - rs_tab);
+        if (!rs_store_frame[k] || f - rs_store_frame[k] > 8) { rs_store_frame[k] = f; return addr; }
+        e->mode = RS_COPY;
+        rs_log(e, "-> copy (CPU writes keep coming on its own pages)", cs_slot, f);
+        c = rs_copy_make(e, range_hash(addr, size));
+        return c ? c : addr;
+    }
+    if (e->mode == RS_PLACE && !again && e->cs_bound) return addr;
+    uint64_t h = range_hash(addr, size);
+    if (again && !e->draw_bound) {  // (a draw-read range stays a copy across levels)
+        e->mode = RS_PROBE;
+        rs_log(e, "probe again (level / unused)", cs_slot, f);
+        c = rs_copy_make(e, h);
+        return c ? c : addr;
+    }
+    switch (e->mode) {
+    case RS_PLACE:  // (never a compute slot's: a change can only be the CPU's)
+        if (h == e->hash) return addr;
+        e->mode = RS_COPY;
+        rs_log(e, "in place -> copy (changed later)", cs_slot, f);
+        break;
+    case RS_PROBE:  // the use after the probe: did the CPU touch the original meanwhile?
+        if (h == e->hash) { e->mode = RS_PLACE; e->copy = e->pristine = 0; rs_log(e, "probe -> in place (unchanged)", cs_slot, f); return addr; }
+        e->mode = RS_COPY;
+        rs_log(e, "probe -> copy (the CPU rewrote it)", cs_slot, f);
+        break;
+    default:  // RS_COPY
+        if (h == e->hash && e->copy) return e->copy;  // unchanged: the copy (maybe GPU-written: its state) is current
+        break;
+    }
+    c = rs_copy_make(e, h);
+    return c ? c : addr;
+}
+
+// (debug) LARECOMP_LOG_BINDS=1: guest memory the GPU reads in place, per frame (bytes bound; distinct ranges once),
+// and the ranges of the previous frame whose contents the game rewrote by the time this frame is translated: with
+// the frame fence deferred (overlap) the GPU may still read them - the racing data. kind: 0 vertex, 1 index,
+// 2 storage (a draw's read), 3 compute slot.
+static void bind_note(int kind, uint64_t addr, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOG_BINDS") != NULL;
+    if (!on || addr < HEAP_BASE || addr - HEAP_BASE + size > HEAP_MAX || size < 8) return;
+    extern int nvn_pool_flags_at(uint64_t addr);
+    enum { REC = 8192 };
+    static struct { uint64_t addr, size, hash; uint8_t kind; } rec[REC];
+    static int nrec;
+    static uint64_t frame, all[4], uniq[4], wr[4];
+    static uint32_t n[4];
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    if (f != frame) {
+        // the previous frame's ranges, rewritten since?
+        uint64_t chg[4] = {0}, chgn[4] = {0};
+        int shown = 0;
+        for (int i = 0; i < nrec; i++) {
+            if (range_hash(rec[i].addr, rec[i].size) == rec[i].hash) continue;
+            chg[rec[i].kind] += rec[i].size; chgn[rec[i].kind]++;
+            if (frame % 120 == 0 && shown++ < 12)
+                LOG("[race] frame %llu %s %llx+%llu pool flags %#x\n", (unsigned long long)frame,
+                    rec[i].kind == 0 ? "vertex" : rec[i].kind == 1 ? "index" : rec[i].kind == 2 ? "storage" : "compute",
+                    (unsigned long long)rec[i].addr, (unsigned long long)rec[i].size, nvn_pool_flags_at(rec[i].addr));
+        }
+        if (frame % 120 == 0 || chgn[0] + chgn[1] + chgn[2] + chgn[3])
+            LOG("[binds] frame %llu: vertex %llu KB (%llu KB distinct, %u binds), index %llu KB (%llu), storage %llu KB (%llu, %u), compute %llu KB (%llu) | in CPU-writable pools: %llu/%llu/%llu/%llu KB | rewritten since: vertex %llu KB/%llu, index %llu KB/%llu, storage %llu KB/%llu, compute %llu KB/%llu\n",
+                (unsigned long long)frame, (unsigned long long)(all[0] >> 10), (unsigned long long)(uniq[0] >> 10), n[0], (unsigned long long)(all[1] >> 10), (unsigned long long)(uniq[1] >> 10),
+                (unsigned long long)(all[2] >> 10), (unsigned long long)(uniq[2] >> 10), n[2], (unsigned long long)(all[3] >> 10), (unsigned long long)(uniq[3] >> 10),
+                (unsigned long long)(wr[0] >> 10), (unsigned long long)(wr[1] >> 10), (unsigned long long)(wr[2] >> 10), (unsigned long long)(wr[3] >> 10),
+                (unsigned long long)(chg[0] >> 10), (unsigned long long)chgn[0], (unsigned long long)(chg[1] >> 10), (unsigned long long)chgn[1],
+                (unsigned long long)(chg[2] >> 10), (unsigned long long)chgn[2], (unsigned long long)(chg[3] >> 10), (unsigned long long)chgn[3]);
+        nrec = 0; memset(all, 0, sizeof all); memset(uniq, 0, sizeof uniq); memset(n, 0, sizeof n); memset(wr, 0, sizeof wr);
+        frame = f;
+    }
+    all[kind] += size; n[kind]++;
+    for (int i = 0; i < nrec; i++) if (rec[i].addr == addr && rec[i].size == size) return;
+    if (nrec == REC) return;
+    rec[nrec].addr = addr; rec[nrec].size = size; rec[nrec].kind = (uint8_t)kind;
+    rec[nrec].hash = range_hash(addr, size);
+    nrec++;
+    uniq[kind] += size;
+    int pf = nvn_pool_flags_at(addr);
+    if (pf < 0 || !(pf & 1)) wr[kind] += size;  // (distinct bytes in pools the CPU can write: what a snapshot would copy)
+}
+
+// Before a draw (stages 0 and 1: the slots the shader reads addresses of, si->ssbo_read) or a dispatch (stage 5: every
+// bound slot): the stage's effective storage table, with the copies' addresses where a range is snapshotted. Every
+// reader of the table in the draw / dispatch (drv_dedupe, cbuf_info, gmem_direct_pick, gmem_chunk_bind, gfast_prepare,
+// vc_mark_sbufs) takes sbufs(stage); st.sbuf itself keeps the game's bindings (rehashed next frame).
+static void snap_apply(int stage, uint32_t read_mask) {
+    bool on = snap_on();
+    for (int i = 0; i < 16; i++)
+        if (st.sbuf[stage][i].addr && ((read_mask >> i) & 1)) bind_note(stage == 5 ? 3 : 2, st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
+    if (!on) { sb_eff_on = false; return; }
+    sb_eff_on = true;
+    memcpy(sb_eff[stage], st.sbuf[stage], sizeof sb_eff[stage]);
+    for (int i = 0; i < 16; i++) {
+        Range *r = &sb_eff[stage][i];
+        if (r->addr && ((read_mask >> i) & 1)) r->addr = snap_storage(r->addr, r->size, stage == 5);
+    }
+}
+
 // The driver constants of a graphics stage (cbuf 0, size bytes): zero but for the stage's storage buffer table at
 // base (16 bytes an entry: address low, high, size). Compared by the entries within size.
 static VkSpan drv_dedupe(int stage, uint64_t size) {
@@ -2687,8 +3237,9 @@ static VkSpan drv_dedupe(int stage, uint64_t size) {
     int ne = size > base ? (int)((size - base + 15) / 16) : 0;
     if (ne > 16) ne = 16;
     uint64_t seq = vk_pending_seq();
+    const Range *sb = sbufs(stage);  // (overlap: a snapshotted range's copy)
     if (last[slot].seq == seq && last[slot].size == size && last[slot].stage == stage &&
-        !memcmp(last[slot].sb, st.sbuf[stage], (size_t)ne * sizeof(Range))) {
+        !memcmp(last[slot].sb, sb, (size_t)ne * sizeof(Range))) {
         prof_cb_reused++;
         return last[slot].span;
     }
@@ -2696,13 +3247,13 @@ static VkSpan drv_dedupe(int stage, uint64_t size) {
     memset(drv, 0, size);
     for (int i = 0; i < ne; i++) {  // (an entry may run past size: drv is 0x800 bytes, only size of them are copied)
         uint32_t *e = &drv[(base + 16 * i) / 4];
-        e[0] = (uint32_t)st.sbuf[stage][i].addr;
-        e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
-        e[2] = (uint32_t)st.sbuf[stage][i].size;
+        e[0] = (uint32_t)sb[i].addr;
+        e[1] = (uint32_t)(sb[i].addr >> 32);
+        e[2] = (uint32_t)sb[i].size;
     }
     VkSpan s = vk_transient_copy(drv, size, 256);
     last[slot].seq = seq; last[slot].size = size; last[slot].stage = stage; last[slot].span = s;
-    memcpy(last[slot].sb, st.sbuf[stage], (size_t)ne * sizeof(Range));
+    memcpy(last[slot].sb, sb, (size_t)ne * sizeof(Range));
     prof_cb_copied++;
     return s;
 }
@@ -2716,21 +3267,22 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             return ubo_span(drv_dedupe(stage, size), size);
         }
         uint32_t drv[0x800 / 4] = {0};
+        const Range *sb = sbufs(stage);  // (overlap: a snapshotted range's copy)
         if (stage == 5) {
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
             for (int i = 0; i < 16; i++) {
                 uint32_t *u = &drv[(0x210 + 16 * i) / 4];
                 u[0] = (uint32_t)st.ubuf[5][i].addr; u[1] = (uint32_t)(st.ubuf[5][i].addr >> 32); u[2] = (uint32_t)st.ubuf[5][i].size;
                 uint32_t *e = &drv[(0x310 + 16 * i) / 4];
-                e[0] = (uint32_t)st.sbuf[5][i].addr; e[1] = (uint32_t)(st.sbuf[5][i].addr >> 32); e[2] = (uint32_t)st.sbuf[5][i].size;
+                e[0] = (uint32_t)sb[i].addr; e[1] = (uint32_t)(sb[i].addr >> 32); e[2] = (uint32_t)sb[i].size;
             }
         } else {
             uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
             for (int i = 0; i < 16; i++) {
                 uint32_t *e = &drv[(base + 16 * i) / 4];
-                e[0] = (uint32_t)st.sbuf[stage][i].addr;
-                e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
-                e[2] = (uint32_t)st.sbuf[stage][i].size;
+                e[0] = (uint32_t)sb[i].addr;
+                e[1] = (uint32_t)(sb[i].addr >> 32);
+                e[2] = (uint32_t)sb[i].size;
             }
         }
         uint64_t size = si->cbuf_size[0] > sizeof drv ? sizeof drv : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
@@ -3083,6 +3635,16 @@ mapped:;
 // the pages instead and keeps it. Decided here, at boot, before any query protected a page. LARECOMP_WRITE_TRACKING=1:
 // on anyway.
 static bool gmem_userptr;  // the heap is imported by host pointer: userptr (vertex cache default, vcache_lookup)
+static bool heap_is_userptr(void) { return gmem_userptr; }  // (the storage write watch: off over a userptr import)
+static const char *heap_tracking_reason(void) {  // (overlap_on: why there is no page write tracking here)
+    if (gmem_userptr) return "the guest heap is a userptr import, which the OS can't track";
+#ifdef __linux__
+    if (gmem_dmabuf) return "the guest heap is driver memory (dma-buf), which the OS can't track";
+    return "no userfaultfd write tracking or PAGEMAP_SCAN (Linux 6.7+)";
+#else
+    return "the guest window has no write watch";
+#endif
+}
 // The whole heap as one userptr import (not chunks) on AMD: each submission has amdgpu check all of its pages
 static bool heap_whole_userptr(void) { return gmem_userptr && !gc_lazy && g_vk.props.vendorID == 0x1002; }
 
@@ -3269,6 +3831,8 @@ static void gmem_chunk_decide(void) {
 // The heap mapped so far, as the imports see it (SetHeapSize; pages beyond it don't exist yet).
 static uint64_t gmem_heap_size(void) {
     uint64_t want = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
+    uint64_t ring = snap_ring_end();  // (overlap: the storage copies' ring right after the heap is the GPU's too)
+    if (ring > want) want = ring;
     return want > HEAP_MAX ? HEAP_MAX : want;
 }
 
@@ -3299,6 +3863,15 @@ static bool gc_import(int k) {
     gc_imported_bytes += size;
     gc_gen++;
     return true;
+}
+
+// (snap_on, lazy chunks) The chunk holding the end of the game's heap may have been imported before the ring was
+// decided, short of it: imported again over the ring (gc_import replaces it; the old import goes once its submissions
+// are done). snap_state is set before this runs, so gmem_heap_size's answer includes the ring here.
+static void snap_ring_import_tail(void) {
+    if (!gc_lazy || !gc_shift) return;
+    for (int k = (int)(snap_base >> gc_shift); k <= (int)((snap_base + SNAP_RING - 1) >> gc_shift) && k < gc_n; k++)
+        if (gc[k].buf && gc[k].size < gmem_heap_size() - ((uint64_t)k << gc_shift)) gc_import(k);
 }
 
 // Pointers the game keeps in its uniform buffers (the lighting pass's light list, the grass's instance tables): the
@@ -3493,7 +4066,7 @@ static void gmem_direct_pick(uint32_t stages, uint32_t gd[GMEM_DIRECT_MAX * 4], 
     for (int stage = 0; on && stage < 2; stage++) {
         if (!(stages & (1u << stage))) continue;
         for (int i = 0; i < 16 && n < GMEM_DIRECT_MAX; i++) {
-            uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+            uint64_t a = sbufs(stage)[i].addr, sz = sbufs(stage)[i].size;  // (overlap: a snapshotted range's copy)
             if (a < HEAP_BASE || a - HEAP_BASE >= HEAP_MAX) continue;
             uint64_t off = a - HEAP_BASE;
             int k0 = (int)(off >> gc_shift), k1 = (int)((off + (sz ? sz : 1) - 1) >> gc_shift);
@@ -3521,7 +4094,7 @@ static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeli
     for (int stage = 0; stage < 6; stage++) {
         if (!(stages & (1u << stage))) continue;
         for (int i = 0; i < 16; i++) {
-            uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+            uint64_t a = sbufs(stage)[i].addr, sz = sbufs(stage)[i].size;  // (overlap: a snapshotted range's copy - its chunk)
             if (a < HEAP_BASE || a - HEAP_BASE >= HEAP_MAX) continue;
             if (log_sb) {
                 static uint64_t seen[64]; static int nseen;
@@ -3630,7 +4203,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
     struct { uint64_t lo, hi; } r[16];
     int n = 0;
     for (int i = 0; i < 16; i++) {  // heap offsets of the bound storage buffers, 256-aligned
-        uint64_t a = st.sbuf[5][i].addr, sz = st.sbuf[5][i].size;
+        uint64_t a = sbufs(5)[i].addr, sz = sbufs(5)[i].size;  // (overlap: a snapshotted range's copy is what gets copied)
         if (!a || !sz || a < HEAP_BASE || !gmem_covers(a - HEAP_BASE, sz)) continue;
         uint64_t lo = (a - HEAP_BASE) & ~255ull, hi = (a - HEAP_BASE + sz + 255) & ~255ull, top = gc_lazy ? gmem_heap_size() : gmem_size;
         if (hi > top) hi = top;
@@ -3747,7 +4320,8 @@ static bool pt_init(void) {
 // Texture upload checks (textures.c): may guest memory [addr, addr + size) have changed since generation `since`?
 // 0: no CPU write since, 1: written, -1: unknown (no tracking, outside the heap, or pages the GPU writes).
 // *now: the generation to pass next time.
-int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
+// (gpu_unknown: pages the GPU writes answer -1 - the upload checks; the storage write watch asks about the CPU alone)
+static int pages_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now, bool gpu_unknown) {
     if (!size || addr < HEAP_BASE || addr - HEAP_BASE + size > HEAP_MAX || !pt_init()) return -1;
     uint64_t lo = (addr - HEAP_BASE) & ~(VC_PAGE - 1), hi = (addr - HEAP_BASE + size + VC_PAGE - 1) & ~(VC_PAGE - 1);
     static uint64_t pages[4096];
@@ -3760,11 +4334,14 @@ int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now
     *now = g;
     int changed = 0;
     for (uint64_t p = lo / VC_PAGE; p < hi / VC_PAGE; p++) {
-        if (vc_page_gpu[p]) return -1;
+        if (gpu_unknown && vc_page_gpu[p]) return -1;
         if (vc_page_gen[p] > since) changed = 1;
     }
     return changed;
 }
+int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) { return pages_written(addr, size, since, now, true); }
+// The storage write watch (watch_check): CPU writes only; the GPU's own writes to the range (DMA) don't count
+static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) { return pages_written(addr, size, since, now, false); }
 
 // Heap pages [lo, hi) (offsets) written by the GPU: never cached from now on.
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
@@ -3776,7 +4353,7 @@ static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
 // A storing shader (stage 0 / 1 / 5) may write any of its bound storage buffers.
 static void vc_mark_sbufs(int stage) {
     for (int i = 0; i < 16; i++) {
-        uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+        uint64_t a = sbufs(stage)[i].addr, sz = sbufs(stage)[i].size;  // (overlap: the copy, where the shader wrote)
         if (a >= HEAP_BASE && sz && a - HEAP_BASE < HEAP_MAX) vc_mark_gpu(a - HEAP_BASE, a - HEAP_BASE + sz);
     }
 }
@@ -3899,10 +4476,11 @@ void vc_flush(void) {
 // device-local cache above, else read in place - no per-draw copy, no index scan for the copy size. The game fences its
 // CPU writes as on the Switch. Falls back to copies outside the heap or without the import; LARECOMP_VK_COPY_VERTICES=1
 // forces copies.
-static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
+static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {  // kind: 0 vertex, 1 index (bind_note)
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
+    bind_note(kind, addr, size);
     if (gc_lazy) {
         uint64_t o = addr - HEAP_BASE;
         if (!size || o + size > HEAP_MAX) return false;
@@ -3963,6 +4541,7 @@ void vk_exec_reset(void) {
     vc_bytes = 0;
     if (vc_page_gpu) memset(vc_page_gpu, 0, HEAP_MAX / VC_PAGE);
     vc_epoch++;
+    snap_reset();  // (overlap: the storage copies' ring follows the heap, decided again once it is set up)
     st_defaults();
 }
 
@@ -4553,6 +5132,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             LOG("\n");
         }
     }
+    snap_apply(5, 0xFFFF);  // (overlap) every bound slot: the probe / copy decision per range, before gfast and the sets read the table
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
@@ -4756,6 +5336,8 @@ static void draw_(CmdRec *r, bool indexed) {
             g_mirror_w = (float)st.rt.color[0]->width;
         }
     }
+    snap_apply(0, pr->vi->ssbo_read);  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range
+    snap_apply(1, pr->fi->ssbo_read);
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -5130,7 +5712,7 @@ static void draw_(CmdRec *r, bool indexed) {
             uint32_t isz = itype == 1 ? 2 : 4;
             itype_vk = itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
             icount = count;
-            if (iaddr % isz == 0 && guest_direct(iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
+            if (iaddr % isz == 0 && guest_direct(1, iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 ib = vk_transient_copy(src, (uint64_t)count * isz + 4, 4);
@@ -5171,7 +5753,7 @@ static void draw_(CmdRec *r, bool indexed) {
             Range v = st.vbuf[s];
             VkBuffer dbuf;
             VkDeviceSize doff;
-            if (v.addr && v.size && guest_direct(v.addr, v.size, &dbuf, &doff)) {
+            if (v.addr && v.size && guest_direct(0, v.addr, v.size, &dbuf, &doff)) {
                 if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == dbuf && ss.vo[s] == doff) continue;
                 ss.vb[s] = dbuf; ss.vo[s] = doff; ss.vb_known |= 1u << s;
                 rec_CmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);
@@ -6303,6 +6885,9 @@ static void exec_list(uint64_t handle, int depth) {
             out[0] = 0;
             out[1] = mode == 1 ? frame_ts : mode == 3 ? SDL_GetTicksNS() : ns_to_gpu_ticks(plat_now_ns());  // (3 legacy: ns, the old bug)
             static uint64_t *prev_out;  // (frame pacing: the pair's start)
+            // (overlap) the game reads this pair before its GPU work is done: the end counter reports the latest
+            // completed pair's GPU span after this pair's start (the frame before, as a frame-late measurement)
+            if (mode == 2 && overlap_on() && prev_out && out - prev_out == 2) out[1] = prev_out[1] + atomic_load(&g_last_gpu_frame_ticks);
             if (mode == 0 || mode == 2) out[1] = pace_end_counter(prev_out, out, out[1]);
             prev_out = out;
             {   // (test) LARECOMP_TEST_COUNTER_DELAY_MS=<ms>: stall the host after a frame's first counter - a slow CPU

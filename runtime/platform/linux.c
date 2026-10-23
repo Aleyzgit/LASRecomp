@@ -191,6 +191,7 @@ void plat_thread_realtime(uint64_t period_ns) {
     if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) == 0) return;
     setpriority(PRIO_PROCESS, (id_t)gettid(), -10);  // (per thread on Linux; fails quietly without CAP_SYS_NICE)
 }
+int plat_thread_realtime_check(uint64_t period_ns) { (void)period_ns; return -1; }
 
 // ---- process
 // Started from a desktop (the AppImage) there is no terminal: stdout / stderr go to lasrecomp.log in the data folder
