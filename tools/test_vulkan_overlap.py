@@ -79,8 +79,9 @@ int main(int argc, char **argv) {
     tracking = !strcmp(argv[1], "tracked");
     bool want = !strcmp(argv[2], "on");
     assert(overlap_on() == want && overlap_on() == want);  // (decided once)
-    printf("PASS: overlap %s, tracking %s, LARECOMP_GPU_OVERLAP=%s\n", want ? "on" : "off", tracking ? "yes" : "no",
-           getenv("LARECOMP_GPU_OVERLAP") ? getenv("LARECOMP_GPU_OVERLAP") : "(unset)");
+    printf("PASS: overlap %s, tracking %s, LARECOMP_GPU_OVERLAP=%s, LARECOMP_OVERLAP_WATCH=%s\n", want ? "on" : "off", tracking ? "yes" : "no",
+           getenv("LARECOMP_GPU_OVERLAP") ? getenv("LARECOMP_GPU_OVERLAP") : "(unset)",
+           getenv("LARECOMP_OVERLAP_WATCH") ? getenv("LARECOMP_OVERLAP_WATCH") : "(unset)");
 }
 '''
 
