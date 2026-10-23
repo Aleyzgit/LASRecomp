@@ -2201,7 +2201,9 @@ bool renderer_watch_fault(uint64_t fa) {
     if (i == nwatch_pages) return false;
     plat_protect(pg, PLAT_PAGE, PLAT_PROT_RW);
     watch_pages[i].armed = 0;
-    for (int k = 0; k < nrs; k++) if (fa >= rs_tab[k].addr && fa < rs_tab[k].addr + rs_tab[k].size) rs_cpu_wrote[k] = 1;
+    // every watched range on the page: the page stays open until it is armed again, so a store into a neighbour
+    // range on it would go unseen (the three lists share a page) - marked as possibly written, copied, the safe side
+    for (int k = 0; k < nrs; k++) if (rs_tab[k].addr < pg + PLAT_PAGE && pg < rs_tab[k].addr + rs_tab[k].size) rs_cpu_wrote[k] = 1;
     return true;
 }
 
@@ -2234,12 +2236,14 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     if (cs_slot) e->cs_bound = true; else e->draw_bound = true;
     if (e->mode != RS_COPY && rs_cpu_wrote[e - rs_tab]) {  // the CPU stored into it: copied from now on
         e->mode = RS_COPY;
-        rs_log(e, "-> copy (a CPU store hit it)", cs_slot, f);
+        rs_log(e, "-> copy (a CPU store hit its page)", cs_slot, f);
         e->frame = f;
         return rs_copy_make(e, range_hash(addr, size));
     }
     if (e->frame == f) return e->mode == RS_PLACE ? addr : (e->gen == snap_gen ? e->copy : rs_copy_make(e, e->hash));  // (bound again this frame)
-    bool again = e->level != rs_level_gen || f - e->frame > 600;  // (a new level, or unused: probe again)
+    // probe again on a new level or after 10 s unused - only the hash fallback: a copied range stays copied (a
+    // draw's storage read, a CPU store seen), a watched one just gets its pages armed again
+    bool again = !watch_on() && e->mode == RS_PLACE && (e->level != rs_level_gen || f - e->frame > 600);
     e->level = rs_level_gen;
     e->frame = f;
     if (!cs_slot && e->mode != RS_COPY) {  // a draw reads it as storage: copied for good (see above)
