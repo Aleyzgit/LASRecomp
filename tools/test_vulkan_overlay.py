@@ -31,6 +31,9 @@ harness = r'''
 #include <stdlib.h>
 #include <string.h>
 #include <vulkan/vulkan.h>
+#ifdef _WIN32
+#define setenv(k, v, o) _putenv_s(k, v)  // (MinGW has no setenv)
+#endif
 #define FRAMES 3
 #define LOG(...) fprintf(stderr, __VA_ARGS__)
 #define VK_CHECK(x) do { VkResult r_ = (x); assert(r_ == VK_SUCCESS); } while (0)
