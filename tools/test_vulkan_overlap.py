@@ -74,17 +74,27 @@ static uint64_t heap_size = 16ull << 20;  // (the test ranges below sit under 8 
 static uint64_t kernel_heap_size(void) { return heap_size; }
 static unsigned commits;
 static void plat_commit(uint64_t addr, uint64_t size) { assert(addr == HEAP_BASE + heap_size && size == (16ull << 20)); commits++; }
-#define PLAT_PAGE 0x4000ull
-enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
-static struct { uint64_t page; int prot; } prots[4096];  // every plat_protect call, in order
-static int nprots;
-static int plat_protect(uint64_t addr, uint64_t size, int prot) {
-    assert(size == PLAT_PAGE && !(addr & (PLAT_PAGE - 1)) && addr >= HEAP_BASE && addr < HEAP_BASE + heap_size);
-    assert(nprots < 4096);
-    prots[nprots].page = addr; prots[nprots].prot = prot; nprots++;
-    return 0;
+// The OS's page write tracking (exec.c pages_cpu_written over plat_written_pages): 4 KB dirty bits the test sets
+// as "the CPU wrote here", reset by a look, and the shared page generations a look stamps
+static int track_off;  // (no tracking: -1)
+static uint8_t page_dirty[HEAP_MAX / 4096];
+static uint32_t page_gen[HEAP_MAX / 4096], pgen = 1;
+static unsigned looks;
+static void cpu_wrote(uint64_t addr) { page_dirty[(addr - HEAP_BASE) / 4096] = 1; }
+static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
+    if (track_off) return -1;
+    assert(addr >= HEAP_BASE && addr - HEAP_BASE + size <= HEAP_MAX);
+    looks++;
+    uint64_t lo = (addr - HEAP_BASE) / 4096, hi = (addr - HEAP_BASE + size + 4095) / 4096;
+    uint32_t g = ++pgen;
+    int w = 0;
+    for (uint64_t p = lo; p < hi; p++) {
+        if (page_dirty[p]) { page_dirty[p] = 0; page_gen[p] = g; }
+        if (page_gen[p] > since) w = 1;
+    }
+    *now = g;
+    return w;
 }
-static int prot_of(uint64_t page) { int p = PLAT_PROT_RW; for (int i = 0; i < nprots; i++) if (prots[i].page == page) p = prots[i].prot; return p; }
 static bool userptr;
 static bool overlap_on(void) { return true; }
 static uint64_t completed, pending = 1, issued, waited;
@@ -103,63 +113,57 @@ static uint64_t stat_snap_bytes, stat_snap_copies;
 ''' + snap + r'''
 static void snap_ring_import_tail(void) {}
 static bool heap_is_userptr(void) { return userptr; }
-static bool (*fault_hook)(uint64_t);  // (dispatch.c's: registered when the watch turns on)
-void rt_fault_watch_hook(bool (*hook)(uint64_t fa)) { fault_hook = hook; }
 static uint64_t ring_lo(void) { return HEAP_BASE + snap_base; }
 static bool in_ring(uint64_t a) { return a >= ring_lo() && a < ring_lo() + SNAP_RING; }
 static bool in_half(uint64_t a, int h) { return a >= ring_lo() + h * SNAP_HALF && a < ring_lo() + (h + 1) * SNAP_HALF; }
 
-// The write watch (LARECOMP_OVERLAP_WATCH unset): compute-only ranges in place with their pages protected, copied
-// from the first CPU store (the platform's fault handler -> renderer_watch_fault)
+// The write watch (LARECOMP_OVERLAP_WATCH unset): compute-only ranges in place, copied once the OS's page write
+// tracking shows a CPU write on their pages; no page protection anywhere
 static void watch_tests(void) {
-    assert(snap_on() && watch_on() && fault_hook == renderer_watch_fault);  // (the fault routing registered)
+    assert(snap_on() && watch_on());
     uint64_t A = HEAP_BASE + 0x1000, B = HEAP_BASE + 0x20000, B2 = HEAP_BASE + 0x20800, C = HEAP_BASE + 0x40000, D = HEAP_BASE + 0x60000;
-    // W1. a compute-only range starts in place, its pages (16 KB units) write-protected
-    assert(snap_storage(A, 32640, true) == A && rs_tab[0].mode == RS_PLACE && nwatch_pages == 3);
-    assert(prot_of(HEAP_BASE) == PLAT_PROT_READ && prot_of(HEAP_BASE + 0x4000) == PLAT_PROT_READ && prot_of(HEAP_BASE + 0x8000) == PLAT_PROT_READ);
-    assert(snap_storage(A, 32640, true) == A);  // (again this frame)
-    int np = nprots;
+    // W1. a compute-only range starts in place; its pages are looked at (stamped) once, and once per frame after
+    unsigned l = looks;
+    assert(snap_storage(A, 32640, true) == A && rs_tab[0].mode == RS_PLACE && rs_tab[0].wgen && looks == l + 1);
+    assert(snap_storage(A, 32640, true) == A && looks == l + 1);  // (again this frame: no look)
     frame++;
-    assert(snap_storage(A, 32640, true) == A && nprots == np);  // next frame: still armed, nothing to re-protect
-    // W2. a store into it faults: the page is opened, the range is marked; its next bind is a copy for good
-    assert(!renderer_watch_fault(HEAP_BASE + 0x10000));  // (not a watched page: not ours)
-    assert(renderer_watch_fault(A + 100) && prot_of(HEAP_BASE) == PLAT_PROT_RW && rs_cpu_wrote[0]);
+    assert(snap_storage(A, 32640, true) == A && looks == l + 2);  // no CPU write: in place
+    // W2. the CPU writes into it: at its next bind the tracking shows it - a copy for good, kept while unchanged
+    cpu_wrote(A + 100);
+    frame++;
     uint64_t a1 = snap_storage(A, 32640, true);
     assert(a1 != A && in_ring(a1) && rs_tab[0].mode == RS_COPY && !memcmp((void *)(uintptr_t)a1, heap_mem + 0x1000, 32640));
     frame++;
     assert(snap_storage(A, 32640, true) == a1);
-    // W3. a level change or 10 s unused never demotes a copied range
+    // W3. a level change or 10 s unused never demotes a copied range; a data change refreshes it
     level = "Dungeon";
     frame += 601;
     assert(snap_storage(A, 32640, true) == a1 && rs_tab[0].mode == RS_COPY);
-    heap_mem[0x1000 + 3] ^= 1;  // (changed: refreshed)
+    heap_mem[0x1000 + 3] ^= 1;
     frame++;
     uint64_t a2 = snap_storage(A, 32640, true);
     assert(a2 != a1 && rs_tab[0].mode == RS_COPY);
-    // W4. an in-place watched range is just re-armed on a level change (no hash probe, no copy)
-    assert(snap_storage(C, 2048, true) == C && rs_tab[1].mode == RS_PLACE && prot_of(HEAP_BASE + 0x40000) == PLAT_PROT_READ);
+    // W4. an in-place tracked range stays in place over a level change (no hash probe, no copy); a GPU write (no
+    //     dirty bit) changes nothing
+    assert(snap_storage(C, 2048, true) == C && rs_tab[1].mode == RS_PLACE);
+    heap_mem[0x40000 + 9] = 0x42;  // (the GPU wrote: the tracking doesn't see it)
     level = "Beach";
     frame += 601;
-    np = nprots;
-    assert(snap_storage(C, 2048, true) == C && rs_tab[1].mode == RS_PLACE && nprots == np);
-    // a page opened by something else (the arm flag cleared) is protected again at the range's first bind of a frame
-    for (int i = 0; i < nwatch_pages; i++) if (watch_pages[i].page == HEAP_BASE + 0x40000) watch_pages[i].armed = 0;
+    assert(snap_storage(C, 2048, true) == C && rs_tab[1].mode == RS_PLACE);
+    // W5. two ranges on one page (the light lists): a CPU write into one marks both
     frame++;
-    assert(snap_storage(C, 2048, true) == C && nprots == np + 1 && prots[np].page == HEAP_BASE + 0x40000 && prots[np].prot == PLAT_PROT_READ);
-    // W5. two ranges on one page (the light lists): a store into one marks both
-    frame++;
-    assert(snap_storage(B, 2048, true) == B && snap_storage(B2, 2048, true) == B2 && nwatch_pages == 5);
-    assert(renderer_watch_fault(B2 + 16) && rs_cpu_wrote[2] && rs_cpu_wrote[3]);
+    assert(snap_storage(B, 2048, true) == B && snap_storage(B2, 2048, true) == B2);
+    cpu_wrote(B2 + 16);
     frame++;
     uint64_t b1 = snap_storage(B, 2048, true), b2 = snap_storage(B2, 2048, true);
     assert(b1 != B && b2 != B2 && rs_tab[2].mode == RS_COPY && rs_tab[3].mode == RS_COPY);
-    // W6. a store on a watched page outside every range still opens the page (and marks the ranges on that page)
+    // W6. a write before the range is first seen is consumed by the first look: not a reason to copy
+    cpu_wrote(D + 8);
     frame++;
-    assert(snap_storage(D, 2048, true) == D);
-    assert(renderer_watch_fault(D + 0x3000) && prot_of(HEAP_BASE + 0x60000) == PLAT_PROT_RW);
+    assert(snap_storage(D, 2048, true) == D && rs_tab[4].mode == RS_PLACE);
     frame++;
-    assert(snap_storage(D, 2048, true) != D && rs_tab[4].mode == RS_COPY);
-    // W7. a draw's storage read of a watched in-place range: a copy for good, as without the watch
+    assert(snap_storage(D, 2048, true) == D && rs_tab[4].mode == RS_PLACE);
+    // W7. a draw's storage read of a tracked in-place range: a copy for good, as without the watch
     uint64_t E = HEAP_BASE + 0x80000;
     frame++;
     assert(snap_storage(E, 2048, true) == E);
@@ -168,11 +172,16 @@ static void watch_tests(void) {
     assert(e1 != E && rs_tab[5].mode == RS_COPY && rs_tab[5].draw_bound);
     frame++;
     assert(snap_storage(E, 2048, true) == e1);
-    // W8. a reboot disarms every page
-    snap_reset();
-    for (int i = 0; i < nprots; i++) if (prots[i].prot == PLAT_PROT_READ) assert(prot_of(prots[i].page) == PLAT_PROT_RW);
-    assert(nwatch_pages == 0);
-    puts("PASS: write watch - in place + armed, a store makes a copy for good, no demotion on level / idle, re-arm, a shared page marks both, a reboot disarms");
+    // W8. another looker (the vertex cache) consuming the OS bits first doesn't hide the write: the generations carry it
+    uint64_t F = HEAP_BASE + 0xA0000;
+    frame++;
+    assert(snap_storage(F, 2048, true) == F);
+    cpu_wrote(F + 4);
+    uint32_t g;
+    assert(pages_cpu_written(F, 4096, 0, &g) == 1);  // (someone else looked: the bits are reset, the page stamped)
+    frame++;
+    assert(snap_storage(F, 2048, true) != F && rs_tab[6].mode == RS_COPY);
+    puts("PASS: write watch - in place + tracked, a CPU write makes a copy for good, no demotion on level / idle, GPU writes ignored, a shared page marks both, a prior write is consumed, draw reads copy, other lookers");
 }
 
 int main(int argc, char **argv) {
@@ -180,12 +189,12 @@ int main(int argc, char **argv) {
     else memset(heap_mem, 0, HEAP_MAX);
     assert(heap_mem);
     if (argc > 1 && !strcmp(argv[1], "watch")) { watch_tests(); return 0; }
-    if (argc > 1 && !strcmp(argv[1], "userptr")) {  // a userptr heap import (AMD Linux): the watch is off, the probe instead
-        userptr = true;
+    if (argc > 1 && !strcmp(argv[1], "notrack")) {  // no OS write tracking (a userptr / dma-buf heap on Linux, no write watch): the probe instead
+        track_off = 1; userptr = true;
         assert(snap_on() && !watch_on());
         uint64_t A = HEAP_BASE + 0x1000;
-        assert(snap_storage(A, 32640, true) != A && rs_tab[0].mode == RS_PROBE && nprots == 0);
-        puts("PASS: userptr heap - the watch is off, compute-only ranges get the hash probe");
+        assert(snap_storage(A, 32640, true) != A && rs_tab[0].mode == RS_PROBE);
+        puts("PASS: no page write tracking - the watch is off, compute-only ranges get the hash probe");
         return 0;
     }
     uint64_t A = HEAP_BASE + 0x1000, B = HEAP_BASE + 0x20000, C = HEAP_BASE + 0x40000;
@@ -338,9 +347,9 @@ with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
                         str(cfile), '-o', str(exe)], check=True)
         env = dict(os.environ)
         env.pop('LARECOMP_OVERLAP_WATCH', None)
-        if name == 'snap':  # the hash probe (watch off), the write watch, a userptr heap
+        if name == 'snap':  # the hash probe (watch off), the write watch, no tracking
             subprocess.run([str(exe)], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))
             subprocess.run([str(exe), 'watch'], check=True, timeout=10, env=env)
-            subprocess.run([str(exe), 'userptr'], check=True, timeout=10, env=env)
+            subprocess.run([str(exe), 'notrack'], check=True, timeout=10, env=env)
         else:
             subprocess.run([str(exe)], check=True, timeout=10, env=env)
