@@ -2812,15 +2812,17 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
 // the one-buffer import takes it in, lazy mode imports its chunk when a copy is first bound (gmem_chunk_bind touches
 // the effective addresses), gfast copies from it. Windows commits it (a userptr import needs committed pages).
 // The ring is two halves: copies fill one; when it is full the submission pending then is noted for it and the other
-// half is taken, after waiting for the submission noted when that half was left - its old copies are never bound
-// again after the switch (snap_gen: every entry re-copies), so nothing newer uses them. At ~100 KB a frame that wait
-// is long satisfied; a half filling within one submission (not a real case) binds the original for that draw.
+// half is taken, after waiting for the submission noted when that half was left - so its freed slots are idle. Live
+// copies stay where they are across switches (the allocator walks past them; rs_copy_make), so the GPU's own writes
+// into a copy survive; a copy unused for 10 s is released. At ~100 KB a frame that wait is long satisfied; a half
+// filling within one submission (not a real case) binds the original for that draw.
 // LARECOMP_OVERLAP_SNAP=0: off (everything in place, as before: shows the race).
 #define SNAP_HALF (8ull << 20)
 #define SNAP_RING (2 * SNAP_HALF)
 enum { RS_PROBE, RS_COPY, RS_PLACE };
 typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen, level, wgen; uint8_t mode; bool cs_bound, draw_bound; } RangeState;  // (wgen: watch_check)
 static RangeState rs_tab[512];
+static uint64_t rs_store_frame[512];  // (watch: the frame of the previous CPU write seen on a range's own pages)
 static int nrs;
 static int snap_state = -1;        // -1 not decided (the heap not set up yet), 0 off, 1 on
 static uint64_t snap_base;         // heap offset of the ring (on)
@@ -2882,29 +2884,60 @@ static void rs_log(RangeState *e, const char *what, bool cs_slot, uint64_t f) { 
     if (e->size >= 2040 ? n < 100000 : n++ < 200)  // (the small per-object ranges are many: capped)
         LOG("[snap] %llx+%llu %s (%s bind, frame %llu)\n", (unsigned long long)e->addr, (unsigned long long)e->size, what, cs_slot ? "compute" : "draw", (unsigned long long)f);
 }
+// A copy lives until its entry remakes it (the original changed) or releases it (unused for 10 s): a half switch no
+// longer remakes every copy from its original, which lost the GPU's own writes into a copy - the exposure program's
+// into the lists - for a frame (renderer.m 1ea4b16). The allocator moves forward through the current half and walks
+// past live copies; a slot freed by a remake (the GPU may still read it) is reused only after the half is left and
+// taken again, which waits for the submission pending when it was left - the same guarantee as before.
+// The offset in the current half where `need` bytes fit from `at` on, skipping live copies; ~0 when none
+static uint64_t rs_ring_fit(const RangeState *e, uint64_t at, uint64_t need) {
+    uint64_t half_lo = HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF;
+    for (bool moved = true; moved && at + need <= SNAP_HALF;) {
+        moved = false;
+        for (int i = 0; i < nrs; i++) {
+            const RangeState *o = &rs_tab[i];
+            if (o == e || !o->copy || o->copy < half_lo || o->copy >= half_lo + SNAP_HALF) continue;
+            uint64_t olo = o->copy - half_lo, ohi = (olo + o->size + 255) & ~255ull;
+            if (at < ohi && at + need > olo) { at = ohi; moved = true; }
+        }
+    }
+    return at + need <= SNAP_HALF ? at : ~0ull;
+}
 // A copy of e's range in the ring: its guest address, or 0 when none can be made now (see the half switch above)
 static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
-    uint64_t aligned = (snap_off + 255) & ~255ull;
-    if (aligned + e->size > SNAP_HALF) {  // this half is full: the other one, once the GPU is done with what it held
+    uint64_t need = (e->size + 255) & ~255ull;
+    uint64_t at = rs_ring_fit(e, (snap_off + 255) & ~255ull, need);
+    if (at == ~0ull) {  // this half is full: the other one, once the GPU is done with what it held
         int other = snap_half ^ 1;
-        uint64_t need = snap_half_seq[other], done = vk_completed_seq();
-        if (need > done) {
-            if (need > renderer_issued_seq()) return 0;  // (still being recorded: can't be waited for - in place this once)
+        uint64_t seq = snap_half_seq[other], done = vk_completed_seq();
+        if (seq > done) {
+            if (seq > renderer_issued_seq()) return 0;  // (still being recorded: can't be waited for - in place this once)
             wait_why = "storage snapshot ring";
-            vk_wait_seq(need);
+            vk_wait_seq(seq);
         }
         snap_half_seq[snap_half] = vk_pending_seq();
         snap_half = other;
-        snap_gen++;
-        aligned = 0;
+        snap_off = 0;
+        at = rs_ring_fit(e, 0, need);
+        if (at == ~0ull) {  // (the half is all live copies: not in practice - 512 entries, most far smaller)
+            static int warned;
+            if (warned++ < 3) LOG("[snap] copy ring full: %llx+%llu in place\n", (unsigned long long)e->addr, (unsigned long long)e->size);
+            return 0;
+        }
     }
-    e->copy = HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF + aligned;
+    e->copy = HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF + at;
     memcpy((void *)(uintptr_t)e->copy, (const void *)(uintptr_t)e->addr, e->size);
-    snap_off = aligned + e->size;
+    snap_off = at + need;
     e->hash = h, e->gen = snap_gen;
     stat_snap_bytes += e->size;
     stat_snap_copies++;
     return e->copy;
+}
+static void rs_release_unused(uint64_t f) {  // (every 600 frames) copies of entries unbound for 10 s go back to the ring
+    static uint64_t last;
+    if (f - last < 600) return;
+    last = f;
+    for (int i = 0; i < nrs; i++) if (rs_tab[i].copy && f - rs_tab[i].frame > 600) rs_tab[i].copy = 0;
 }
 // Write watch (compute-only ranges; renderer.m cf98fff / c3580a8). The CPU's rewrite of a range can't be seen in its
 // bytes (the light lists are rewritten with the same bytes while the view stands still, and the race is the GPU reading
@@ -2920,10 +2953,12 @@ static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
 // Where the OS gives no tracking (Linux over a userptr or dma-buf heap: the tracking is off there, a kernel without
 // PAGEMAP_SCAN, a Windows window reserved without write watch) the one-frame hash probe is the fallback, logged.
 // Page granularity (4 KB; 16 KB and 64 KB kernels on arm64 Linux as the kernel reports): a store into a neighbour on
-// the same page marks the range too (the lists share a page) - copied, the safe side.
+// the same page marks the range too (the lists share a page) - copied, the safe side - except a page shared with a
+// small parameter block (watch_check), and a single write (an initialisation) doesn't copy (snap_storage).
 // LARECOMP_OVERLAP_WATCH=0: off (compute-only ranges get the one-frame hash probe, as before).
 static bool heap_is_userptr(void);  // (with the heap import below)
 static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);  // (the page tables below)
+#define WATCH_PAGE 4096ull  // (the page tables' page, VC_PAGE below)
 static bool watch_on(void) {
     static int on = -1;
     if (on < 0) {
@@ -2940,11 +2975,29 @@ static bool watch_on(void) {
 }
 // Did the CPU write any page of the range since the range last looked (e->wgen)? The look stamps the pages (every
 // look resets the OS bits, so the generation table carries what other lookers saw). 1 written, 0 not, -1 no tracking.
+// A page dirty bit can't tell which range on the page was stored to. A store into a small parameter block (the
+// skinning dispatch's 12-byte slot 5, rewritten every frame) says nothing about the buffers beside it: counted as
+// theirs, it copied BowWow's skinning output - a GPU output the CPU reads back every frame (his chain) - so the
+// dispatch wrote the copy, the CPU read the frozen original, and his body came apart as a companion indoors (Metal
+// 1ea4b16). So a range of 256 bytes or more counts only its dirty pages that no watched range under 256 bytes shares;
+// the light / exposure lists (32640 / 2040 bytes, one allocation the CPU memcpys) share pages only with each other
+// and keep their coverage. A small range counts every dirty page of its own.
 static int watch_check(RangeState *e) {
-    uint32_t now = e->wgen;
-    int w = pages_cpu_written(e->addr, e->size, e->wgen, &now);
+    uint32_t since = e->wgen, now = e->wgen;
+    int w = pages_cpu_written(e->addr, e->size, since, &now);
     e->wgen = now;
-    return w;
+    if (w != 1 || e->size < 256) return w;
+    for (uint64_t plo = e->addr & ~(WATCH_PAGE - 1); plo < e->addr + e->size; plo += WATCH_PAGE) {
+        bool small_mate = false;
+        for (int k = 0; k < nrs && !small_mate; k++) {
+            const RangeState *o = &rs_tab[k];
+            if (o != e && o->size < 256 && o->cs_bound && o->addr < plo + WATCH_PAGE && plo < o->addr + o->size) small_mate = true;
+        }
+        if (small_mate) continue;
+        uint32_t pg_now;  // (this page written since the range's last look? The look above stamped it: no OS bits left)
+        if (pages_cpu_written(plo, WATCH_PAGE, since, &pg_now) == 1) return 1;  // (a dirty page of its own)
+    }
+    return 0;  // (only pages shared with small parameter blocks were written: theirs)
 }
 
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
@@ -2967,6 +3020,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     rs_level_tick();
     extern uint64_t renderer_exec_frame(void);
     uint64_t f = renderer_exec_frame();
+    rs_release_unused(f);
     RangeState *e = NULL;
     for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == addr && rs_tab[i].size == size) { e = &rs_tab[i]; break; }
     uint64_t c;
@@ -2974,6 +3028,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         if (nrs == 512) { nrs = 0; snap_gen++; }  // (table full: start over, copies renewed)
         e = &rs_tab[nrs++];
         memset(e, 0, sizeof *e);
+        rs_store_frame[e - rs_tab] = 0;
         e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
         e->cs_bound = cs_slot;
         if (!cs_slot) e->mode = RS_COPY, e->draw_bound = true;  // a draw's storage read: copied for good (see above)
@@ -3003,7 +3058,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
             c = rs_copy_make(e, range_hash(addr, size));
             return c ? c : addr;
         }
-        if (e->gen == snap_gen) return e->copy;
+        if (e->copy) return e->copy;
         c = rs_copy_make(e, e->hash);
         return c ? c : addr;
     }
@@ -3020,8 +3075,12 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     }
     if (e->mode == RS_PLACE && e->cs_bound && watch_on()) {  // (tracked: the OS's dirty bits decide, no hash)
         if (watch_check(e) != 1) return addr;
-        e->mode = RS_COPY;  // the CPU wrote its pages since the last look: copied from now on
-        rs_log(e, "-> copy (a CPU write seen on its pages)", cs_slot, f);
+        // A write once (an initialisation: BowWow's skinning buffers at his spawn) stays in place; writes that keep
+        // coming (within 8 frames of the previous one) are the CPU rewriting it: copied from now on (renderer.m 1ea4b16)
+        int k = (int)(e - rs_tab);
+        if (!rs_store_frame[k] || f - rs_store_frame[k] > 8) { rs_store_frame[k] = f; return addr; }
+        e->mode = RS_COPY;
+        rs_log(e, "-> copy (CPU writes keep coming on its own pages)", cs_slot, f);
         c = rs_copy_make(e, range_hash(addr, size));
         return c ? c : addr;
     }
@@ -3040,12 +3099,12 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         rs_log(e, "in place -> copy (changed later)", cs_slot, f);
         break;
     case RS_PROBE:  // the use after the probe: did the CPU touch the original meanwhile?
-        if (h == e->hash) { e->mode = RS_PLACE; rs_log(e, "probe -> in place (unchanged)", cs_slot, f); return addr; }
+        if (h == e->hash) { e->mode = RS_PLACE; e->copy = 0; rs_log(e, "probe -> in place (unchanged)", cs_slot, f); return addr; }
         e->mode = RS_COPY;
         rs_log(e, "probe -> copy (the CPU rewrote it)", cs_slot, f);
         break;
     default:  // RS_COPY
-        if (h == e->hash && e->gen == snap_gen) return e->copy;  // unchanged: the copy (maybe GPU-modified) is current
+        if (h == e->hash && e->copy) return e->copy;  // unchanged: the copy (maybe GPU-written: its state) is current
         break;
     }
     c = rs_copy_make(e, h);

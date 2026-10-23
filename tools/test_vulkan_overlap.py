@@ -157,8 +157,12 @@ static void watch_tests(void) {
     assert(snap_storage(A, 32640, true) == A && looks == l + 1);  // (again this frame: no look)
     frame++;
     assert(snap_storage(A, 32640, true) == A && looks == l + 2);  // no CPU write: in place
-    // W2. the CPU writes into it: at its next bind the tracking shows it - a copy for good, kept while unchanged
+    // W2. the CPU writes into it: one write is noted (an initialisation stays in place); writes that keep coming
+    //     (within 8 frames) make it a copy for good, kept while unchanged
     cpu_wrote(A + 100);
+    frame++;
+    assert(snap_storage(A, 32640, true) == A && rs_tab[0].mode == RS_PLACE);
+    cpu_wrote(A + 200);
     frame++;
     uint64_t a1 = snap_storage(A, 32640, true);
     assert(a1 != A && in_ring(a1) && rs_tab[0].mode == RS_COPY && !memcmp((void *)(uintptr_t)a1, heap_mem + 0x1000, 32640));
@@ -166,12 +170,13 @@ static void watch_tests(void) {
     assert(snap_storage(A, 32640, true) == a1);
     // W3. a level change or 10 s unused never demotes a copied range; a data change refreshes it
     level = "Dungeon";
-    frame += 601;
-    assert(snap_storage(A, 32640, true) == a1 && rs_tab[0].mode == RS_COPY);
+    frame += 601;  // (unused 10 s: its copy is released and made again - still a copy)
+    uint64_t a1b = snap_storage(A, 32640, true);
+    assert(a1b != A && in_ring(a1b) && rs_tab[0].mode == RS_COPY);
     heap_mem[0x1000 + 3] ^= 1;
     frame++;
     uint64_t a2 = snap_storage(A, 32640, true);
-    assert(a2 != a1 && rs_tab[0].mode == RS_COPY);
+    assert(a2 != a1b && rs_tab[0].mode == RS_COPY && !memcmp((void *)(uintptr_t)a2, heap_mem + 0x1000, 32640));
     // W4. an in-place tracked range stays in place over a level change (no hash probe, no copy); a GPU write (no
     //     dirty bit) changes nothing
     assert(snap_storage(C, 2048, true) == C && rs_tab[1].mode == RS_PLACE);
@@ -183,6 +188,9 @@ static void watch_tests(void) {
     frame++;
     assert(snap_storage(B, 2048, true) == B && snap_storage(B2, 2048, true) == B2);
     cpu_wrote(B2 + 16);
+    frame++;
+    assert(snap_storage(B, 2048, true) == B && snap_storage(B2, 2048, true) == B2);  // (noted)
+    cpu_wrote(B2 + 32);
     frame++;
     uint64_t b1 = snap_storage(B, 2048, true), b2 = snap_storage(B2, 2048, true);
     assert(b1 != B && b2 != B2 && rs_tab[2].mode == RS_COPY && rs_tab[3].mode == RS_COPY);
@@ -205,17 +213,54 @@ static void watch_tests(void) {
     uint64_t F = HEAP_BASE + 0xA0000;
     frame++;
     assert(snap_storage(F, 2048, true) == F);
-    cpu_wrote(F + 4);
     uint32_t g;
-    assert(pages_cpu_written(F, 4096, 0, &g) == 1);  // (someone else looked: the bits are reset, the page stamped)
+    for (int i = 0; i < 2; i++) {  // (written in two frames, someone else looking first each time)
+        cpu_wrote(F + 4);
+        assert(pages_cpu_written(F, 4096, 0, &g) == 1);  // (the bits are reset, the page stamped)
+        frame++;
+        uint64_t fc = snap_storage(F, 2048, true);
+        assert(i == 0 ? fc == F : (fc != F && rs_tab[6].mode == RS_COPY));
+    }
+    // W9. BowWow's skinning output (22048 bytes, a GPU output the CPU reads back) whose last page holds the dispatch's
+    //     12-byte parameter blocks, which the CPU rewrites every frame: the output stays in place, the params are copied
+    uint64_t S = HEAP_BASE + 0xC0000, P = S + 22048 + 0x40;  // (P on S's last page)
     frame++;
-    assert(snap_storage(F, 2048, true) != F && rs_tab[6].mode == RS_COPY);
-    puts("PASS: write watch - in place + tracked, a CPU write makes a copy for good, no demotion on level / idle, GPU writes ignored, a shared page marks both, a prior write is consumed, draw reads copy, other lookers");
+    assert(snap_storage(S, 22048, true) == S && snap_storage(P, 12, true) == P);
+    for (int i = 0; i < 4; i++) {
+        cpu_wrote(P);
+        frame++;
+        uint64_t sp = snap_storage(P, 12, true);
+        assert(snap_storage(S, 22048, true) == S && rs_tab[7].mode == RS_PLACE);  // (never the output)
+        if (i >= 1) assert(sp != P && rs_tab[8].mode == RS_COPY);              // (the params: written every frame)
+    }
+    cpu_wrote(S + 8);  // a write on one of the output's own pages, then another: that is the CPU's - copied
+    frame++;
+    assert(snap_storage(S, 22048, true) == S);
+    cpu_wrote(S + 8);
+    frame++;
+    assert(snap_storage(S, 22048, true) != S && rs_tab[7].mode == RS_COPY);
+    // W10. a single write (an initialisation) leaves a range in place, also after many frames
+    uint64_t I = HEAP_BASE + 0x100000;
+    frame++;
+    assert(snap_storage(I, 4096, true) == I);
+    cpu_wrote(I);
+    frame++;
+    assert(snap_storage(I, 4096, true) == I);
+    for (int i = 0; i < 20; i++) { frame++; assert(snap_storage(I, 4096, true) == I && rs_tab[9].mode == RS_PLACE); }
+    cpu_wrote(I);  // (a lone write 21 frames later: still not a rewrite)
+    frame++;
+    assert(snap_storage(I, 4096, true) == I && rs_tab[9].mode == RS_PLACE);
+    puts("PASS: write watch - in place + tracked, CPU writes that keep coming make a copy for good (a single one doesn't), no demotion on level / idle, GPU writes ignored, a shared page marks both, a page shared with a small parameter block doesn't, a prior write is consumed, draw reads copy, other lookers");
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    heap_mem = _aligned_malloc(HEAP_MAX, 0x10000);  // (MinGW has no posix_memalign)
+    if (heap_mem) memset(heap_mem, 0, HEAP_MAX);
+#else
     if (posix_memalign((void **)&heap_mem, 0x10000, HEAP_MAX)) heap_mem = NULL;  // (aligned like the real heap base)
     else memset(heap_mem, 0, HEAP_MAX);
+#endif
     assert(heap_mem);
     if (argc > 1 && !strcmp(argv[1], "watch")) { watch_tests(); return 0; }
     if (argc > 1 && !strcmp(argv[1], "notrack")) {  // no OS write tracking (a userptr / dma-buf heap on Linux, no write watch): the probe instead
@@ -284,8 +329,9 @@ int main(int argc, char **argv) {
     assert(h1 != H && in_ring(h1) && rs_tab[3].mode == RS_COPY && rs_tab[3].draw_bound);
     frame++;
     assert(snap_storage(H, 2048, true) == h1 && snap_storage(H, 2048, false) == h1);
-    frame += 601;  // unused for 10 s: still not probed again
-    assert(snap_storage(H, 2048, true) == h1 && rs_tab[3].mode == RS_COPY);
+    frame += 601;  // unused for 10 s: still not probed again (its copy was released: a new one, still a copy)
+    uint64_t h2 = snap_storage(H, 2048, true);
+    assert(h2 != H && in_ring(h2) && rs_tab[3].mode == RS_COPY && !memcmp((void *)(uintptr_t)h2, heap_mem + 0x60000, 2048));
     // 4c. in place from a compute-only probe, then a draw in a later frame (not the same one): copied for good
     uint64_t I = HEAP_BASE + 0x70000;
     frame++;
@@ -315,14 +361,16 @@ int main(int argc, char **argv) {
     assert(snap_storage(A, SNAP_HALF / 2 + 256, true) == A);
     assert(snap_storage(A + 0x4000, SNAP_HALF / 2, true) != A + 0x4000);  // (the largest allowed: a half holds two)
     assert(snap_storage(HEAP_BASE - 4096, 2048, true) == HEAP_BASE - 4096);
-    // 8. the halves: 1 MB copies fill half 0; the switch to half 1 needs no wait (never used); the switch back waits for
-    //    the submission pending when half 0 was left, and an old copy is never bound again after a switch
+    // 8. the halves: 1 MB copies fill half 0; the switch to half 1 needs no wait (never used); a live copy stays where
+    //    it is across the switch (the GPU's writes into it survive); the switch back waits for the submission pending
+    //    when half 0 was left and reuses only freed slots, walking past the live copies
     frame++;
     uint64_t big = SNAP_HALF / 8;
     uint8_t *d = heap_mem + (1ull << 20);
     uint64_t D = HEAP_BASE + (1ull << 20);
     memset(d, 4, big);
-    snap_off = 0; snap_half = 0; snap_gen++;  // (a clean half 0)
+    snap_off = 0; snap_half = 0; snap_gen++;  // (a clean half 0: the earlier cases' copies released)
+    for (int i = 0; i < nrs; i++) rs_tab[i].copy = 0;
     uint64_t keep = snap_storage(D, big, true);  // a COPY candidate: probe copy at the start of half 0
     assert(in_half(keep, 0));
     frame++;
@@ -338,10 +386,10 @@ int main(int argc, char **argv) {
     uint64_t f1 = snap_storage(F, big, true);  // the 9th: half 1, no wait, half 0's users noted as the pending submission
     assert(in_half(f1, 1) && !waited && snap_half == 1 && snap_half_seq[0] == 6);
     frame++;
-    // the old COPY-mode entry, unchanged: its copy in half 0 is NOT bound again (generation): a new copy in half 1
+    // the old COPY-mode entry, unchanged: its live copy in half 0 is bound again (not remade from the original)
     uint64_t keep3 = snap_storage(D, big, true);
-    assert(keep3 != keep2 && in_half(keep3, 1));
-    for (int i = 0; i < 6; i++) {
+    assert(keep3 == keep2 && in_half(keep3, 0));
+    for (int i = 0; i < 7; i++) {  // 7 more fill half 1 (F + 7 x 1 MB)
         uint64_t E = HEAP_BASE + (5ull << 20) + (uint64_t)i * 4096;
         assert(in_half(snap_storage(E, big, true), 1));
     }
@@ -352,8 +400,9 @@ int main(int argc, char **argv) {
     assert(snap_storage(G, big, true) == G && snap_half == 1 && !waited);
     // once submitted (issued 7, still not complete): the switch waits for 6, then takes half 0
     issued = 7; pending = 8;
-    uint64_t g1 = snap_storage(G, big, true);
-    assert(in_half(g1, 0) && waited == 6 && snap_half == 0 && snap_half_seq[1] == 8);
+    uint64_t g1 = snap_storage(G, big, true);  // (half 0's only free slot: the probe copy D left behind; the live copies stay)
+    assert(in_half(g1, 0) && g1 == keep && waited == 6 && snap_half == 0 && snap_half_seq[1] == 8);
+    assert(rs_tab[nrs - 1].copy == g1 && !memcmp((void *)(uintptr_t)keep2, d, big));  // (D's live copy untouched)
     // 9. the game grows its heap into the ring: off, everything in place from then on
     heap_size = snap_base + 4096;
     assert(snap_storage(A, 32640, true) == A && snap_state == 0 && snap_ring_end() == 0);
