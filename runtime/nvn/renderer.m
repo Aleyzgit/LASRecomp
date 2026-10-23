@@ -2104,61 +2104,99 @@ static void bind_textures(int stage, ShaderInfo *si) {
 }
 
 // ---- storage buffers the game rewrites one frame ahead (overlap)
-// The game's tiled light / shadow lists: each frame its CPU memcpys the list for the frame after this one into the
-// buffer the frame being drawn reads (7281e33500+32640 and 7281e3bd00+2040, alternating by frame; f_7000fe5960
+// The game's tiled light / exposure lists: each frame its CPU memcpys the list for the frame after this one into
+// the buffer the frame being drawn reads (7281e33500+32640 and 7281e3bd00+2040, alternating by frame; f_7000fe5960
 // found with LARECOMP_WATCH_ADDR), which the Switch's fence made safe. With the fence deferred that copy lands while
-// the GPU still reads the list: screen-aligned tiles without shadow or darkening (M3 Max at 8x4 render scale: most
-// frames). Storage buffer slots in pools the CPU can write are therefore bound to a copy taken at translation, in
-// a ring at the top of the guest heap range (shaders address storage through the heap buffer, so the copy must
-// live in it; the game's heap never reaches there - it is told 3.2 GB of application memory, the range is 3.25).
-// A copy is reused as long as the guest memory is unchanged since it was taken (hash): a compute dispatch that
-// writes a slot writes the copy, and the draws after it - this frame or later - read that from the same copy, as
-// they read it in place before; a slot a compute program writes stays in place (cs_written_mask) so its readers -
-// draws binding the output as vertex data, later dispatches - find it where the game put it. ~100 KB copied and
-// hashed per frame in the field. LARECOMP_OVERLAP_SNAP=0: off.
+// the GPU still reads the list: screen-aligned tiles without shadow, a dark saturated picture when the exposure
+// program (72a8da6000) reads it - worse the slower the GPU. Other storage data (the skinning program 72a8da0000's
+// outputs in slots 6-9, read in place by the exposure program and by draws binding them as vertex data from an
+// offset into the pool) is only ever written by the GPU and must stay where the game put it.
+// Which is which is decided per memory range from what the CPU does, with no wait and no probe of the programs: a
+// range's first use in a level is a one-frame PROBE, in which every binder - a compute slot, a draw's storage read -
+// works on a copy taken at translation (in a ring at the top of the guest heap range: shaders address storage
+// through the heap buffer, and the game's heap never reaches there), so the GPU cannot touch the original. At the
+// range's next use the original is hashed again: changed, the CPU rewrites it - COPY from then on (a fresh copy
+// whenever its data changes, otherwise the one the GPU may have modified, shared by the compute and all its
+// readers); unchanged, it is GPU-only or static - IN PLACE from then on. A range is probed again when the level
+// changes or after 10 s unused; one that no compute slot ever binds is also moved to COPY if its data changes
+// later. ~100 KB copied and hashed per frame in the field. LARECOMP_OVERLAP_SNAP=0: off (everything in place).
 #define SNAP_RING (16u << 20)
-typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen; } SnapEnt;
-static SnapEnt snap_ents[512];
-static int nsnap_ents;
+enum { RS_PROBE, RS_COPY, RS_PLACE };
+typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen, level; uint8_t mode; bool cs_bound; } RangeState;
+static RangeState rs_tab[512];
+static int nrs;
 static uint64_t snap_ring_base, snap_ring_off;
 static uint32_t snap_gen = 1;  // (bumped when the ring wraps: older copies may be reused by now)
-static int snap_mode;  // LARECOMP_OVERLAP_SNAP=2 (test): compute slots always in place, draws' storage reads copied
-static uint64_t snap_storage(uint64_t addr, uint64_t size) {
+static uint32_t rs_level_gen = 1;
+static bool snap_on(void) {
     static int on = -1;
     if (on < 0) {
         const char *e = ENV("LARECOMP_OVERLAP_SNAP");
         on = (!e || atoi(e) != 0) && overlap_on();
-        snap_mode = e ? atoi(e) : 1;
         if (on) {
             extern uint64_t kernel_heap_size(void);
             snap_ring_base = HEAP_BASE + HEAP_MAX - SNAP_RING;
             if (kernel_heap_size() > HEAP_MAX - SNAP_RING) { on = 0; LOG("[metal] storage snapshots off: the game's heap fills the range\n"); }
-            else LOG("[metal] storage buffers in CPU-writable pools: copies at %llx (%u MB ring)\n", (unsigned long long)snap_ring_base, SNAP_RING >> 20);
+            else LOG("[metal] storage buffers the CPU rewrites: copies at %llx (%u MB ring)\n", (unsigned long long)snap_ring_base, SNAP_RING >> 20);
         }
     }
-    if (!on || !addr || !size || size > SNAP_RING / 8 || addr < HEAP_BASE || addr + size > snap_ring_base) return addr;
+    return on;
+}
+static void rs_level_tick(void) {  // (a new level: every range is probed again on its next use)
+    extern const char *game_level_name(void);
+    static char last[64];
+    const char *lv = game_level_name();
+    if (lv && strncmp(lv, last, sizeof last - 1)) { snprintf(last, sizeof last, "%s", lv); rs_level_gen++; }
+}
+static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
+    uint64_t aligned = (snap_ring_off + 255) & ~255ull;
+    if (aligned + e->size > SNAP_RING) { aligned = 0; snap_gen++; }
+    e->copy = snap_ring_base + aligned;
+    memcpy((void *)(uintptr_t)e->copy, (const void *)(uintptr_t)e->addr, e->size);
+    snap_ring_off = aligned + e->size;
+    e->hash = h, e->gen = snap_gen;
+    return e->copy;
+}
+// The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
+static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
+    if (!snap_on() || !addr || !size || size > SNAP_RING / 8 || addr < HEAP_BASE || addr + size > snap_ring_base) return addr;
     extern int nvn_pool_flags_at(uint64_t addr);
     int pf = nvn_pool_flags_at(addr);
     if (pf < 0 || (pf & 1)) return addr;  // (CPU_NO_ACCESS: static data, nothing to race with)
+    rs_level_tick();
     extern uint64_t renderer_exec_frame(void);
     uint64_t f = renderer_exec_frame();
-    SnapEnt *e = NULL;
-    for (int i = 0; i < nsnap_ents; i++) if (snap_ents[i].addr == addr && snap_ents[i].size == size) { e = &snap_ents[i]; break; }
-    if (e && e->frame == f && e->gen == snap_gen) return e->copy;  // (bound again this frame)
-    uint64_t h = range_hash(addr, size);
-    if (e && e->gen == snap_gen && e->hash == h) { e->frame = f; return e->copy; }  // unchanged: the copy is current
+    RangeState *e = NULL;
+    for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == addr && rs_tab[i].size == size) { e = &rs_tab[i]; break; }
     if (!e) {
-        if (nsnap_ents == 512) { nsnap_ents = 0; snap_gen++; }  // (table full: start over, copies renewed)
-        e = &snap_ents[nsnap_ents++];
-        e->addr = addr, e->size = size;
+        if (nrs == 512) { nrs = 0; snap_gen++; }  // (table full: start over, copies renewed)
+        e = &rs_tab[nrs++];
+        memset(e, 0, sizeof *e);
+        e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f - 1;
+        e->cs_bound = cs_slot;
+        return rs_copy_make(e, range_hash(addr, size));  // the probe frame
     }
-    uint64_t aligned = (snap_ring_off + 255) & ~255ull;
-    if (aligned + size > SNAP_RING) { aligned = 0; snap_gen++; }
-    e->copy = snap_ring_base + aligned;
-    memcpy((void *)(uintptr_t)e->copy, (const void *)(uintptr_t)addr, size);
-    snap_ring_off = aligned + size;
-    e->hash = h, e->frame = f, e->gen = snap_gen;
-    return e->copy;
+    if (cs_slot) e->cs_bound = true;
+    if (e->frame == f) return e->mode == RS_PLACE ? addr : (e->gen == snap_gen ? e->copy : rs_copy_make(e, e->hash));  // (bound again this frame)
+    bool again = e->level != rs_level_gen || f - e->frame > 600;  // (a new level, or unused: probe again)
+    e->level = rs_level_gen;
+    e->frame = f;
+    if (e->mode == RS_PLACE && !again && e->cs_bound) return addr;
+    uint64_t h = range_hash(addr, size);
+    if (again) { e->mode = RS_PROBE; return rs_copy_make(e, h); }
+    switch (e->mode) {
+    case RS_PLACE:  // (never a compute slot's: a change can only be the CPU's)
+        if (h == e->hash) return addr;
+        e->mode = RS_COPY;
+        return rs_copy_make(e, h);
+    case RS_PROBE:  // the use after the probe: did the CPU touch the original meanwhile?
+        if (h == e->hash) { e->mode = RS_PLACE; return addr; }
+        e->mode = RS_COPY;
+        return rs_copy_make(e, h);
+    default:  // RS_COPY
+        if (h == e->hash && e->gen == snap_gen) return e->copy;  // unchanged: the copy (maybe GPU-modified) is current
+        return rs_copy_make(e, h);
+    }
 }
 
 static void bind_cbufs(int stage, ShaderInfo *si) {
@@ -2172,7 +2210,7 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
             for (int i = 0; i < 16; i++) {
                 uint32_t *e = &drv[(base + 16 * i) / 4];
                 uint64_t sa = st.sbuf[stage][i].addr;
-                if (sa && (si->ssbo_read & (1u << i))) { bind_note(2, sa, st.sbuf[stage][i].size); sa = snap_storage(sa, st.sbuf[stage][i].size); }
+                if (sa && (si->ssbo_read & (1u << i))) { bind_note(2, sa, st.sbuf[stage][i].size); sa = snap_storage(sa, st.sbuf[stage][i].size, false); }
                 e[0] = (uint32_t)sa;
                 e[1] = (uint32_t)(sa >> 32);
                 e[2] = (uint32_t)st.sbuf[stage][i].size;
@@ -2316,27 +2354,6 @@ static CsProg *compute_program(NvnProgram *p) {
     return cp;
 }
 
-// Which storage slots a compute program writes: learned from its first dispatches, each run to completion with the
-// slot ranges hashed before and after (three dispatches, so a slot written only on some runs is still seen; a few
-// ms once per program, the game has ~4). Until learned, every slot counts as written (in place, as before).
-typedef struct { uint64_t cs; uint32_t written; int probes; } CsWrites;
-static CsWrites cs_writes[64];
-static int ncs_writes;
-// (keyed by the NVN program's code address: a CsProg prepared on the start screen has none of its own, and keying
-// by that shared 0 made every program take the first one's mask - BowWow's skinning output snapshotted away)
-static CsWrites *cs_writes_of(uint64_t cs) {
-    if (!cs) return NULL;
-    for (int i = 0; i < ncs_writes; i++) if (cs_writes[i].cs == cs) return &cs_writes[i];
-    if (ncs_writes == 64) return NULL;
-    CsWrites *w = &cs_writes[ncs_writes++];
-    w->cs = cs, w->written = 0, w->probes = 0;
-    return w;
-}
-static uint32_t cs_written_mask(uint64_t cs) {
-    CsWrites *w = cs_writes_of(cs);
-    return w && w->probes >= 3 ? w->written : 0xFFFFu;
-}
-
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
     {   // (debug) LARECOMP_WATCH_ADDR: the data watchpoint (dispatch.c) armed once the game draws
@@ -2371,7 +2388,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                 // a slot this program writes stays in place (its readers - draws binding the output as vertex data,
                 // the next frame's dispatches - take it from there); the others are its inputs: snapshotted
                 uint64_t sa = st.sbuf[5][i].addr;
-                if (sa && snap_mode != 2 && !(cs_written_mask(st.program->stages[5].code_addr) & (1u << i))) sa = snap_storage(sa, st.sbuf[5][i].size);
+                if (sa) sa = snap_storage(sa, st.sbuf[5][i].size, true);
                 e[0] = (uint32_t)sa; e[1] = (uint32_t)(sa >> 32); e[2] = (uint32_t)st.sbuf[5][i].size;
             }
             off = ring_alloc(drv, sizeof drv);
@@ -2468,18 +2485,8 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             if (r.addr) bind_note(3, r.addr, r.size);
         }
     }
-    CsWrites *learn = overlap_on() && snap_mode != 2 ? cs_writes_of(st.program->stages[5].code_addr) : NULL;
-    uint64_t learn_before[16];
-    if (learn && learn->probes < 3)
-        for (int i = 0; i < 16; i++) learn_before[i] = st.sbuf[5][i].addr ? range_hash(st.sbuf[5][i].addr, st.sbuf[5][i].size) : 0;
     [ce dispatchThreadgroups:MTLSizeMake(gx, gy, gz) threadsPerThreadgroup:MTLSizeMake(cp->local[0], cp->local[1], cp->local[2])];
     [ce endEncoding];
-    if (learn && learn->probes < 3) {
-        renderer_flush();
-        for (int i = 0; i < 16; i++)
-            if (st.sbuf[5][i].addr && range_hash(st.sbuf[5][i].addr, st.sbuf[5][i].size) != learn_before[i]) learn->written |= 1u << i;
-        if (++learn->probes == 3) LOG("[metal] compute %llx writes storage slots %#x\n", (unsigned long long)learn->cs, learn->written);
-    }
     if (probe) {
         extern int nvn_pool_flags_at(uint64_t addr);
         static struct { uint64_t cs; uint32_t read, written, after, flags_in, flags_w; } seen[64];
