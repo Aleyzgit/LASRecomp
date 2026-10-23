@@ -222,6 +222,14 @@ void rec_init(bool prof_on) {
 }
 
 // ================================================================== waits
+// A wait on the recorder this long (a quarter second) is logged: the recorder was stuck in a driver call (a slow
+// vkQueueSubmit2 / vkQueuePresentKHR is logged too, just before) or the whole process stalled
+static void slow_wait(const char *what, uint64_t ns) {
+    if (ns <= 250000000) return;
+    static _Atomic int n;
+    if (atomic_fetch_add_explicit(&n, 1, memory_order_relaxed) < 20) LOG("[vk] recorder: a wait for %s took %llu ms\n", what, (unsigned long long)(ns / 1000000));
+}
+
 uint64_t rec_submitted(void) { return atomic_load_explicit(&submitted, memory_order_acquire); }
 uint64_t rec_presents_queued(void) { return presents_queued; }
 
@@ -233,8 +241,10 @@ void rec_wait_submitted(uint64_t seq) {
     while (rec_submitted() < seq) timed_wait(&cv_done, 2000000);
     pthread_mutex_unlock(&mu);
     rq_watch(NULL, 0);
+    uint64_t dt = NOW() - t0;
     ADD(a_seq_waits, 1);
-    ADD(a_seq_wait_ns, NOW() - t0);
+    ADD(a_seq_wait_ns, dt);
+    slow_wait("a submission", dt);
 }
 
 void rec_wait_presents(uint64_t n) {
@@ -245,20 +255,29 @@ void rec_wait_presents(uint64_t n) {
     while (atomic_load_explicit(&presents_done, memory_order_acquire) < n) timed_wait(&cv_done, 2000000);
     pthread_mutex_unlock(&mu);
     rq_watch(NULL, 0);
+    uint64_t dt = NOW() - t0;
     ADD(a_present_waits, 1);
-    ADD(a_present_wait_ns, NOW() - t0);
+    ADD(a_present_wait_ns, dt);
+    slow_wait("the last present", dt);
 }
 
 static void drain_to(uint64_t upto, uint64_t *n, uint64_t *ns) {
-    if (atomic_load_explicit(&tail, memory_order_acquire) >= upto) return;
+    uint64_t at = atomic_load_explicit(&tail, memory_order_acquire);
+    if (at >= upto) return;
     uint64_t t0 = NOW();
     rq_watch("the recorder (drain)", upto);
     pthread_mutex_lock(&mu);
     while (atomic_load_explicit(&tail, memory_order_acquire) < upto) timed_wait(&cv_done, 2000000);
     pthread_mutex_unlock(&mu);
     rq_watch(NULL, 0);
+    uint64_t dt = NOW() - t0;
     (*n)++;
-    *ns += NOW() - t0;
+    *ns += dt;
+    if (dt > 250000000) {  // (a backlog of packets, or the recorder stuck in one driver call: see slow_wait)
+        static int k;
+        if (k++ < 20) LOG("[vk] recorder: a drain took %llu ms (%llu KB of packets behind)\n", (unsigned long long)(dt / 1000000),
+                          (unsigned long long)((upto - at) / 1024));
+    }
 }
 void rec_drain(void) {
     if (on <= 0) return;
@@ -540,9 +559,16 @@ static void submit_run(const void *p) {
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = a->ncb, .pCommandBufferInfos = a->cbs,
                         .signalSemaphoreInfoCount = a->nsig, .pSignalSemaphoreInfos = a->sig,
                         .waitSemaphoreInfoCount = a->nwait, .pWaitSemaphoreInfos = &a->wait};
-    uint64_t t0 = prof ? NOW() : 0;
+    uint64_t t0 = NOW();
+    rq_watch("vkQueueSubmit2", a->seq);  // (a hang dump names it)
     VkResult r = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
-    if (prof) ADD(r_submit_ns, NOW() - t0);
+    rq_watch(NULL, 0);
+    uint64_t dt = NOW() - t0;
+    if (prof) ADD(r_submit_ns, dt);
+    if (dt > 50000000) {  // (a driver stall: a slow drain or wait on the recorder shows where it was)
+        static int n;
+        if (n++ < 20) LOG("[vk] vkQueueSubmit2 of submission %llu took %llu ms\n", (unsigned long long)a->seq, (unsigned long long)(dt / 1000000));
+    }
     if (r == VK_ERROR_DEVICE_LOST) { extern void vk_devlost_dump(void); vk_devlost_dump(); }
     VK_CHECK(r);
     atomic_store_explicit(&submitted, a->seq, memory_order_release);
@@ -574,7 +600,12 @@ static void present_run(const void *p) {
     rq_watch("vkQueuePresentKHR", a->image);
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
     rq_watch(NULL, 0);
-    __atomic_fetch_add(&g_vk_frame_waits[2], NOW() - t0, __ATOMIC_RELAXED);
+    uint64_t dt = NOW() - t0;
+    __atomic_fetch_add(&g_vk_frame_waits[2], dt, __ATOMIC_RELAXED);
+    if (dt > 250000000) {  // (FIFO waits for the display, a few ms; this long is a stall in the driver or the compositor)
+        static int n;
+        if (n++ < 20) LOG("[vk] vkQueuePresentKHR took %llu ms\n", (unsigned long long)(dt / 1000000));
+    }
     __atomic_fetch_add(&g_vk_frame_waits[3], 1, __ATOMIC_RELAXED);
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) atomic_store_explicit(&present_recreate, 1, memory_order_release);
     else if (r != VK_SUCCESS) {
@@ -814,6 +845,23 @@ void rec_CmdPushConstants(VkCommandBuffer cb, VkPipelineLayout layout, VkShaderS
     CmdPushConstantsArgs *a = push(CmdPushConstants_run, sizeof *a, size);
     *a = (CmdPushConstantsArgs){cb, layout, stages, off, size};
     memcpy(after(a, sizeof *a), data, size);
+    commit();
+    ENQ_END();
+}
+
+// (device.c's overlay: secondary command buffers the presenting thread recorded and ended before queuing this; their pool
+// is not touched again until the GPU finished the submission that executes them)
+CMD_ARGS(CmdExecuteCommands, uint32_t n;)  // then VkCommandBuffer[n]
+static void CmdExecuteCommands_run(const void *p) {
+    const CmdExecuteCommandsArgs *a = p;
+    vkCmdExecuteCommands(a->cb, a->n, after(a, sizeof *a));
+}
+void rec_CmdExecuteCommands(VkCommandBuffer cb, uint32_t n, const VkCommandBuffer *cbs) {
+    if (on <= 0) { vkCmdExecuteCommands(cb, n, cbs); return; }
+    ENQ_T0();
+    CmdExecuteCommandsArgs *a = push(CmdExecuteCommands_run, sizeof *a, n * sizeof *cbs);
+    *a = (CmdExecuteCommandsArgs){cb, n};
+    memcpy(after(a, sizeof *a), cbs, n * sizeof *cbs);
     commit();
     ENQ_END();
 }
