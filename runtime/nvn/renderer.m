@@ -1154,9 +1154,12 @@ static void bind_note(int kind, uint64_t addr, uint64_t size) {
     if (pf < 0 || !(pf & 1)) wr[kind] += size;  // (distinct bytes in pools the CPU can write: what a snapshot would copy)
 }
 
+static void snap_note_vertex_bind(uint64_t addr, uint64_t size);
+extern uint64_t renderer_exec_frame(void);
 static void bind_guest(id<MTLRenderCommandEncoder> e, bool vertex_stage, uint64_t addr, uint64_t size, int index) {
     if (addr >= HEAP_BASE && addr + size <= HEAP_BASE + HEAP_MAX && (addr & 3) == 0) {
         bind_note(0, addr, size);
+        snap_note_vertex_bind(addr, size);  // (LARECOMP_LOG_BINDS: a vertex bind overlapping a copied range - none known)
         if (vertex_stage) [e setVertexBuffer:g_guest_buffer offset:addr - HEAP_BASE atIndex:index];
         else [e setFragmentBuffer:g_guest_buffer offset:addr - HEAP_BASE atIndex:index];
         return;
@@ -2131,7 +2134,7 @@ typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen, level; ui
 static RangeState rs_tab[512];
 static int nrs;
 static uint64_t snap_ring_base, snap_ring_off;
-static uint32_t snap_gen = 1;  // (bumped when the ring wraps: older copies may be reused by now)
+static uint32_t snap_gen = 1;  // (bumped when the table starts over)
 static uint32_t rs_level_gen = 1;
 static bool snap_on(void) {
     static int on = -1;
@@ -2158,14 +2161,43 @@ static void rs_log(RangeState *e, const char *what, bool cs_slot, uint64_t f) { 
     if (e->size >= 2040 ? n < 100000 : n++ < 200)  // (the small per-object ranges are many: capped)
         LOG("[snap] %llx+%llu %s (%s bind, frame %llu)\n", (unsigned long long)e->addr, (unsigned long long)e->size, what, cs_slot ? "compute" : "draw", (unsigned long long)f);
 }
+// A copy lives until its entry remakes it (the original changed) or releases it (unused for 10 s): the ring
+// allocator walks past live copies, so a ring wrap no longer remakes every copy from its original (which lost the
+// GPU's own modifications of a copy - the exposure program's writes into the lists - for a frame). A slot freed by
+// a remake is reused only after the ring comes round (16 MB of copies later), long after the GPU work that read it.
 static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
-    uint64_t aligned = (snap_ring_off + 255) & ~255ull;
-    if (aligned + e->size > SNAP_RING) { aligned = 0; snap_gen++; }
-    e->copy = snap_ring_base + aligned;
+    uint64_t need = (e->size + 255) & ~255ull, at = (snap_ring_off + 255) & ~255ull;
+    for (int pass = 0; pass < 2; pass++) {
+        if (at + need > SNAP_RING) at = 0;
+        bool moved = true;
+        while (moved && at + need <= SNAP_RING) {
+            moved = false;
+            for (int i = 0; i < nrs; i++) {
+                RangeState *o = &rs_tab[i];
+                if (o == e || !o->copy) continue;
+                uint64_t olo = o->copy - snap_ring_base, ohi = (olo + o->size + 255) & ~255ull;
+                if (at < ohi && at + need > olo) { at = ohi; moved = true; }
+            }
+        }
+        if (at + need <= SNAP_RING) break;
+        at = 0;  // (ran off the end skipping live copies: once more from the start)
+    }
+    if (at + need > SNAP_RING) {  // (the ring is all live copies: not in practice - 512 entries, most far smaller)
+        static int warned; if (warned++ < 3) LOG("[snap] copy ring full: %llx+%llu in place\n", (unsigned long long)e->addr, (unsigned long long)e->size);
+        e->copy = 0; e->hash = h;
+        return e->addr;
+    }
+    e->copy = snap_ring_base + at;
     memcpy((void *)(uintptr_t)e->copy, (const void *)(uintptr_t)e->addr, e->size);
-    snap_ring_off = aligned + e->size;
+    snap_ring_off = at + need;
     e->hash = h, e->gen = snap_gen;
     return e->copy;
+}
+static void rs_release_unused(uint64_t f) {  // (every 600 frames) copies of entries unbound for 10 s go back to the ring
+    static uint64_t last;
+    if (f - last < 600) return;
+    last = f;
+    for (int i = 0; i < nrs; i++) if (rs_tab[i].copy && f - rs_tab[i].frame > 600) rs_tab[i].copy = 0;
 }
 // Write watch (compute-only ranges). The CPU's rewrite of a range can't be seen in its bytes (the light lists are
 // rewritten with the same bytes while the view stands still, and the race is the GPU reading them mid-rewrite), so it
@@ -2178,7 +2210,10 @@ static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
 #define WATCH_PAGES 64
 static struct { uint64_t page; volatile int armed; } watch_pages[WATCH_PAGES];
 static int nwatch_pages;
-static volatile int rs_cpu_wrote[512];  // (by entry index, set by the fault handler)
+static volatile int rs_cpu_wrote[512];  // (by entry index, set by the fault handler: a store hit the range's page)
+static uint8_t rs_hit_inside[512];      // (a store was ever seen inside the range itself, not just on its page)
+static uint64_t rs_store_frame[512];    // the frame of the previous counted store (a one-off initialisation store of
+                                        // a GPU output - BowWow's skinning buffers at his spawn - must not copy it)
 bool renderer_watch_fault(uint64_t fa);
 static bool watch_on(void) {
     static int on = -1;
@@ -2189,13 +2224,25 @@ static bool watch_on(void) {
     }
     return on;
 }
+static uint64_t watch_stat_ns, watch_stat_arms, watch_stat_faults, watch_stat_frame;  // (diagnostics: the cost per frame)
+static void watch_stat_tick(uint64_t f) {
+    if (f == watch_stat_frame) return;
+    if (watch_stat_ns > 2000000 || (ENV("LARECOMP_LOG_BINDS") && f % 120 == 0))
+        LOG("[watch] frame %llu: %llu arms, %llu faults, %.2f ms in mprotect\n", (unsigned long long)watch_stat_frame, (unsigned long long)watch_stat_arms,
+            (unsigned long long)watch_stat_faults, watch_stat_ns / 1e6);
+    watch_stat_frame = f; watch_stat_ns = watch_stat_arms = watch_stat_faults = 0;
+}
 static void watch_arm_range(const RangeState *e) {
     uint64_t lo = e->addr & ~(PLAT_PAGE - 1), hi = (e->addr + e->size + PLAT_PAGE - 1) & ~(PLAT_PAGE - 1);
     for (uint64_t pg = lo; pg < hi; pg += PLAT_PAGE) {
         int i = 0;
         for (; i < nwatch_pages; i++) if (watch_pages[i].page == pg) break;
         if (i == nwatch_pages) { if (nwatch_pages == WATCH_PAGES) return; watch_pages[nwatch_pages++].page = pg; watch_pages[i].armed = 0; }
-        if (!watch_pages[i].armed && plat_protect(pg, PLAT_PAGE, PLAT_PROT_READ) == 0) watch_pages[i].armed = 1;
+        if (!watch_pages[i].armed) {
+            uint64_t t0 = plat_now_ns();
+            if (plat_protect(pg, PLAT_PAGE, PLAT_PROT_READ) == 0) watch_pages[i].armed = 1;
+            watch_stat_ns += plat_now_ns() - t0; watch_stat_arms++;
+        }
     }
 }
 // The platform's fault handler: a store to a watched page (any thread). Opens the page; true when it was ours.
@@ -2204,14 +2251,53 @@ bool renderer_watch_fault(uint64_t fa) {
     int i = 0;
     for (; i < nwatch_pages; i++) if (watch_pages[i].page == pg) break;
     if (i == nwatch_pages) return false;
+    uint64_t t0 = plat_now_ns();
     plat_protect(pg, PLAT_PAGE, PLAT_PROT_RW);
+    watch_stat_ns += plat_now_ns() - t0; watch_stat_faults++;
     watch_pages[i].armed = 0;
-    // every watched range on the page: the page stays open until it is armed again, so a store into a neighbour
-    // range on it would go unseen (the three lists share a page) - marked as possibly written, copied, the safe side
-    for (int k = 0; k < nrs; k++) if (rs_tab[k].addr < pg + PLAT_PAGE && pg < rs_tab[k].addr + rs_tab[k].size) rs_cpu_wrote[k] = 1;
+    {   // (debug) LARECOMP_LOG_FAULTS=<from>,<to>: every store fault in those frames: address, the range it is in, the storing function
+        static long lf = -1, lt; static int nl;
+        if (lf < 0) { const char *x = ENV("LARECOMP_LOG_FAULTS"); lf = 0; if (x) sscanf(x, "%ld,%ld", &lf, &lt); }
+        uint64_t f = renderer_exec_frame();
+        if (lf && (long)f >= lf && (long)f <= lt && nl++ < 400) {
+            extern uint64_t g_fault_lr; extern const char *rt_host_sym(uint64_t pc, uint64_t *off);
+            uint64_t lo = 0; const char *ls = rt_host_sym(g_fault_lr, &lo);
+            int in = -1; for (int k = 0; k < nrs; k++) if (fa >= rs_tab[k].addr && fa < rs_tab[k].addr + rs_tab[k].size) in = k;
+            LOG("[fault] frame %llu store at %llx (page %llx) %s %llx+%llu by %s+%llx\n", (unsigned long long)f, (unsigned long long)fa, (unsigned long long)pg,
+                in >= 0 ? "inside" : "outside every range; nearest?", in >= 0 ? (unsigned long long)rs_tab[in].addr : 0ull, in >= 0 ? (unsigned long long)rs_tab[in].size : 0ull, ls ? ls : "?", (unsigned long long)lo);
+        }
+    }
+    // The range holding the address is marked. The page stays open until it is armed again, so a store into a
+    // neighbour range on it goes unseen: the three light / exposure lists are one contiguous allocation the CPU
+    // memcpys in one go and share a page (Kanalet Castle, interiors: the big list's store opened the page, the two
+    // small lists' stores were never seen), so a store inside a list marks every watched range on its page too.
+    // Not so a store into a small parameter block (the skinning dispatch's 12-byte slot 5, rewritten every frame):
+    // it says nothing about the buffers beside it, and marking them copied BowWow's skinning output, which the
+    // CPU reads back every frame (f_700102d0f4: the body's chain) - read from the frozen original once the dispatch
+    // wrote the copy, the body came apart into spikes as a companion indoors. A store outside every range (per-frame
+    // constants next to a buffer) only opens the page. LARECOMP_LOG_BINDS: "[snap] ... never inside" shows what
+    // this marked by neighbourhood.
+    int x = -1;
+    for (int k = 0; k < nrs; k++) if (fa >= rs_tab[k].addr && fa < rs_tab[k].addr + rs_tab[k].size) { x = k; break; }
+    if (x >= 0) {
+        rs_hit_inside[x] = 1;
+        rs_cpu_wrote[x] = 2;  // (the store was inside the range itself)
+        if (rs_tab[x].size >= 256)
+            for (int k = 0; k < nrs; k++)
+                if (k != x && rs_tab[k].addr < pg + PLAT_PAGE && pg < rs_tab[k].addr + rs_tab[k].size && !rs_cpu_wrote[k]) rs_cpu_wrote[k] = 1;
+    }
     return true;
 }
 
+static void snap_note_vertex_bind(uint64_t addr, uint64_t size) {  // (LARECOMP_LOG_BINDS) reads the original, not the copy
+    static int on = -1, n;
+    if (on < 0) on = ENV("LARECOMP_LOG_BINDS") != NULL;
+    if (!on || n >= 40) return;
+    for (int i = 0; i < nrs; i++)
+        if (rs_tab[i].mode == RS_COPY && rs_tab[i].copy && addr < rs_tab[i].addr + rs_tab[i].size && addr + size > rs_tab[i].addr) {
+            n++; LOG("[snap] vertex bind %llx+%llu overlaps copied %llx+%llu (%s, frame %llu)\n", (unsigned long long)addr, (unsigned long long)size, (unsigned long long)rs_tab[i].addr, (unsigned long long)rs_tab[i].size, addr < rs_tab[i].addr ? "from outside" : "inside", (unsigned long long)renderer_exec_frame());
+        }
+}
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
 static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     if (!snap_on() || !addr || !size || size > SNAP_RING / 8 || addr < HEAP_BASE || addr + size > snap_ring_base) return addr;
@@ -2221,6 +2307,8 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     rs_level_tick();
     extern uint64_t renderer_exec_frame(void);
     uint64_t f = renderer_exec_frame();
+    rs_release_unused(f);
+    watch_stat_tick(f);
     RangeState *e = NULL;
     for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == addr && rs_tab[i].size == size) { e = &rs_tab[i]; break; }
     if (!e) {
@@ -2232,20 +2320,38 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         // touch and settle it in place for good; that left the race on the beach at 4x on an M6)
         e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
         e->cs_bound = cs_slot;
-        rs_cpu_wrote[e - rs_tab] = 0;
+        rs_cpu_wrote[e - rs_tab] = 0, rs_store_frame[e - rs_tab] = 0, rs_hit_inside[e - rs_tab] = 0;
+        {   // (debug) LARECOMP_WATCH_SIZE=<size>,<frame>,<page>,<frames>: the data watchpoint (dispatch.c, any access, the
+            // GPU stalls on the protected page) on page <page> of the first range of that size bound from <frame>, for <frames> frames
+            static long ws = -1, wf, wp, wn; static bool armed; static uint64_t at;
+            if (ws < 0) { const char *x = ENV("LARECOMP_WATCH_SIZE"); ws = 0; if (x) sscanf(x, "%ld,%ld,%ld,%ld", &ws, &wf, &wp, &wn); }
+            if (ws && !armed && (long)size == ws && (long)f >= wf) {
+                extern uint64_t g_watch_lo, g_watch_hi; extern void watch_arm(void);
+                armed = true; at = f; g_watch_lo = addr + wp * PLAT_PAGE; g_watch_hi = addr + size; watch_arm();
+                LOG("[snap] data watch on %llx+%llu from %llx (frame %llu)\n", (unsigned long long)addr, (unsigned long long)size, (unsigned long long)g_watch_lo, (unsigned long long)f);
+            }
+            extern volatile int g_watch_stop;
+            if (armed && !g_watch_stop && f > at + wn) { g_watch_stop = 1; LOG("[snap] data watch off (frame %llu)\n", (unsigned long long)f); }
+        }
         if (!cs_slot) { e->mode = RS_COPY; e->draw_bound = true; rs_log(e, "new: copy (a draw's storage read)", cs_slot, f); return rs_copy_make(e, range_hash(addr, size)); }
         if (watch_on()) { e->mode = RS_PLACE; watch_arm_range(e); rs_log(e, "new: in place, watched for CPU stores", cs_slot, f); return addr; }
         rs_log(e, "new: probe", cs_slot, f);
         return rs_copy_make(e, range_hash(addr, size));  // the probe frame
     }
     if (cs_slot) e->cs_bound = true; else e->draw_bound = true;
-    if (e->mode != RS_COPY && rs_cpu_wrote[e - rs_tab]) {  // the CPU stored into it: copied from now on
-        e->mode = RS_COPY;
-        rs_log(e, "-> copy (a CPU store hit its page)", cs_slot, f);
-        e->frame = f;
-        return rs_copy_make(e, range_hash(addr, size));
+    if (e->mode != RS_COPY && rs_cpu_wrote[e - rs_tab]) {  // a CPU store hit its page since the last bind
+        int k = (int)(e - rs_tab);
+        int inside = rs_cpu_wrote[k] == 2;
+        rs_cpu_wrote[k] = 0;
+        if (rs_store_frame[k] && f - rs_store_frame[k] <= 8) {  // stores keep coming: the CPU rewrites it - copied from now on
+            e->mode = RS_COPY;
+            rs_log(e, inside ? "-> copy (CPU stores keep hitting it)" : rs_hit_inside[k] ? "-> copy (CPU stores keep hitting its page; one was inside)" : "-> copy (CPU stores keep hitting its page, never inside)", cs_slot, f);
+            e->frame = f;
+            return rs_copy_make(e, range_hash(addr, size));
+        }
+        rs_store_frame[k] = f;  // (one store so far: an initialisation, or the first of many - the next one decides)
     }
-    if (e->frame == f) return e->mode == RS_PLACE ? addr : (e->gen == snap_gen ? e->copy : rs_copy_make(e, e->hash));  // (bound again this frame)
+    if (e->frame == f) return e->mode == RS_PLACE ? addr : (e->copy ? e->copy : rs_copy_make(e, e->hash));  // (bound again this frame)
     // probe again on a new level or after 10 s unused - only the hash fallback: a copied range stays copied (a
     // draw's storage read, a CPU store seen), a watched one just gets its pages armed again
     bool again = !watch_on() && e->mode == RS_PLACE && (e->level != rs_level_gen || f - e->frame > 600);
@@ -2267,12 +2373,20 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         rs_log(e, "in place -> copy (changed later)", cs_slot, f);
         return rs_copy_make(e, h);
     case RS_PROBE:  // the use after the probe: did the CPU touch the original meanwhile?
-        if (h == e->hash) { e->mode = RS_PLACE; rs_log(e, "probe -> in place (unchanged)", cs_slot, f); return addr; }
+        if (h == e->hash) { e->mode = RS_PLACE; e->copy = 0; rs_log(e, "probe -> in place (unchanged)", cs_slot, f); return addr; }
         e->mode = RS_COPY;
         rs_log(e, "probe -> copy (the CPU rewrote it)", cs_slot, f);
         return rs_copy_make(e, h);
     default:  // RS_COPY
-        if (h == e->hash && e->gen == snap_gen) return e->copy;  // unchanged: the copy (maybe GPU-modified) is current
+        {   static int on = -1, n; if (on < 0) on = ENV("LARECOMP_LOG_BINDS") != NULL;
+            if (on && n < 200 && size >= 2040) {
+                uint64_t hc = e->copy ? range_hash(e->copy, size) : 0;
+                static int quiet;  // (the GPU-written ones, and the first 40 of the rest)
+                if ((e->copy && hc != e->hash) || quiet++ < 40) { n++;
+                LOG("[snap] copied %llx+%llu at frame %llu: original %s, copy %s (%s bind)\n", (unsigned long long)addr, (unsigned long long)size, (unsigned long long)f,
+                    h == e->hash ? "unchanged" : "CHANGED", !e->copy ? "released" : hc == e->hash ? "unchanged" : "GPU-written", cs_slot ? "compute" : "draw"); } }
+        }
+        if (h == e->hash && e->copy) return e->copy;  // unchanged: the copy (maybe GPU-written: its state) is current
         return rs_copy_make(e, h);
     }
 }
@@ -2421,6 +2535,12 @@ static CsProg *compute_program(NvnProgram *p) {
     cp->code_addr = ss->code_addr;
     memcpy(cp->local, local, sizeof local);
     if (!translate_compute(cp, (const uint8_t *)(uintptr_t)ss->code_addr, ss->const_offset ? ss->const_offset : 0x10000)) return NULL;
+    if (getenv("LARECOMP_SAVE_MSL") && cp->si && cp->si->msl) {  // (debug, as the draw programs': build/msl/<code addr>_cs.metal)
+        mkdir("build/msl", 0755);
+        char path[256];
+        snprintf(path, sizeof path, "build/msl/%llx_cs.metal", (unsigned long long)ss->code_addr);
+        FILE *f = fopen(path, "w"); if (f) { fputs(cp->si->msl, f); fclose(f); }
+    }
     if (sync_shaders()) {
         compile_compute(cp);
         return cp->failed ? NULL : cp;
@@ -2463,10 +2583,21 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                 uint32_t *u = &drv[(0x210 + 16 * i) / 4];
                 if (i < 18) { u[0] = (uint32_t)st.ubuf[5][i].addr; u[1] = (uint32_t)(st.ubuf[5][i].addr >> 32); u[2] = (uint32_t)st.ubuf[5][i].size; }
                 uint32_t *e = &drv[(0x310 + 16 * i) / 4];
-                // a slot this program writes stays in place (its readers - draws binding the output as vertex data,
-                // the next frame's dispatches - take it from there); the others are its inputs: snapshotted
+                // every slot goes through the snapshot table: inputs the CPU rewrites are read from a copy; a slot the
+                // program writes (BowWow's soft-body state, LARECOMP_SSBO_PROBE=1 shows which) is copied only when its
+                // pages are shared with CPU-written data, and then its copy holds the GPU's state for good (rs_copy_make)
                 uint64_t sa = st.sbuf[5][i].addr;
-                if (sa) sa = snap_storage(sa, st.sbuf[5][i].size, true);
+                if (sa) {
+                    static int on = -1, n; if (on < 0) on = ENV("LARECOMP_LOG_BINDS") != NULL;
+                    static struct { uint64_t cs, size; int slot; } seen[64]; static int nseen;
+                    if (on && n < 64) {
+                        uint64_t cs = st.program->stages[5].code_addr; int j = 0;
+                        for (; j < nseen; j++) if (seen[j].cs == cs && seen[j].slot == i && seen[j].size == st.sbuf[5][i].size) break;
+                        if (j == nseen) { seen[nseen].cs = cs; seen[nseen].slot = i; seen[nseen++].size = st.sbuf[5][i].size; n++;
+                            LOG("[snap] compute %llx slot %d %llx+%llu gmem %d store %d (frame %llu)\n", (unsigned long long)cs, i, (unsigned long long)sa, (unsigned long long)st.sbuf[5][i].size, si->uses_gmem, si->uses_gmem_store, (unsigned long long)renderer_exec_frame()); }
+                    }
+                    sa = snap_storage(sa, st.sbuf[5][i].size, true);
+                }
                 e[0] = (uint32_t)sa; e[1] = (uint32_t)(sa >> 32); e[2] = (uint32_t)st.sbuf[5][i].size;
             }
             off = ring_alloc(drv, sizeof drv);
@@ -2549,6 +2680,14 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         LOG(" ubo:");
         for (int i = 0; i < 18; i++) if (st.ubuf[5][i].addr) LOG(" %d(%llx,%llu)", i, st.ubuf[5][i].addr, st.ubuf[5][i].size);
         LOG(" gmem %d\n", si->uses_gmem);
+        for (int i = 0; i < 16; i++) if (st.sbuf[5][i].addr && st.sbuf[5][i].size <= 64) {
+            const uint32_t *u = (const uint32_t *)(uintptr_t)st.sbuf[5][i].addr; LOG("[dispatch]   ssbo %d words:", i);
+            for (uint64_t k = 0; k < st.sbuf[5][i].size / 4; k++) LOG(" %08x", u[k]); LOG("\n");
+        }
+        for (int i = 0; i < 18; i++) if (st.ubuf[5][i].addr && st.ubuf[5][i].size <= 64) {
+            const uint32_t *u = (const uint32_t *)(uintptr_t)st.ubuf[5][i].addr; LOG("[dispatch]   ubo %d words:", i);
+            for (uint64_t k = 0; k < st.ubuf[5][i].size / 4; k++) LOG(" %08x", u[k]); LOG("\n");
+        }
     }
     // (debug) LARECOMP_SSBO_PROBE=1: which storage slots a compute program writes - run synchronously, slot ranges
     // (and the 64 KB after each) hashed before and after; the slots read by it are noted for the CPU-rewrite check
@@ -3363,8 +3502,9 @@ static void draw(CmdRec *r, bool indexed) {
             id<MTLBuffer> ib;
             uint64_t ioff;
             if (iaddr >= HEAP_BASE && iaddr + (uint64_t)count * isz <= HEAP_BASE + HEAP_MAX && (iaddr % isz) == 0) {
-                ib = g_guest_buffer; ioff = iaddr - HEAP_BASE;
                 bind_note(1, iaddr, (uint64_t)count * isz);
+                snap_note_vertex_bind(iaddr, (uint64_t)count * isz);
+                ib = g_guest_buffer; ioff = iaddr - HEAP_BASE;
             } else {
                 ioff = ring_alloc((void *)(uintptr_t)iaddr, (uint64_t)count * isz); ib = ring;
             }

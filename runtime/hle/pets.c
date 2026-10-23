@@ -10,6 +10,7 @@
 // Flag indices come from rando/<seed>/flags.tsv (tools/rando/seed_tables.py).
 #include "../game_addresses.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../hle.h"
@@ -154,6 +155,18 @@ static bool companion_allowed(const char *lv, int c) {
 void pets_game_tick(Cpu *c) {
     extern int game_in_play(void);
     extern int inventory_items_cursor(void);
+    {   // (test) LARECOMP_TEST_COMPANION=<1 BowWow, 2 Marin, 3 Ghost, 4 Rooster>: that companion, two seconds into play
+        // in a level that allows one (set at the load it crashed: the player's actor wasn't up yet)
+        static int want_test = -1, ticks;
+        if (want_test < 0) { const char *e = getenv("LARECOMP_TEST_COMPANION"); want_test = e ? atoi(e) : 0; }
+        if (want_test > 0 && game_in_play()) {
+            uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
+            const char *lv = ps ? (const char *)(uintptr_t)ps : "";
+            if (*lv && companion_allowed(lv, want_test) && ++ticks > 120) {
+                *(volatile uint8_t *)(uintptr_t)COMPANION = (uint8_t)want_test; g_swap = 1; want_test = 0;
+            }
+        }
+    }
     if (!g_swap || !game_in_play() || inventory_items_cursor() >= 0) return;
     g_swap = 0;
     uint64_t scene = LD64(GA(GAME_MGR)), player = scene ? LD64(scene + 0x4b8) : 0, ps = LD64(GA(PLAYER_STATUS_PTR));

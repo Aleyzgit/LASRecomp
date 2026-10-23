@@ -266,9 +266,14 @@ static void *watch_thread(void *a) {
     (void)a;
     int r = plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE);
     fprintf(stderr, "[watch] page %llx protect -> %d\n", (unsigned long long)watch_page, r);
-    for (;;) { plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE); usleep(100); }
+    extern volatile int g_watch_stop;
+    while (!g_watch_stop) { plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_NONE); usleep(100); }
+    plat_protect(watch_page, PLAT_PAGE, PLAT_PROT_RW);
+    fprintf(stderr, "[watch] page %llx released\n", (unsigned long long)watch_page);
     return NULL;
 }
+volatile int g_watch_stop;  // (set by the watcher's client: the watch ends, the page opens for good)
+const char *rt_host_sym(uint64_t pc, uint64_t *off) { return host_sym(pc, off); }  // (the renderer's fault log)
 void watch_arm(void) {
     if (!g_watch_lo) {  // (debug) LARECOMP_WATCH_ADDR=<lo>,<hi> (hex): who touches [lo, hi) - one page watched
         const char *e = getenv("LARECOMP_WATCH_ADDR");
