@@ -73,6 +73,18 @@ static uint64_t heap_size = 16ull << 20;  // (the test ranges below sit under 8 
 static uint64_t kernel_heap_size(void) { return heap_size; }
 static unsigned commits;
 static void plat_commit(uint64_t addr, uint64_t size) { assert(addr == HEAP_BASE + heap_size && size == (16ull << 20)); commits++; }
+#define PLAT_PAGE 0x4000ull
+enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
+static struct { uint64_t page; int prot; } prots[4096];  // every plat_protect call, in order
+static int nprots;
+static int plat_protect(uint64_t addr, uint64_t size, int prot) {
+    assert(size == PLAT_PAGE && !(addr & (PLAT_PAGE - 1)) && addr >= HEAP_BASE && addr < HEAP_BASE + heap_size);
+    assert(nprots < 4096);
+    prots[nprots].page = addr; prots[nprots].prot = prot; nprots++;
+    return 0;
+}
+static int prot_of(uint64_t page) { int p = PLAT_PROT_RW; for (int i = 0; i < nprots; i++) if (prots[i].page == page) p = prots[i].prot; return p; }
+static bool userptr;
 static bool overlap_on(void) { return true; }
 static uint64_t completed, pending = 1, issued, waited;
 static uint64_t vk_completed_seq(void) { return completed; }
@@ -89,12 +101,89 @@ const char *game_level_name(void) { return level; }
 static uint64_t stat_snap_bytes, stat_snap_copies;
 ''' + snap + r'''
 static void snap_ring_import_tail(void) {}
+static bool heap_is_userptr(void) { return userptr; }
 static uint64_t ring_lo(void) { return HEAP_BASE + snap_base; }
 static bool in_ring(uint64_t a) { return a >= ring_lo() && a < ring_lo() + SNAP_RING; }
 static bool in_half(uint64_t a, int h) { return a >= ring_lo() + h * SNAP_HALF && a < ring_lo() + (h + 1) * SNAP_HALF; }
-int main(void) {
+
+// The write watch (LARECOMP_OVERLAP_WATCH unset): compute-only ranges in place with their pages protected, copied
+// from the first CPU store (the platform's fault handler -> renderer_watch_fault)
+static void watch_tests(void) {
+    assert(snap_on() && watch_on());
+    uint64_t A = HEAP_BASE + 0x1000, B = HEAP_BASE + 0x20000, B2 = HEAP_BASE + 0x20800, C = HEAP_BASE + 0x40000, D = HEAP_BASE + 0x60000;
+    // W1. a compute-only range starts in place, its pages (16 KB units) write-protected
+    assert(snap_storage(A, 32640, true) == A && rs_tab[0].mode == RS_PLACE && nwatch_pages == 3);
+    assert(prot_of(HEAP_BASE) == PLAT_PROT_READ && prot_of(HEAP_BASE + 0x4000) == PLAT_PROT_READ && prot_of(HEAP_BASE + 0x8000) == PLAT_PROT_READ);
+    assert(snap_storage(A, 32640, true) == A);  // (again this frame)
+    int np = nprots;
+    frame++;
+    assert(snap_storage(A, 32640, true) == A && nprots == np);  // next frame: still armed, nothing to re-protect
+    // W2. a store into it faults: the page is opened, the range is marked; its next bind is a copy for good
+    assert(!renderer_watch_fault(HEAP_BASE + 0x10000));  // (not a watched page: not ours)
+    assert(renderer_watch_fault(A + 100) && prot_of(HEAP_BASE) == PLAT_PROT_RW && rs_cpu_wrote[0]);
+    uint64_t a1 = snap_storage(A, 32640, true);
+    assert(a1 != A && in_ring(a1) && rs_tab[0].mode == RS_COPY && !memcmp((void *)(uintptr_t)a1, heap_mem + 0x1000, 32640));
+    frame++;
+    assert(snap_storage(A, 32640, true) == a1);
+    // W3. a level change or 10 s unused never demotes a copied range
+    level = "Dungeon";
+    frame += 601;
+    assert(snap_storage(A, 32640, true) == a1 && rs_tab[0].mode == RS_COPY);
+    heap_mem[0x1000 + 3] ^= 1;  // (changed: refreshed)
+    frame++;
+    uint64_t a2 = snap_storage(A, 32640, true);
+    assert(a2 != a1 && rs_tab[0].mode == RS_COPY);
+    // W4. an in-place watched range is just re-armed on a level change (no hash probe, no copy)
+    assert(snap_storage(C, 2048, true) == C && rs_tab[1].mode == RS_PLACE && prot_of(HEAP_BASE + 0x40000) == PLAT_PROT_READ);
+    level = "Beach";
+    frame += 601;
+    np = nprots;
+    assert(snap_storage(C, 2048, true) == C && rs_tab[1].mode == RS_PLACE && nprots == np);
+    // a page opened by something else (the arm flag cleared) is protected again at the range's first bind of a frame
+    for (int i = 0; i < nwatch_pages; i++) if (watch_pages[i].page == HEAP_BASE + 0x40000) watch_pages[i].armed = 0;
+    frame++;
+    assert(snap_storage(C, 2048, true) == C && nprots == np + 1 && prots[np].page == HEAP_BASE + 0x40000 && prots[np].prot == PLAT_PROT_READ);
+    // W5. two ranges on one page (the light lists): a store into one marks both
+    frame++;
+    assert(snap_storage(B, 2048, true) == B && snap_storage(B2, 2048, true) == B2 && nwatch_pages == 5);
+    assert(renderer_watch_fault(B2 + 16) && rs_cpu_wrote[2] && rs_cpu_wrote[3]);
+    frame++;
+    uint64_t b1 = snap_storage(B, 2048, true), b2 = snap_storage(B2, 2048, true);
+    assert(b1 != B && b2 != B2 && rs_tab[2].mode == RS_COPY && rs_tab[3].mode == RS_COPY);
+    // W6. a store on a watched page outside every range still opens the page (and marks the ranges on that page)
+    frame++;
+    assert(snap_storage(D, 2048, true) == D);
+    assert(renderer_watch_fault(D + 0x3000) && prot_of(HEAP_BASE + 0x60000) == PLAT_PROT_RW);
+    frame++;
+    assert(snap_storage(D, 2048, true) != D && rs_tab[4].mode == RS_COPY);
+    // W7. a draw's storage read of a watched in-place range: a copy for good, as without the watch
+    uint64_t E = HEAP_BASE + 0x80000;
+    frame++;
+    assert(snap_storage(E, 2048, true) == E);
+    frame++;
+    uint64_t e1 = snap_storage(E, 2048, false);
+    assert(e1 != E && rs_tab[5].mode == RS_COPY && rs_tab[5].draw_bound);
+    frame++;
+    assert(snap_storage(E, 2048, true) == e1);
+    // W8. a reboot disarms every page
+    snap_reset();
+    for (int i = 0; i < nprots; i++) if (prots[i].prot == PLAT_PROT_READ) assert(prot_of(prots[i].page) == PLAT_PROT_RW);
+    assert(nwatch_pages == 0);
+    puts("PASS: write watch - in place + armed, a store makes a copy for good, no demotion on level / idle, re-arm, a shared page marks both, a reboot disarms");
+}
+
+int main(int argc, char **argv) {
     heap_mem = calloc(HEAP_MAX, 1);
     assert(heap_mem);
+    if (argc > 1 && !strcmp(argv[1], "watch")) { watch_tests(); return 0; }
+    if (argc > 1 && !strcmp(argv[1], "userptr")) {  // a userptr heap import (AMD Linux): the watch is off, the probe instead
+        userptr = true;
+        assert(snap_on() && !watch_on());
+        uint64_t A = HEAP_BASE + 0x1000;
+        assert(snap_storage(A, 32640, true) != A && rs_tab[0].mode == RS_PROBE && nprots == 0);
+        puts("PASS: userptr heap - the watch is off, compute-only ranges get the hash probe");
+        return 0;
+    }
     uint64_t A = HEAP_BASE + 0x1000, B = HEAP_BASE + 0x20000, C = HEAP_BASE + 0x40000;
     uint8_t *a = heap_mem + 0x1000, *b = heap_mem + 0x20000;
     memset(a, 1, 32640); memset(b, 2, 2048); memset(heap_mem + 0x40000, 3, 4096);
@@ -243,4 +332,11 @@ with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
         exe = temporary / (f'{name}.exe' if os.name == 'nt' else name)
         subprocess.run(shlex.split(os.environ.get('CC', 'clang')) + ['-std=gnu11', '-O1', '-Wall', '-Wno-unused-function', '-Wno-unused-variable',
                         str(cfile), '-o', str(exe)], check=True)
-        subprocess.run([str(exe)], check=True, timeout=10)
+        env = dict(os.environ)
+        env.pop('LARECOMP_OVERLAP_WATCH', None)
+        if name == 'snap':  # the hash probe (watch off), the write watch, a userptr heap
+            subprocess.run([str(exe)], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))
+            subprocess.run([str(exe), 'watch'], check=True, timeout=10, env=env)
+            subprocess.run([str(exe), 'userptr'], check=True, timeout=10, env=env)
+        else:
+            subprocess.run([str(exe)], check=True, timeout=10, env=env)

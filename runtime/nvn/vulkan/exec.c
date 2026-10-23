@@ -2785,7 +2785,9 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
 // lists in place for good. A range only compute slots bind gets a one-frame PROBE on its first use in a level (all
 // binders on the copy, the GPU can't touch the original) and its next use looks at the original: changed, the CPU
 // rewrites it - COPY; unchanged, a GPU output or static (the skinning outputs, which draws then bind as vertex data
-// from an offset into the pool) - IN PLACE for good, probed again when the level changes or after 10 s unused. Each
+// from an offset into the pool) - IN PLACE for good, probed again when the level changes or after 10 s unused. With
+// the write watch below (the default where the heap import allows it) a compute-only range starts in place and is
+// copied from the first CPU store into it instead - the probe is the fallback; a copied range is never demoted. Each
 // range's decision is logged once ("[snap] ...", the small per-object ranges capped). ~100 KB copied and hashed per
 // frame in the field.
 // Where the copies live: shaders address storage by guest address through the heap import (one buffer, lazy chunks,
@@ -2822,6 +2824,7 @@ static uint64_t range_hash(uint64_t addr, uint64_t size) {
     return h;
 }
 static void snap_ring_import_tail(void);  // (with the lazy chunks below)
+static void watch_disarm_all(void);       // (the write watch below)
 // Decided once the game's heap is set up (SetHeapSize), which is before anything is drawn: the ring follows the heap.
 static bool snap_on(void) {
     if (snap_state >= 0) return snap_state;
@@ -2852,6 +2855,7 @@ static void snap_reset(void) {  // (vk_exec_reset: a reboot - the heap is set up
     snap_gen++;
     nrs = 0;
     sb_eff_on = false;
+    watch_disarm_all();
 }
 static void rs_level_tick(void) {  // (a new level: every range is probed again on its next use)
     extern const char *game_level_name(void);
@@ -2888,6 +2892,80 @@ static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
     stat_snap_copies++;
     return e->copy;
 }
+// Write watch (compute-only ranges; renderer.m cf98fff / c3580a8). The CPU's rewrite of a range can't be seen in its
+// bytes (the light lists are rewritten with the same bytes while the view stands still, and the race is the GPU reading
+// them mid-rewrite), so it is caught as it happens: the pages of a range bound only by compute slots are
+// write-protected (plat_protect) when the range is first bound in a frame; the first CPU store into them faults on
+// any thread (Windows: the vectored handler, after lazy_commit sees the page isn't plain read-write; Linux: the
+// SIGSEGV handler), the platform calls rt_fault_watch -> renderer_watch_fault, which opens the page again and marks
+// every watched range on it (the lists share a page) as CPU-written: COPY from then on, and the store is retried.
+// A store to a watched page outside any range only opens the page. A GPU output is never stored to by the CPU and
+// stays in place. A few pages and at most a few faults a frame.
+// The pages belong to the heap import: the GPU's access goes through its own page tables / pinned pages, which a CPU
+// protection change doesn't touch (VK_EXT_external_memory_host on Windows and NVIDIA, the dma-buf / placed heap on
+// RADV). The exception is a userptr import on AMD Linux (gmem_userptr): amdgpu re-validates a userptr range on every
+// mapping change and needs it writable, so there the watch is off and the hash probe is the fallback. The OS write
+// tracking (Windows MEM_WRITE_WATCH, Linux userfaultfd async WP) is a separate per-page bit: both coexist.
+// The protection unit is the largest page size in play (PLAT_PAGE 16 KB, a multiple of 4 KB; arm64 Linux may use 64 KB
+// pages: the real size then), so a store on a neighbouring 4 KB page faults too - it is just opened.
+// LARECOMP_OVERLAP_WATCH=0: off (compute-only ranges get the one-frame hash probe, as before).
+#define WATCH_PAGES 64
+static struct { uint64_t page; volatile int armed; } watch_pages[WATCH_PAGES];
+static int nwatch_pages;
+static volatile int rs_cpu_wrote[512];  // (by entry index, set by the fault handler)
+static bool heap_is_userptr(void);      // (with the heap import below)
+static uint64_t watch_page_size(void) {
+    static uint64_t sz;
+    if (!sz) {
+        sz = PLAT_PAGE;
+#ifdef __linux__
+        long real = sysconf(_SC_PAGESIZE);
+        if (real > (long)sz) sz = (uint64_t)real;
+#endif
+    }
+    return sz;
+}
+static bool watch_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_OVERLAP_WATCH");
+        on = !e || atoi(e) != 0;
+        if (on && heap_is_userptr()) { on = 0; LOG("[vk] storage write watch off: the guest heap is a userptr import (the hash probe instead)\n"); }
+        else LOG("[vk] storage write watch %s (compute-bound ranges copied from the first CPU store; %llu KB pages)\n", on ? "on" : "off (LARECOMP_OVERLAP_WATCH=0)",
+                 (unsigned long long)(watch_page_size() >> 10));
+    }
+    return on;
+}
+static void watch_arm_range(const RangeState *e) {
+    uint64_t ps = watch_page_size();
+    uint64_t lo = e->addr & ~(ps - 1), hi = (e->addr + e->size + ps - 1) & ~(ps - 1);
+    for (uint64_t pg = lo; pg < hi; pg += ps) {
+        int i = 0;
+        for (; i < nwatch_pages; i++) if (watch_pages[i].page == pg) break;
+        if (i == nwatch_pages) { if (nwatch_pages == WATCH_PAGES) return; watch_pages[nwatch_pages++].page = pg; watch_pages[i].armed = 0; }
+        if (!watch_pages[i].armed && plat_protect(pg, ps, PLAT_PROT_READ) == 0) watch_pages[i].armed = 1;
+    }
+}
+static void watch_disarm_all(void) {  // (snap_reset: the heap's pages are replaced; off: nothing armed is left behind)
+    for (int i = 0; i < nwatch_pages; i++) if (watch_pages[i].armed) { plat_protect(watch_pages[i].page, watch_page_size(), PLAT_PROT_RW); watch_pages[i].armed = 0; }
+    nwatch_pages = 0;
+    memset((void *)rs_cpu_wrote, 0, sizeof rs_cpu_wrote);
+}
+// The platform's fault handler (dispatch.c rt_fault_watch): a store to a watched page, any thread. Opens the page;
+// true when it was ours (the store is retried).
+bool renderer_watch_fault(uint64_t fa) {
+    uint64_t ps = watch_page_size(), pg = fa & ~(ps - 1);
+    int i = 0;
+    for (; i < nwatch_pages; i++) if (watch_pages[i].page == pg) break;
+    if (i == nwatch_pages) return false;
+    plat_protect(pg, ps, PLAT_PROT_RW);
+    watch_pages[i].armed = 0;
+    // every watched range on the page: the page stays open until it is armed again, so a store into a neighbour
+    // range on it would go unseen (the three lists share a page) - marked as possibly written, copied, the safe side
+    for (int k = 0; k < nrs; k++) if (rs_tab[k].addr < pg + ps && pg < rs_tab[k].addr + rs_tab[k].size) rs_cpu_wrote[k] = 1;
+    return true;
+}
+
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
 static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     if (!snap_on() || !addr || !size || addr < HEAP_BASE || addr - HEAP_BASE + size > snap_base) return addr;
@@ -2917,7 +2995,14 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         memset(e, 0, sizeof *e);
         e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
         e->cs_bound = cs_slot;
-        if (!cs_slot) { e->mode = RS_COPY; e->draw_bound = true; }  // a draw's storage read: copied for good (see above)
+        rs_cpu_wrote[e - rs_tab] = 0;
+        if (!cs_slot) e->mode = RS_COPY, e->draw_bound = true;  // a draw's storage read: copied for good (see above)
+        else if (watch_on()) {  // a compute-only range: in place, its pages watched - the first CPU store makes it a copy
+            e->mode = RS_PLACE;
+            watch_arm_range(e);
+            rs_log(e, "new: in place, watched for CPU stores", cs_slot, f);
+            return addr;
+        }
         // the probe frame (or the first copy): every binder this frame takes this copy (frame == f below); a probe's
         // decision is at the next frame's use, when a CPU rewrite can have happened
         c = rs_copy_make(e, range_hash(addr, size));
@@ -2930,6 +3015,14 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         return c;
     }
     if (cs_slot) e->cs_bound = true; else e->draw_bound = true;
+    if (e->mode != RS_COPY && rs_cpu_wrote[e - rs_tab]) {  // the CPU stored into it (or its page): copied from now on
+        e->mode = RS_COPY;
+        rs_log(e, "-> copy (a CPU store hit its page)", cs_slot, f);
+        e->level = rs_level_gen;
+        e->frame = f;
+        c = rs_copy_make(e, range_hash(addr, size));
+        return c ? c : addr;
+    }
     if (e->frame == f) {  // (bound again this frame)
         if (e->mode == RS_PLACE && cs_slot) return addr;
         if (!cs_slot && e->mode != RS_COPY) {  // (a draw's storage read of a range probed / settled in place this frame: copied for good)
@@ -2942,7 +3035,9 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         c = rs_copy_make(e, e->hash);
         return c ? c : addr;
     }
-    bool again = e->level != rs_level_gen || f - e->frame > 600;  // (a new level, or unused: probe again)
+    // probe again on a new level or after 10 s unused - only the hash fallback's in-place ranges: a copied range stays
+    // copied (a draw's storage read, a CPU store seen), a watched one just gets its pages armed again
+    bool again = !watch_on() && e->mode == RS_PLACE && (e->level != rs_level_gen || f - e->frame > 600);
     e->level = rs_level_gen;
     e->frame = f;
     if (!cs_slot && e->mode != RS_COPY) {  // a draw reads it as storage: copied for good (see above)
@@ -2951,6 +3046,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         c = rs_copy_make(e, range_hash(addr, size));
         return c ? c : addr;
     }
+    if (e->mode == RS_PLACE && e->cs_bound && watch_on()) { watch_arm_range(e); return addr; }  // (watched: a store decides, no hash)
     if (e->mode == RS_PLACE && !again && e->cs_bound) return addr;
     uint64_t h = range_hash(addr, size);
     if (again && !e->draw_bound) {  // (a draw-read range stays a copy across levels)
@@ -3451,6 +3547,7 @@ mapped:;
 // the pages instead and keeps it. Decided here, at boot, before any query protected a page. LARECOMP_WRITE_TRACKING=1:
 // on anyway.
 static bool gmem_userptr;  // the heap is imported by host pointer: userptr (vertex cache default, vcache_lookup)
+static bool heap_is_userptr(void) { return gmem_userptr; }  // (the storage write watch: off over a userptr import)
 // The whole heap as one userptr import (not chunks) on AMD: each submission has amdgpu check all of its pages
 static bool heap_whole_userptr(void) { return gmem_userptr && !gc_lazy && g_vk.props.vendorID == 0x1002; }
 
