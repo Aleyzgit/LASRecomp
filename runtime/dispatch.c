@@ -282,6 +282,10 @@ void watch_arm(void) {
 uint64_t g_fault_lr;  // (the platform's handler: the faulting thread's link register, for the watch log)
 bool rt_fault_watch(uint64_t fa, uint64_t pc) {
     uint64_t lr = g_fault_lr;
+    {   // the renderer's write watch on storage buffers (runtime/nvn/renderer.m renderer_watch_fault)
+        extern bool renderer_watch_fault(uint64_t fa) __attribute__((weak));
+        if (renderer_watch_fault && renderer_watch_fault(fa)) return true;
+    }
     if (!watch_page || fa < watch_page || fa >= watch_page + PLAT_PAGE) return false;
     if (fa >= g_watch_lo && fa < g_watch_hi) {
         static int hits;  // (LARECOMP_WATCH_ADDR) each (frame, caller) once with its offset, the first 4000

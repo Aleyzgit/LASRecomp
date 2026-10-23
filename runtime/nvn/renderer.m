@@ -2121,7 +2121,9 @@ static void bind_textures(int stage, ShaderInfo *si) {
 // one-frame PROBE on its first use in a level (all binders on the copy, the GPU can't touch the original) and its
 // next use looks at the original: changed, the CPU rewrites it - COPY; unchanged, a GPU output or static (the
 // skinning outputs, which draws then bind as vertex data from an offset into the pool) - IN PLACE for good, probed
-// again when the level changes or after 10 s unused. ~100 KB copied and hashed per frame in the field.
+// again when the level changes or after 10 s unused. With the write watch below (the default) a compute-only range
+// starts in place and is copied from the first CPU store into it instead - the probe is the fallback.
+// ~100 KB copied and hashed per frame in the field.
 // LARECOMP_OVERLAP_SNAP=0: off (everything in place).
 #define SNAP_RING (16u << 20)
 enum { RS_PROBE, RS_COPY, RS_PLACE };
@@ -2165,6 +2167,44 @@ static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
     e->hash = h, e->gen = snap_gen;
     return e->copy;
 }
+// Write watch (compute-only ranges). The CPU's rewrite of a range can't be seen in its bytes (the light lists are
+// rewritten with the same bytes while the view stands still, and the race is the GPU reading them mid-rewrite), so it
+// is caught as it happens: the pages of a range bound only by compute slots are write-protected (plat_protect) when
+// the range is first bound in a frame; the first CPU store into them faults (the platform's handler calls
+// renderer_watch_fault), the handler opens the page again and, if the store hit inside a watched range, marks that
+// range CPU-written: COPY from then on. A store to a watched page outside any range only opens the page. A GPU
+// output is never stored to by the CPU and stays in place. A few pages and at most a few faults a frame.
+// LARECOMP_OVERLAP_WATCH=0: off (compute-only ranges stay in place, as before).
+#define WATCH_PAGES 64
+static struct { uint64_t page; volatile int armed; } watch_pages[WATCH_PAGES];
+static int nwatch_pages;
+static volatile int rs_cpu_wrote[512];  // (by entry index, set by the fault handler)
+static bool watch_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = ENV("LARECOMP_OVERLAP_WATCH"); on = !e || atoi(e) != 0; }
+    return on;
+}
+static void watch_arm_range(const RangeState *e) {
+    uint64_t lo = e->addr & ~(PLAT_PAGE - 1), hi = (e->addr + e->size + PLAT_PAGE - 1) & ~(PLAT_PAGE - 1);
+    for (uint64_t pg = lo; pg < hi; pg += PLAT_PAGE) {
+        int i = 0;
+        for (; i < nwatch_pages; i++) if (watch_pages[i].page == pg) break;
+        if (i == nwatch_pages) { if (nwatch_pages == WATCH_PAGES) return; watch_pages[nwatch_pages++].page = pg; watch_pages[i].armed = 0; }
+        if (!watch_pages[i].armed && plat_protect(pg, PLAT_PAGE, PLAT_PROT_READ) == 0) watch_pages[i].armed = 1;
+    }
+}
+// The platform's fault handler: a store to a watched page (any thread). Opens the page; true when it was ours.
+bool renderer_watch_fault(uint64_t fa) {
+    uint64_t pg = fa & ~(PLAT_PAGE - 1);
+    int i = 0;
+    for (; i < nwatch_pages; i++) if (watch_pages[i].page == pg) break;
+    if (i == nwatch_pages) return false;
+    plat_protect(pg, PLAT_PAGE, PLAT_PROT_RW);
+    watch_pages[i].armed = 0;
+    for (int k = 0; k < nrs; k++) if (fa >= rs_tab[k].addr && fa < rs_tab[k].addr + rs_tab[k].size) rs_cpu_wrote[k] = 1;
+    return true;
+}
+
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
 static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     if (!snap_on() || !addr || !size || size > SNAP_RING / 8 || addr < HEAP_BASE || addr + size > snap_ring_base) return addr;
@@ -2185,11 +2225,19 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         // touch and settle it in place for good; that left the race on the beach at 4x on an M6)
         e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
         e->cs_bound = cs_slot;
-        if (!cs_slot) { e->mode = RS_COPY; e->draw_bound = true; }
-        rs_log(e, cs_slot ? "new: probe" : "new: copy (a draw's storage read)", cs_slot, f);
-        return rs_copy_make(e, range_hash(addr, size));  // the probe frame, or the first copy
+        rs_cpu_wrote[e - rs_tab] = 0;
+        if (!cs_slot) { e->mode = RS_COPY; e->draw_bound = true; rs_log(e, "new: copy (a draw's storage read)", cs_slot, f); return rs_copy_make(e, range_hash(addr, size)); }
+        if (watch_on()) { e->mode = RS_PLACE; watch_arm_range(e); rs_log(e, "new: in place, watched for CPU stores", cs_slot, f); return addr; }
+        rs_log(e, "new: probe", cs_slot, f);
+        return rs_copy_make(e, range_hash(addr, size));  // the probe frame
     }
     if (cs_slot) e->cs_bound = true; else e->draw_bound = true;
+    if (e->mode != RS_COPY && rs_cpu_wrote[e - rs_tab]) {  // the CPU stored into it: copied from now on
+        e->mode = RS_COPY;
+        rs_log(e, "-> copy (a CPU store hit it)", cs_slot, f);
+        e->frame = f;
+        return rs_copy_make(e, range_hash(addr, size));
+    }
     if (e->frame == f) return e->mode == RS_PLACE ? addr : (e->gen == snap_gen ? e->copy : rs_copy_make(e, e->hash));  // (bound again this frame)
     bool again = e->level != rs_level_gen || f - e->frame > 600;  // (a new level, or unused: probe again)
     e->level = rs_level_gen;
@@ -2199,6 +2247,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         rs_log(e, "-> copy (a draw's storage read)", cs_slot, f);
         return rs_copy_make(e, range_hash(addr, size));
     }
+    if (e->mode == RS_PLACE && e->cs_bound && watch_on()) { watch_arm_range(e); return addr; }  // (watched: a store decides, no hash)
     if (e->mode == RS_PLACE && !again && e->cs_bound) return addr;
     uint64_t h = range_hash(addr, size);
     if (again) { e->mode = RS_PROBE; rs_log(e, "probe again (level / unused)", cs_slot, f); return rs_copy_make(e, h); }
