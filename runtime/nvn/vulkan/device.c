@@ -93,6 +93,12 @@ static bool lazy_heap_predicted(bool budget_ext, bool *probe) {
     if (getenv("LARECOMP_VK_NO_GMEM")) return false;
     uint64_t lim = g_vk.props.limits.maxStorageBufferRange;
     if (lim && lim < HEAP_MAX) return true;  // (UHD 770 main pass: lazy 8.4 ms, 512 MB windows 8.5)
+#ifdef _WIN32
+    // The Windows AMD integrated driver accepts one import of the whole heap (the probe writes both ends) and then
+    // faults a shader read of it: device lost, as soon as a save loads. Chunks stay inside the pages it maps.
+    if (g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
+        return true;
+#endif
     if (!whole_import_fits(budget_ext, probe)) return true;
     if (!strstr(g_vk.props.deviceName, "RADV")) return false;
     *probe = false;  // (RADV: as before - the dma-buf heap or lazy chunks, no probe)
