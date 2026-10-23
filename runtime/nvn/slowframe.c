@@ -29,6 +29,7 @@ ShaderInfo *slow_translate(const uint8_t *code, size_t max_size, int stage, cons
 
 typedef struct {
     uint64_t pipes, pipe_ns, hits, progs, prog_ns, tr, tr_ns, uploads, up_bytes, hashes, imports, submits, wait_ns, rcpu, gcpu;
+    uint64_t rqw, blocked, present;  // (the game thread's own: waits for the render thread, vsync / pacer waits, presents)
 } Snap;
 
 static void snap(Snap *s, uint64_t gcpu) {
@@ -40,6 +41,8 @@ static void snap(Snap *s, uint64_t gcpu) {
     renderer_slow_counters(&s->submits, &s->wait_ns, &s->imports);
     s->rcpu = rq_render_cpu_ns();
     s->gcpu = gcpu;
+    extern __thread uint64_t g_rq_wait_ns, g_blocked_ns, g_present_ns;  // (rqueue.c, kernel.c: this thread's)
+    s->rqw = g_rq_wait_ns, s->blocked = g_blocked_ns, s->present = g_present_ns;
 }
 
 static uint64_t d(uint64_t a, uint64_t b) { return a > b ? a - b : 0; }  // (a backend total reset at a reboot: 0)
@@ -127,6 +130,15 @@ void slow_frame_present(uint64_t now, uint64_t gcpu) {
             // (render cpu 0: no render thread - that work is the game thread's)
             if (prev.rcpu) PART("%srender cpu %.0f ms", sep, d(cur.rcpu, prev.rcpu) / 1e6);
             PART("%sgame cpu %.0f ms", sep, d(cur.gcpu, prev.gcpu) / 1e6);
+            // where the rest went: this thread waiting for the render thread, for a vsync / the pacer, in presents;
+            // and the longest wait the render thread itself reported (rqueue.c rq_watch: nextDrawable, a GPU wait)
+            PART("%squeue wait %.0f ms", sep, d(cur.rqw, prev.rqw) / 1e6);
+            PART("%svsync/pace wait %.0f ms", sep, d(cur.blocked, prev.blocked) / 1e6);
+            if (d(cur.present, prev.present) >= 1000000) PART("%spresent %.0f ms", sep, d(cur.present, prev.present) / 1e6);
+            extern uint64_t rq_render_longest(const char **what);
+            const char *rw = NULL;
+            uint64_t rwn = rq_render_longest(&rw);
+            if (rw && rwn >= 5000000) PART("%srender thread longest: %s %.0f ms", sep, rw, rwn / 1e6);
 #undef PART
             LOG("%s\n", b);
         }

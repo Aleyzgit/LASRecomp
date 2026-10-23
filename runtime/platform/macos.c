@@ -130,8 +130,22 @@ void plat_thread_realtime(uint64_t period_ns) {
         .constraint = (uint32_t)(period / 4),
         .preemptible = 1,
     };
-    thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
-                      THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    kern_return_t kr = thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
+                                         THREAD_TIME_CONSTRAINT_POLICY_COUNT);
+    if (kr != KERN_SUCCESS) fprintf(stderr, "[plat] real-time thread policy refused: %d\n", (int)kr);
+}
+// After a late wait: is the time-constraint policy still in effect for this thread? The kernel drops it (back to
+// timeshare, timers coalesced to ~100 ms when the app isn't frontmost) for a thread that overruns its computation
+// budget; set again when found gone. Called only on the late path: no cost otherwise.
+int plat_thread_realtime_check(uint64_t period_ns) {
+    thread_time_constraint_policy_data_t pol;
+    mach_msg_type_number_t count = THREAD_TIME_CONSTRAINT_POLICY_COUNT;
+    boolean_t def = FALSE;
+    kern_return_t kr = thread_policy_get(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol, &count, &def);
+    if (kr != KERN_SUCCESS) return -1;
+    if (!def) return 0;
+    plat_thread_realtime(period_ns);
+    return 1;
 }
 
 // Guest threads start at the default QoS, and on a Mac with efficiency cores (an M1 Air: 4 + 4) the scheduler may run
@@ -214,6 +228,7 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
                                                                                // itself aborting looped, 5.7 GB log)
     uint64_t fa = (uint64_t)si->si_addr;
     uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr;
+    { extern uint64_t g_fault_lr; g_fault_lr = lr; }
     if (rt_fault_watch(fa, pc)) return;
     char what[32];
     snprintf(what, sizeof what, "signal %d", sig);

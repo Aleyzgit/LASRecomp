@@ -156,7 +156,7 @@ void pets_game_tick(Cpu *c) {
     extern int game_in_play(void);
     extern int inventory_items_cursor(void);
     {   // (test) LARECOMP_TEST_COMPANION=<1 BowWow, 2 Marin, 3 Ghost, 4 Rooster>: that companion, two seconds into play
-        // in a level that allows one (set at the load it crashed: the player's actor wasn't up yet) - as metal-overlap's
+        // in a level that allows one (set at the load it crashed: the player's actor wasn't up yet)
         static int want_test = -1, ticks;
         if (want_test < 0) { const char *e = getenv("LARECOMP_TEST_COMPANION"); want_test = e ? atoi(e) : 0; }
         if (want_test > 0 && game_in_play()) {
