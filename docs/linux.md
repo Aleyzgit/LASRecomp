@@ -101,8 +101,10 @@ files or fonts.
   read/write mapping (`MAP_NORESERVE`), crashes are caught with `sigaction` on an alternate stack.
 - The HLE / service / reset tables are ELF sections found through the linker's `__start_` / `__stop_` symbols.
 - Renderer: the Windows Vulkan backend unchanged.
-- Without the user's Switch fonts the game text uses DejaVu Sans (TrueType; the game's font engine can't use CFF
-  fonts such as Noto Sans CJK).
+- Without the user's Switch fonts the game text uses the bundled BIZ UDPGothic (`third_party/fonts/BIZUDPGothic`),
+  sized like the console's font, where macOS / Windows use Hiragino / Yu Gothic; the in-game menu and button letters
+  use DejaVu Sans, the system's or the bundled copy (`third_party/fonts/DejaVu`). TrueType is required; the game's font
+  engine can't use CFF fonts such as Noto Sans CJK.
 - Pages: 4K and 16K kernels (Asahi) work; 64K-page kernels (some ARM servers) are not supported.
 
 ## Testing on ARM (aarch64): what to report
