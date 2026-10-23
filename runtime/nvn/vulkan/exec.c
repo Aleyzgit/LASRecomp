@@ -105,13 +105,29 @@ static int passes_in_sub;  // render passes in the submission being recorded (LA
 static uint64_t deferred_seq;   // (seq_lock) the fence the game was told is done but whose submission wasn't waited for
 static uint64_t stat_deferred;  // SyncWaits returned without waiting (stats)
 static uint64_t stat_snap_bytes, stat_snap_copies;  // storage copies made (snap_storage; stats, per period)
+// The overlap needs the storage write watch (snap_storage: the OS's page write tracking), the only thing that catches
+// the game rewriting its light lists with the same bytes while the GPU reads them. Where the OS gives no tracking
+// (Linux over a userptr or dma-buf heap - AMD, the Steam Deck -, a kernel before 6.7 without PAGEMAP_SCAN, a
+// container without userfaultfd, a Windows window reserved without write watch) the overlap turns itself off: the
+// full fence wait as before. LARECOMP_GPU_OVERLAP=1 forces it on anyway (tests; the hash probe stands in for the
+// watch then), =0 turns it off.
+static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);  // (the page tables below)
+static const char *heap_tracking_reason(void);  // (why the heap has no page write tracking, for the log)
 static bool overlap_on(void) {
     static int on = -1;
     if (on < 0) {
-        const char *e = getenv("LARECOMP_GPU_OVERLAP");
-        on = e ? atoi(e) != 0 : VK_OVERLAP_DEFAULT;
-        LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; LARECOMP_GPU_OVERLAP=%d: %s)\n", on ? "on" : "off",
-            !on, on ? "off" : "on");
+        const char *e = getenv("LARECOMP_GPU_OVERLAP"), *w = getenv("LARECOMP_OVERLAP_WATCH");
+        uint32_t g;
+        bool tracked = (!w || atoi(w) != 0) && pages_cpu_written(HEAP_BASE, 4096, 0, &g) >= 0;
+        if (e) on = atoi(e) != 0;
+        else if (VK_OVERLAP_DEFAULT && !tracked) {
+            on = 0;
+            LOG("[vk] GPU overlap off: no page write tracking on this system (%s); LARECOMP_GPU_OVERLAP=1 forces it on\n",
+                w && atoi(w) == 0 ? "LARECOMP_OVERLAP_WATCH=0" : heap_tracking_reason());
+            return on;
+        } else on = VK_OVERLAP_DEFAULT;
+        LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; LARECOMP_GPU_OVERLAP=%d: %s%s)\n", on ? "on" : "off",
+            !on, on ? "off" : "on", on && !tracked ? "; forced without page write tracking: the hash probe instead of the write watch" : "");
     }
     return on;
 }
@@ -3510,6 +3526,15 @@ mapped:;
 // on anyway.
 static bool gmem_userptr;  // the heap is imported by host pointer: userptr (vertex cache default, vcache_lookup)
 static bool heap_is_userptr(void) { return gmem_userptr; }  // (the storage write watch: off over a userptr import)
+static const char *heap_tracking_reason(void) {  // (overlap_on: why there is no page write tracking here)
+    if (gmem_userptr) return "the guest heap is a userptr import, which the OS can't track";
+#ifdef __linux__
+    if (gmem_dmabuf) return "the guest heap is driver memory (dma-buf), which the OS can't track";
+    return "no userfaultfd write tracking or PAGEMAP_SCAN (Linux 6.7+)";
+#else
+    return "the guest window has no write watch";
+#endif
+}
 // The whole heap as one userptr import (not chunks) on AMD: each submission has amdgpu check all of its pages
 static bool heap_whole_userptr(void) { return gmem_userptr && !gc_lazy && g_vk.props.vendorID == 0x1002; }
 
