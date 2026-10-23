@@ -87,6 +87,39 @@ static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 static int passes_in_sub;  // render passes in the submission being recorded (LARECOMP_CHUNK_PASSES, begin_pass)
 
+// CPU / GPU overlap (as renderer.m: the Metal backend, metal-overlap). The game's frame loop submits a frame, presents
+// it, and at once waits on that frame's fence (every SyncWait is on the newest submission), so it builds frame N+1
+// only once the GPU has finished frame N: a frame costs CPU + GPU time in series. Here the wait is taken one fence
+// late: SyncWait(fence N) waits for fence N-1's submission and returns, and the next SyncWait waits for N. The CPU
+// builds frame N+1 while the GPU draws N; at most two frames of GPU work are queued; a fence already complete is never
+// waited for. Everything this backend recycles is keyed on the timeline (sub(), vk_transient, the set pools after the
+// slot's wait, readbacks and screenshots wait on their own submission), not on the game's fence, so only the game
+// thread's wait changes. What the game may touch in that frame while the GPU still reads it: its per-frame vertex /
+// index data in the guest heap (bound in place; an engine built to overlap double-buffers it anyway), uniform data is
+// copied at translation (guest_copy), GPU results the CPU reads (texture / buffer copies) are flushed synchronously,
+// and the storage buffers it rewrites one frame ahead get copies (snap_storage). The timing counters are read a frame
+// before their GPU time is known: in this mode an end counter reports the latest completed frame's GPU span
+// (cq_resolve keeps it host side and no longer writes the game's memory late - the game may have reused the slot).
+// LARECOMP_GPU_OVERLAP=0: off (the wait on the fence's own submission, as before); =1: on.
+#define VK_OVERLAP_DEFAULT 0  // (the default until the Windows / Linux runs verified it: then 1)
+static uint64_t deferred_seq;   // (seq_lock) the fence the game was told is done but whose submission wasn't waited for
+static uint64_t stat_deferred;  // SyncWaits returned without waiting (stats)
+static uint64_t stat_snap_bytes, stat_snap_copies;  // storage copies made (snap_storage; stats, per period)
+static bool overlap_on(void) {
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_GPU_OVERLAP");
+        on = e ? atoi(e) != 0 : VK_OVERLAP_DEFAULT;
+        LOG("[vk] GPU overlap %s (the game's frame fence waited one frame late; LARECOMP_GPU_OVERLAP=%d: %s)\n", on ? "on" : "off",
+            !on, on ? "off" : "on");
+    }
+    return on;
+}
+static _Atomic uint64_t g_last_gpu_frame_ticks;  // (overlap) the latest resolved counter pair's GPU span, in Switch GPU ticks
+static const uint64_t *cq_last_out;              // (cq_lock) the counter resolved last and its GPU ticks: a pair may straddle
+static uint64_t cq_last_ticks;                   // two submissions
+static uint64_t snap_ring_end(void);             // (snap_storage: the copies' ring after the game's heap, for gmem_heap_size)
+
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
     VK_CHECK(vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v));
@@ -192,16 +225,30 @@ static void cq_resolve(int i) {  // (cq_lock held) submission slot i is done: it
             uint64_t gpu = ns_to_gpu_ticks((uint64_t)((int64_t)((double)t[k] * per) + cq_offset));
             if (log) LOG("[counter] seq %llu #%u at %llx host %.3f gpu %.3f ms\n", (unsigned long long)q->seq, k,
                          (unsigned long long)(uintptr_t)q->out[k], q->out[k][1] * 625.0 / 384 / 1e6, gpu * 625.0 / 384 / 1e6);
-            q->out[k][1] = pace_end_counter(k ? q->out[k - 1] : NULL, q->out[k], gpu);
+            if (overlap_on()) {
+                // kept host side: the pair's span becomes the next end counter's reading (the game has read this pair
+                // already - its fence wait returned a frame early - and may have reused the slot for the next frame)
+                if (cq_last_out && q->out[k] - cq_last_out == 2 && gpu >= cq_last_ticks && gpu - cq_last_ticks < 614400000ull)
+                    atomic_store(&g_last_gpu_frame_ticks, gpu - cq_last_ticks);  // (an end counter 16 bytes after its start; under a second)
+                cq_last_out = q->out[k], cq_last_ticks = gpu;
+            } else {
+                q->out[k][1] = pace_end_counter(k ? q->out[k - 1] : NULL, q->out[k], gpu);
+            }
         }
         stat_counters_gpu += q->n;
     }
     q->n = 0;
 }
 
-static void cq_resolve_done(uint64_t done) {  // every slot whose submission is done
+static void cq_resolve_done(uint64_t done) {  // every slot whose submission is done, in submission order
     pthread_mutex_lock(&cq_lock);
-    for (int i = 0; i < SUBS; i++) if (cq[i].n && cq[i].seq <= done) cq_resolve(i);
+    for (;;) {
+        int best = -1;
+        for (int i = 0; i < SUBS; i++)
+            if (cq[i].n && cq[i].seq <= done && (best < 0 || cq[i].seq < cq[best].seq)) best = i;
+        if (best < 0) break;
+        cq_resolve(best);
+    }
     pthread_mutex_unlock(&cq_lock);
 }
 
@@ -469,10 +516,17 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
 
+static void overlap_clear(void) {  // (a full wait was made: everything queued so far is done)
+    pthread_mutex_lock(&seq_lock);
+    deferred_seq = 0;
+    pthread_mutex_unlock(&seq_lock);
+}
+
 void renderer_flush(void) {
     renderer_submit();
     if (!wait_why) wait_why = "flush";
     vk_wait_seq(submit_seq);
+    overlap_clear();
 }
 
 // The latest submission the driver has (rqueue.h): with the recorder, behind renderer_issued_seq until it catches up.
@@ -493,6 +547,25 @@ void renderer_sync(void) {
     pthread_mutex_unlock(&seq_lock);
     wait_why = "QueueFinish / sync all";
     vk_wait_seq(s);
+    overlap_clear();
+}
+
+// (overlap) The game's SyncWait on submission seq: done is the latest complete submission, *deferred the one a previous
+// call returned early for (0: none). Returns the submission to wait for now (0: none); updates *deferred. A fence
+// that is complete is never waited for; a newer fence than the deferred one waits for the deferred one and takes its
+// place; the deferred fence itself, or an older one, is waited for. (tools/test_vulkan_overlap.py)
+static uint64_t overlap_defer(uint64_t seq, uint64_t done, uint64_t *deferred) {
+    uint64_t prev = *deferred;
+    if (seq <= done) {  // complete (in order: a deferred one no newer than it is complete too)
+        if (seq >= prev) *deferred = 0;
+        return 0;
+    }
+    if (seq > prev) {  // a newer fence: the deferred one is waited for now, this one at the next call
+        *deferred = seq;
+        return prev > done ? prev : 0;
+    }
+    if (seq == prev) *deferred = 0;  // the deferred fence again, or an older one: a real wait on it
+    return seq;
 }
 
 uint64_t renderer_fence_seq(void) {
@@ -512,7 +585,21 @@ void renderer_wait_seq(uint64_t seq) {
     uint64_t s = submit_seq;
     pthread_mutex_unlock(&seq_lock);
     wait_why = seq > s ? "SyncWait (fence not submitted yet)" : "SyncWait";
-    vk_wait_seq(seq > s ? s : seq);  // not queued yet (other thread): everything queued so far (vk_wait_seq: the recorder, then the GPU)
+    if (seq > s) seq = s;  // not queued yet (other thread): everything queued so far (vk_wait_seq: the recorder, then the GPU)
+    if (overlap_on()) {  // (see deferred_seq) wait for the fence deferred last time, defer this one
+        uint64_t done = vk_completed_seq();  // (the timeline's value: a submission the recorder hasn't made yet isn't done)
+        pthread_mutex_lock(&seq_lock);
+        uint64_t w = overlap_defer(seq, done, &deferred_seq);
+        pthread_mutex_unlock(&seq_lock);
+        if (!w) {
+            __atomic_fetch_add(&stat_deferred, 1, __ATOMIC_RELAXED);  // (the game thread; stats read on the render thread)
+            wait_why = NULL;
+            cq_resolve_done(done);  // (the game reads its timing counters now: what is complete so far)
+            return;
+        }
+        seq = w;
+    }
+    vk_wait_seq(seq);
 }
 
 // A descriptor set for the pending submission (record.c: the slot's pools, allocated in batches per layout). With
@@ -964,11 +1051,14 @@ const char *renderer_stats(void) {
         LOG("\n");
     }
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB",
+             "%llu draws, %llu skipped, %llu passes, %llu dispatches, %llu flushes, wait %.0fms, compile %d, fbcopy %llu, upload %.1fMB, "
+             "deferred %llu, snap %lluKB/%llu",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
-             atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0);
-    stat_feedback_copies = stat_upload_bytes = 0;
+             atomic_exchange(&stat_compiles, 0), (unsigned long long)stat_feedback_copies, (double)stat_upload_bytes / 1048576.0,
+             (unsigned long long)__atomic_exchange_n(&stat_deferred, 0, __ATOMIC_RELAXED), (unsigned long long)(stat_snap_bytes >> 10),
+             (unsigned long long)stat_snap_copies);  // (overlap: SyncWaits returned early; storage copies made)
+    stat_feedback_copies = stat_upload_bytes = stat_snap_bytes = stat_snap_copies = 0;
     {
         extern void vk_alias_stats(void);
         vk_alias_stats();
@@ -2678,6 +2768,243 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
     prof_cb_copied++;
     return s;
 }
+// ---- storage buffers the game rewrites one frame ahead (overlap; renderer.m snap_storage)
+// The game's tiled light / exposure lists: each frame its CPU memcpys the list for the frame after this one into the
+// buffer the frame being drawn reads (7281e33500+32640 and 7281e3bd00+2040, alternating by frame), which the Switch's
+// fence made safe. With the fence deferred that copy lands while the GPU still reads the list: screen-aligned tiles
+// without shadow, a dark saturated picture when the exposure program (72a8da6000) reads it - worse the slower the GPU.
+// Other storage data (the skinning program 72a8da0000's outputs, read in place by the exposure program and by draws
+// binding them as vertex data from an offset into the pool: BowWow's body) is only ever written by the GPU and must
+// stay where the game put it.
+// Which is which is decided per memory range from what the CPU does, with no wait and no probe of the programs: a
+// range's first use in a level is a one-frame PROBE, in which every binder - a compute slot, a draw's storage read -
+// works on a copy taken at translation, so the GPU cannot touch the original. At the range's next use the original is
+// hashed again: changed, the CPU rewrites it - COPY from then on (a fresh copy whenever its data changes, otherwise the
+// one the GPU may have modified, shared by the compute and all its readers); unchanged, it is GPU-only or static - IN
+// PLACE from then on. A range is probed again when the level changes or after 10 s unused; one that no compute slot
+// ever binds is also moved to COPY if its data changes later. ~100 KB copied and hashed per frame in the field.
+// Where the copies live: shaders address storage by guest address through the heap import (one buffer, lazy chunks,
+// gfast's copy of the bound ranges), which covers only the heap the game set up (gmem_heap_size; Metal has the whole
+// range in one buffer and uses its top). So the ring sits right after the game's heap and gmem_heap_size includes it:
+// the one-buffer import takes it in, lazy mode imports its chunk when a copy is first bound (gmem_chunk_bind touches
+// the effective addresses), gfast copies from it. Windows commits it (a userptr import needs committed pages).
+// The ring is two halves: copies fill one; when it is full the submission pending then is noted for it and the other
+// half is taken, after waiting for the submission noted when that half was left - its old copies are never bound
+// again after the switch (snap_gen: every entry re-copies), so nothing newer uses them. At ~100 KB a frame that wait
+// is long satisfied; a half filling within one submission (not a real case) binds the original for that draw.
+// LARECOMP_OVERLAP_SNAP=0: off (everything in place, as before: shows the race).
+#define SNAP_HALF (8ull << 20)
+#define SNAP_RING (2 * SNAP_HALF)
+enum { RS_PROBE, RS_COPY, RS_PLACE };
+typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen, level; uint8_t mode; bool cs_bound; } RangeState;
+static RangeState rs_tab[512];
+static int nrs;
+static int snap_state = -1;        // -1 not decided (the heap not set up yet), 0 off, 1 on
+static uint64_t snap_base;         // heap offset of the ring (on)
+static uint64_t snap_off;          // used bytes of the current half
+static int snap_half;              // the half being filled
+static uint64_t snap_half_seq[2];  // the submission pending when each half was last left (its copies may be in use until then)
+static uint32_t snap_gen = 1;      // (bumped at a half switch: older copies are never bound again)
+static uint32_t rs_level_gen = 1;
+static Range sb_eff[6][16];        // the current draw's / dispatch's storage table with the copies' addresses (snap_apply)
+static bool sb_eff_on;
+static inline const Range *sbufs(int stage) { return sb_eff_on ? sb_eff[stage] : st.sbuf[stage]; }
+
+static uint64_t range_hash(uint64_t addr, uint64_t size) {
+    const uint64_t *w = (const uint64_t *)(uintptr_t)addr;
+    uint64_t h = 1469598103934665603ull, n = size / 8;
+    for (uint64_t i = 0; i < n; i++) h = (h ^ w[i]) * 1099511628211ull;
+    return h;
+}
+static void snap_ring_import_tail(void);  // (with the lazy chunks below)
+// Decided once the game's heap is set up (SetHeapSize), which is before anything is drawn: the ring follows the heap.
+static bool snap_on(void) {
+    if (snap_state >= 0) return snap_state;
+    uint64_t heap = kernel_heap_size();
+    if (!heap) return false;  // (not decided yet)
+    const char *e = getenv("LARECOMP_OVERLAP_SNAP");
+    snap_state = (!e || atoi(e) != 0) && overlap_on();
+    if (snap_state) {
+        snap_base = (heap + 0xFFFF) & ~0xFFFFull;  // (minImportedHostPointerAlignment: 64 KB at most)
+        if (snap_base + SNAP_RING > HEAP_MAX) {
+            snap_state = 0;
+            LOG("[vk] storage snapshots off: the game's heap fills the range\n");
+        } else {
+            plat_commit(HEAP_BASE + snap_base, SNAP_RING);  // (Windows: backed before the import pins it)
+            LOG("[vk] storage buffers the CPU rewrites: copies at %llx (%llu MB ring after the game's heap)\n",
+                (unsigned long long)(HEAP_BASE + snap_base), (unsigned long long)(SNAP_RING >> 20));
+            snap_ring_import_tail();  // (lazy chunks: one imported short of the ring already is imported again over it)
+        }
+    }
+    return snap_state;
+}
+static uint64_t snap_ring_end(void) { return snap_on() ? snap_base + SNAP_RING : 0; }  // (heap offset; 0: no ring)
+static void snap_reset(void) {  // (vk_exec_reset: a reboot - the heap is set up again, its pages replaced)
+    snap_state = -1;
+    snap_base = snap_off = 0;
+    snap_half = 0;
+    snap_half_seq[0] = snap_half_seq[1] = 0;
+    snap_gen++;
+    nrs = 0;
+    sb_eff_on = false;
+}
+static void rs_level_tick(void) {  // (a new level: every range is probed again on its next use)
+    extern const char *game_level_name(void);
+    static char last[64];
+    const char *lv = game_level_name();
+    if (lv && strncmp(lv, last, sizeof last - 1)) { snprintf(last, sizeof last, "%s", lv); rs_level_gen++; }
+}
+// A copy of e's range in the ring: its guest address, or 0 when none can be made now (see the half switch above)
+static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
+    uint64_t aligned = (snap_off + 255) & ~255ull;
+    if (aligned + e->size > SNAP_HALF) {  // this half is full: the other one, once the GPU is done with what it held
+        int other = snap_half ^ 1;
+        uint64_t need = snap_half_seq[other], done = vk_completed_seq();
+        if (need > done) {
+            if (need > renderer_issued_seq()) return 0;  // (still being recorded: can't be waited for - in place this once)
+            wait_why = "storage snapshot ring";
+            vk_wait_seq(need);
+        }
+        snap_half_seq[snap_half] = vk_pending_seq();
+        snap_half = other;
+        snap_gen++;
+        aligned = 0;
+    }
+    e->copy = HEAP_BASE + snap_base + (uint64_t)snap_half * SNAP_HALF + aligned;
+    memcpy((void *)(uintptr_t)e->copy, (const void *)(uintptr_t)e->addr, e->size);
+    snap_off = aligned + e->size;
+    e->hash = h, e->gen = snap_gen;
+    stat_snap_bytes += e->size;
+    stat_snap_copies++;
+    return e->copy;
+}
+// The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
+static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
+    if (!snap_on() || !addr || !size || size > SNAP_HALF / 8 || addr < HEAP_BASE || addr - HEAP_BASE + size > snap_base) return addr;
+    if (kernel_heap_size() > snap_base) {  // (the game grew its heap into the ring: off from now on)
+        static bool logged;
+        if (!logged) { logged = true; LOG("[vk] storage snapshots off: the game's heap grew into the ring\n"); }
+        snap_state = 0;
+        return addr;
+    }
+    extern int nvn_pool_flags_at(uint64_t addr);
+    int pf = nvn_pool_flags_at(addr);
+    if (pf < 0 || (pf & 1)) return addr;  // (CPU_NO_ACCESS: static data, nothing to race with)
+    rs_level_tick();
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    RangeState *e = NULL;
+    for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == addr && rs_tab[i].size == size) { e = &rs_tab[i]; break; }
+    uint64_t c;
+    if (!e) {
+        if (nrs == 512) { nrs = 0; snap_gen++; }  // (table full: start over, copies renewed)
+        e = &rs_tab[nrs++];
+        memset(e, 0, sizeof *e);
+        e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
+        e->cs_bound = cs_slot;
+        // the probe frame: every binder this frame takes this copy (frame == f below); the decision is at the next
+        // frame's use, when a CPU rewrite can have happened (renderer.m stamps f - 1 here, so a second binder in the
+        // same frame rehashes and finds it unchanged: IN PLACE before the CPU had a chance to write)
+        c = rs_copy_make(e, range_hash(addr, size));
+        if (!c) nrs--;                                 // (no copy possible now: not probed yet)
+        return c ? c : addr;
+    }
+    if (cs_slot) e->cs_bound = true;
+    if (e->frame == f) {  // (bound again this frame)
+        if (e->mode == RS_PLACE) return addr;
+        if (e->gen == snap_gen) return e->copy;
+        c = rs_copy_make(e, e->hash);
+        return c ? c : addr;
+    }
+    bool again = e->level != rs_level_gen || f - e->frame > 600;  // (a new level, or unused: probe again)
+    e->level = rs_level_gen;
+    e->frame = f;
+    if (e->mode == RS_PLACE && !again && e->cs_bound) return addr;
+    uint64_t h = range_hash(addr, size);
+    if (again) { e->mode = RS_PROBE; c = rs_copy_make(e, h); return c ? c : addr; }
+    switch (e->mode) {
+    case RS_PLACE:  // (never a compute slot's: a change can only be the CPU's)
+        if (h == e->hash) return addr;
+        e->mode = RS_COPY;
+        break;
+    case RS_PROBE:  // the use after the probe: did the CPU touch the original meanwhile?
+        if (h == e->hash) { e->mode = RS_PLACE; return addr; }
+        e->mode = RS_COPY;
+        break;
+    default:  // RS_COPY
+        if (h == e->hash && e->gen == snap_gen) return e->copy;  // unchanged: the copy (maybe GPU-modified) is current
+        break;
+    }
+    c = rs_copy_make(e, h);
+    return c ? c : addr;
+}
+
+// (debug) LARECOMP_LOG_BINDS=1: guest memory the GPU reads in place, per frame (bytes bound; distinct ranges once),
+// and the ranges of the previous frame whose contents the game rewrote by the time this frame is translated: with
+// the frame fence deferred (overlap) the GPU may still read them - the racing data. kind: 0 vertex, 1 index,
+// 2 storage (a draw's read), 3 compute slot.
+static void bind_note(int kind, uint64_t addr, uint64_t size) {
+    static int on = -1;
+    if (on < 0) on = getenv("LARECOMP_LOG_BINDS") != NULL;
+    if (!on || addr < HEAP_BASE || addr - HEAP_BASE + size > HEAP_MAX || size < 8) return;
+    extern int nvn_pool_flags_at(uint64_t addr);
+    enum { REC = 8192 };
+    static struct { uint64_t addr, size, hash; uint8_t kind; } rec[REC];
+    static int nrec;
+    static uint64_t frame, all[4], uniq[4], wr[4];
+    static uint32_t n[4];
+    extern uint64_t renderer_exec_frame(void);
+    uint64_t f = renderer_exec_frame();
+    if (f != frame) {
+        // the previous frame's ranges, rewritten since?
+        uint64_t chg[4] = {0}, chgn[4] = {0};
+        int shown = 0;
+        for (int i = 0; i < nrec; i++) {
+            if (range_hash(rec[i].addr, rec[i].size) == rec[i].hash) continue;
+            chg[rec[i].kind] += rec[i].size; chgn[rec[i].kind]++;
+            if (frame % 120 == 0 && shown++ < 12)
+                LOG("[race] frame %llu %s %llx+%llu pool flags %#x\n", (unsigned long long)frame,
+                    rec[i].kind == 0 ? "vertex" : rec[i].kind == 1 ? "index" : rec[i].kind == 2 ? "storage" : "compute",
+                    (unsigned long long)rec[i].addr, (unsigned long long)rec[i].size, nvn_pool_flags_at(rec[i].addr));
+        }
+        if (frame % 120 == 0 || chgn[0] + chgn[1] + chgn[2] + chgn[3])
+            LOG("[binds] frame %llu: vertex %llu KB (%llu KB distinct, %u binds), index %llu KB (%llu), storage %llu KB (%llu, %u), compute %llu KB (%llu) | in CPU-writable pools: %llu/%llu/%llu/%llu KB | rewritten since: vertex %llu KB/%llu, index %llu KB/%llu, storage %llu KB/%llu, compute %llu KB/%llu\n",
+                (unsigned long long)frame, (unsigned long long)(all[0] >> 10), (unsigned long long)(uniq[0] >> 10), n[0], (unsigned long long)(all[1] >> 10), (unsigned long long)(uniq[1] >> 10),
+                (unsigned long long)(all[2] >> 10), (unsigned long long)(uniq[2] >> 10), n[2], (unsigned long long)(all[3] >> 10), (unsigned long long)(uniq[3] >> 10),
+                (unsigned long long)(wr[0] >> 10), (unsigned long long)(wr[1] >> 10), (unsigned long long)(wr[2] >> 10), (unsigned long long)(wr[3] >> 10),
+                (unsigned long long)(chg[0] >> 10), (unsigned long long)chgn[0], (unsigned long long)(chg[1] >> 10), (unsigned long long)chgn[1],
+                (unsigned long long)(chg[2] >> 10), (unsigned long long)chgn[2], (unsigned long long)(chg[3] >> 10), (unsigned long long)chgn[3]);
+        nrec = 0; memset(all, 0, sizeof all); memset(uniq, 0, sizeof uniq); memset(n, 0, sizeof n); memset(wr, 0, sizeof wr);
+        frame = f;
+    }
+    all[kind] += size; n[kind]++;
+    for (int i = 0; i < nrec; i++) if (rec[i].addr == addr && rec[i].size == size) return;
+    if (nrec == REC) return;
+    rec[nrec].addr = addr; rec[nrec].size = size; rec[nrec].kind = (uint8_t)kind;
+    rec[nrec].hash = range_hash(addr, size);
+    nrec++;
+    uniq[kind] += size;
+    int pf = nvn_pool_flags_at(addr);
+    if (pf < 0 || !(pf & 1)) wr[kind] += size;  // (distinct bytes in pools the CPU can write: what a snapshot would copy)
+}
+
+// Before a draw (stages 0 and 1: the slots the shader reads addresses of, si->ssbo_read) or a dispatch (stage 5: every
+// bound slot): the stage's effective storage table, with the copies' addresses where a range is snapshotted. Every
+// reader of the table in the draw / dispatch (drv_dedupe, cbuf_info, gmem_direct_pick, gmem_chunk_bind, gfast_prepare,
+// vc_mark_sbufs) takes sbufs(stage); st.sbuf itself keeps the game's bindings (rehashed next frame).
+static void snap_apply(int stage, uint32_t read_mask) {
+    bool on = snap_on();
+    for (int i = 0; i < 16; i++)
+        if (st.sbuf[stage][i].addr && ((read_mask >> i) & 1)) bind_note(stage == 5 ? 3 : 2, st.sbuf[stage][i].addr, st.sbuf[stage][i].size);
+    if (!on) { sb_eff_on = false; return; }
+    sb_eff_on = true;
+    memcpy(sb_eff[stage], st.sbuf[stage], sizeof sb_eff[stage]);
+    for (int i = 0; i < 16; i++) {
+        Range *r = &sb_eff[stage][i];
+        if (r->addr && ((read_mask >> i) & 1)) r->addr = snap_storage(r->addr, r->size, stage == 5);
+    }
+}
+
 // The driver constants of a graphics stage (cbuf 0, size bytes): zero but for the stage's storage buffer table at
 // base (16 bytes an entry: address low, high, size). Compared by the entries within size.
 static VkSpan drv_dedupe(int stage, uint64_t size) {
@@ -2687,8 +3014,9 @@ static VkSpan drv_dedupe(int stage, uint64_t size) {
     int ne = size > base ? (int)((size - base + 15) / 16) : 0;
     if (ne > 16) ne = 16;
     uint64_t seq = vk_pending_seq();
+    const Range *sb = sbufs(stage);  // (overlap: a snapshotted range's copy)
     if (last[slot].seq == seq && last[slot].size == size && last[slot].stage == stage &&
-        !memcmp(last[slot].sb, st.sbuf[stage], (size_t)ne * sizeof(Range))) {
+        !memcmp(last[slot].sb, sb, (size_t)ne * sizeof(Range))) {
         prof_cb_reused++;
         return last[slot].span;
     }
@@ -2696,13 +3024,13 @@ static VkSpan drv_dedupe(int stage, uint64_t size) {
     memset(drv, 0, size);
     for (int i = 0; i < ne; i++) {  // (an entry may run past size: drv is 0x800 bytes, only size of them are copied)
         uint32_t *e = &drv[(base + 16 * i) / 4];
-        e[0] = (uint32_t)st.sbuf[stage][i].addr;
-        e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
-        e[2] = (uint32_t)st.sbuf[stage][i].size;
+        e[0] = (uint32_t)sb[i].addr;
+        e[1] = (uint32_t)(sb[i].addr >> 32);
+        e[2] = (uint32_t)sb[i].size;
     }
     VkSpan s = vk_transient_copy(drv, size, 256);
     last[slot].seq = seq; last[slot].size = size; last[slot].stage = stage; last[slot].span = s;
-    memcpy(last[slot].sb, st.sbuf[stage], (size_t)ne * sizeof(Range));
+    memcpy(last[slot].sb, sb, (size_t)ne * sizeof(Range));
     prof_cb_copied++;
     return s;
 }
@@ -2716,21 +3044,22 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             return ubo_span(drv_dedupe(stage, size), size);
         }
         uint32_t drv[0x800 / 4] = {0};
+        const Range *sb = sbufs(stage);  // (overlap: a snapshotted range's copy)
         if (stage == 5) {
             drv[0x200 / 4] = gx; drv[0x204 / 4] = gy; drv[0x208 / 4] = gz;
             for (int i = 0; i < 16; i++) {
                 uint32_t *u = &drv[(0x210 + 16 * i) / 4];
                 u[0] = (uint32_t)st.ubuf[5][i].addr; u[1] = (uint32_t)(st.ubuf[5][i].addr >> 32); u[2] = (uint32_t)st.ubuf[5][i].size;
                 uint32_t *e = &drv[(0x310 + 16 * i) / 4];
-                e[0] = (uint32_t)st.sbuf[5][i].addr; e[1] = (uint32_t)(st.sbuf[5][i].addr >> 32); e[2] = (uint32_t)st.sbuf[5][i].size;
+                e[0] = (uint32_t)sb[i].addr; e[1] = (uint32_t)(sb[i].addr >> 32); e[2] = (uint32_t)sb[i].size;
             }
         } else {
             uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
             for (int i = 0; i < 16; i++) {
                 uint32_t *e = &drv[(base + 16 * i) / 4];
-                e[0] = (uint32_t)st.sbuf[stage][i].addr;
-                e[1] = (uint32_t)(st.sbuf[stage][i].addr >> 32);
-                e[2] = (uint32_t)st.sbuf[stage][i].size;
+                e[0] = (uint32_t)sb[i].addr;
+                e[1] = (uint32_t)(sb[i].addr >> 32);
+                e[2] = (uint32_t)sb[i].size;
             }
         }
         uint64_t size = si->cbuf_size[0] > sizeof drv ? sizeof drv : (si->cbuf_size[0] ? si->cbuf_size[0] : 256);
@@ -3269,6 +3598,8 @@ static void gmem_chunk_decide(void) {
 // The heap mapped so far, as the imports see it (SetHeapSize; pages beyond it don't exist yet).
 static uint64_t gmem_heap_size(void) {
     uint64_t want = (kernel_heap_size() + 0xFFFF) & ~0xFFFFull;
+    uint64_t ring = snap_ring_end();  // (overlap: the storage copies' ring right after the heap is the GPU's too)
+    if (ring > want) want = ring;
     return want > HEAP_MAX ? HEAP_MAX : want;
 }
 
@@ -3299,6 +3630,15 @@ static bool gc_import(int k) {
     gc_imported_bytes += size;
     gc_gen++;
     return true;
+}
+
+// (snap_on, lazy chunks) The chunk holding the end of the game's heap may have been imported before the ring was
+// decided, short of it: imported again over the ring (gc_import replaces it; the old import goes once its submissions
+// are done). snap_state is set before this runs, so gmem_heap_size's answer includes the ring here.
+static void snap_ring_import_tail(void) {
+    if (!gc_lazy || !gc_shift) return;
+    for (int k = (int)(snap_base >> gc_shift); k <= (int)((snap_base + SNAP_RING - 1) >> gc_shift) && k < gc_n; k++)
+        if (gc[k].buf && gc[k].size < gmem_heap_size() - ((uint64_t)k << gc_shift)) gc_import(k);
 }
 
 // Pointers the game keeps in its uniform buffers (the lighting pass's light list, the grass's instance tables): the
@@ -3493,7 +3833,7 @@ static void gmem_direct_pick(uint32_t stages, uint32_t gd[GMEM_DIRECT_MAX * 4], 
     for (int stage = 0; on && stage < 2; stage++) {
         if (!(stages & (1u << stage))) continue;
         for (int i = 0; i < 16 && n < GMEM_DIRECT_MAX; i++) {
-            uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+            uint64_t a = sbufs(stage)[i].addr, sz = sbufs(stage)[i].size;  // (overlap: a snapshotted range's copy)
             if (a < HEAP_BASE || a - HEAP_BASE >= HEAP_MAX) continue;
             uint64_t off = a - HEAP_BASE;
             int k0 = (int)(off >> gc_shift), k1 = (int)((off + (sz ? sz : 1) - 1) >> gc_shift);
@@ -3521,7 +3861,7 @@ static void gmem_chunk_bind(VkCommandBuffer cb, VkPipelineBindPoint bp, VkPipeli
     for (int stage = 0; stage < 6; stage++) {
         if (!(stages & (1u << stage))) continue;
         for (int i = 0; i < 16; i++) {
-            uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+            uint64_t a = sbufs(stage)[i].addr, sz = sbufs(stage)[i].size;  // (overlap: a snapshotted range's copy - its chunk)
             if (a < HEAP_BASE || a - HEAP_BASE >= HEAP_MAX) continue;
             if (log_sb) {
                 static uint64_t seen[64]; static int nseen;
@@ -3630,7 +3970,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
     struct { uint64_t lo, hi; } r[16];
     int n = 0;
     for (int i = 0; i < 16; i++) {  // heap offsets of the bound storage buffers, 256-aligned
-        uint64_t a = st.sbuf[5][i].addr, sz = st.sbuf[5][i].size;
+        uint64_t a = sbufs(5)[i].addr, sz = sbufs(5)[i].size;  // (overlap: a snapshotted range's copy is what gets copied)
         if (!a || !sz || a < HEAP_BASE || !gmem_covers(a - HEAP_BASE, sz)) continue;
         uint64_t lo = (a - HEAP_BASE) & ~255ull, hi = (a - HEAP_BASE + sz + 255) & ~255ull, top = gc_lazy ? gmem_heap_size() : gmem_size;
         if (hi > top) hi = top;
@@ -3776,7 +4116,7 @@ static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
 // A storing shader (stage 0 / 1 / 5) may write any of its bound storage buffers.
 static void vc_mark_sbufs(int stage) {
     for (int i = 0; i < 16; i++) {
-        uint64_t a = st.sbuf[stage][i].addr, sz = st.sbuf[stage][i].size;
+        uint64_t a = sbufs(stage)[i].addr, sz = sbufs(stage)[i].size;  // (overlap: the copy, where the shader wrote)
         if (a >= HEAP_BASE && sz && a - HEAP_BASE < HEAP_MAX) vc_mark_gpu(a - HEAP_BASE, a - HEAP_BASE + sz);
     }
 }
@@ -3899,10 +4239,11 @@ void vc_flush(void) {
 // device-local cache above, else read in place - no per-draw copy, no index scan for the copy size. The game fences its
 // CPU writes as on the Switch. Falls back to copies outside the heap or without the import; LARECOMP_VK_COPY_VERTICES=1
 // forces copies.
-static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {
+static bool guest_direct(int kind, uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSize *off) {  // kind: 0 vertex, 1 index (bind_note)
     static int copy = -1;
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
+    bind_note(kind, addr, size);
     if (gc_lazy) {
         uint64_t o = addr - HEAP_BASE;
         if (!size || o + size > HEAP_MAX) return false;
@@ -3963,6 +4304,7 @@ void vk_exec_reset(void) {
     vc_bytes = 0;
     if (vc_page_gpu) memset(vc_page_gpu, 0, HEAP_MAX / VC_PAGE);
     vc_epoch++;
+    snap_reset();  // (overlap: the storage copies' ring follows the heap, decided again once it is set up)
     st_defaults();
 }
 
@@ -4553,6 +4895,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             LOG("\n");
         }
     }
+    snap_apply(5, 0xFFFF);  // (overlap) every bound slot: the probe / copy decision per range, before gfast and the sets read the table
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
@@ -4756,6 +5099,8 @@ static void draw_(CmdRec *r, bool indexed) {
             g_mirror_w = (float)st.rt.color[0]->width;
         }
     }
+    snap_apply(0, pr->vi->ssbo_read);  // (overlap) the storage slots the shaders read: a copy where the CPU rewrites the range
+    snap_apply(1, pr->fi->ssbo_read);
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -5130,7 +5475,7 @@ static void draw_(CmdRec *r, bool indexed) {
             uint32_t isz = itype == 1 ? 2 : 4;
             itype_vk = itype == 1 ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
             icount = count;
-            if (iaddr % isz == 0 && guest_direct(iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
+            if (iaddr % isz == 0 && guest_direct(1, iaddr, (uint64_t)count * isz, &ib.buf, &ib.off)) {
                 scan_src = src; scan_isz = isz; scan_restart = restart;  // max_index only if a stream gets copied
             } else {
                 ib = vk_transient_copy(src, (uint64_t)count * isz + 4, 4);
@@ -5171,7 +5516,7 @@ static void draw_(CmdRec *r, bool indexed) {
             Range v = st.vbuf[s];
             VkBuffer dbuf;
             VkDeviceSize doff;
-            if (v.addr && v.size && guest_direct(v.addr, v.size, &dbuf, &doff)) {
+            if (v.addr && v.size && guest_direct(0, v.addr, v.size, &dbuf, &doff)) {
                 if (ss_on && (ss.vb_known >> s & 1) && ss.vb[s] == dbuf && ss.vo[s] == doff) continue;
                 ss.vb[s] = dbuf; ss.vo[s] = doff; ss.vb_known |= 1u << s;
                 rec_CmdBindVertexBuffers(cb, (uint32_t)s, 1, &dbuf, &doff);
@@ -6303,6 +6648,9 @@ static void exec_list(uint64_t handle, int depth) {
             out[0] = 0;
             out[1] = mode == 1 ? frame_ts : mode == 3 ? SDL_GetTicksNS() : ns_to_gpu_ticks(plat_now_ns());  // (3 legacy: ns, the old bug)
             static uint64_t *prev_out;  // (frame pacing: the pair's start)
+            // (overlap) the game reads this pair before its GPU work is done: the end counter reports the latest
+            // completed pair's GPU span after this pair's start (the frame before, as a frame-late measurement)
+            if (mode == 2 && overlap_on() && prev_out && out - prev_out == 2) out[1] = prev_out[1] + atomic_load(&g_last_gpu_frame_ticks);
             if (mode == 0 || mode == 2) out[1] = pace_end_counter(prev_out, out, out[1]);
             prev_out = out;
             {   // (test) LARECOMP_TEST_COUNTER_DELAY_MS=<ms>: stall the host after a frame's first counter - a slow CPU
