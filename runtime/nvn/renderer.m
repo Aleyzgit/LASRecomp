@@ -2172,7 +2172,10 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         if (nrs == 512) { nrs = 0; snap_gen++; }  // (table full: start over, copies renewed)
         e = &rs_tab[nrs++];
         memset(e, 0, sizeof *e);
-        e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f - 1;
+        // (stamped with this frame: a second binder in the probe frame - the exposure dispatch and the draws read the
+        // list the first dispatch wrote - must share the copy, not rehash an original the CPU hasn't had a frame to
+        // touch and settle it in place for good; that left the race on the beach at 4x on an M6)
+        e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
         e->cs_bound = cs_slot;
         return rs_copy_make(e, range_hash(addr, size));  // the probe frame
     }
