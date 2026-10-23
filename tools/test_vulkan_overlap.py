@@ -359,13 +359,13 @@ int main(int argc, char **argv) {
     assert(snap_storage(ring_lo(), 2048, true) == ring_lo());
     assert(snap_storage(HEAP_BASE + heap_size - 1024, 2048, true) == HEAP_BASE + heap_size - 1024);
     assert(snap_storage(A, SNAP_HALF / 2 + 256, true) == A);
-    assert(snap_storage(A + 0x4000, SNAP_HALF / 2, true) != A + 0x4000);  // (the largest allowed: a half holds two)
+    assert(snap_storage(A + 0x4000, SNAP_HALF / 2, true) != A + 0x4000);  // (the largest allowed: a half holds two, one bound by compute)
     assert(snap_storage(HEAP_BASE - 4096, 2048, true) == HEAP_BASE - 4096);
-    // 8. the halves: 1 MB copies fill half 0; the switch to half 1 needs no wait (never used); a live copy stays where
+    // 8. the halves: 1 MB copies (512 KB ranges and their pristine images) fill half 0; the switch to half 1 needs no wait (never used); a live copy stays where
     //    it is across the switch (the GPU's writes into it survive); the switch back waits for the submission pending
     //    when half 0 was left and reuses only freed slots, walking past the live copies
     frame++;
-    uint64_t big = SNAP_HALF / 8;
+    uint64_t big = SNAP_HALF / 16;  // (a compute-bound copy takes twice that: the copy and its pristine image)
     uint8_t *d = heap_mem + (1ull << 20);
     uint64_t D = HEAP_BASE + (1ull << 20);
     memset(d, 4, big);
@@ -403,6 +403,48 @@ int main(int argc, char **argv) {
     uint64_t g1 = snap_storage(G, big, true);  // (half 0's only free slot: the probe copy D left behind; the live copies stay)
     assert(in_half(g1, 0) && g1 == keep && waited == 6 && snap_half == 0 && snap_half_seq[1] == 8);
     assert(rs_tab[nrs - 1].copy == g1 && !memcmp((void *)(uintptr_t)keep2, d, big));  // (D's live copy untouched)
+    // 8b. the per-frame pools (0x12): a draw's storage read is copied without a table entry; a compute bind of one
+    //     gets an entry, as before
+    issued = pending = completed = 9;
+    snap_off = 0; snap_half = 0;  // (a clean half 0: case 8's copies released)
+    for (int i = 0; i < nrs; i++) rs_tab[i].copy = rs_tab[i].pristine = 0;
+    frame++;
+    int n0 = nrs;
+    pool_flags = 0x12;
+    uint8_t *p12 = heap_mem + (6ull << 20);
+    uint64_t P = HEAP_BASE + (6ull << 20);
+    memset(p12, 7, 64);
+    uint64_t pc = snap_storage(P, 64, false);
+    assert(pc != P && nrs == n0 && !memcmp((void *)(uintptr_t)pc, p12, 64));
+    assert(snap_storage(P + 256, 64, true) != P + 256 && nrs == n0 + 1);
+    pool_flags = 4;
+    // 8c. a compute copy's remake keeps the GPU's writes into it where the CPU didn't write (the exposure list's state)
+    frame++;
+    uint8_t *x = heap_mem + (6ull << 20) + 65536;
+    uint64_t X = HEAP_BASE + (6ull << 20) + 65536;
+    memset(x, 1, 2048);
+    assert(snap_storage(X, 2048, true) != X);  // probe
+    frame++;
+    x[100] = 2;
+    uint64_t x1 = snap_storage(X, 2048, true);  // the CPU rewrote it: a copy, with its pristine image behind it
+    RangeState *ex = &rs_tab[nrs - 1];
+    assert(ex->addr == X && ex->mode == RS_COPY && ex->pristine == x1 + 2048);
+    ((uint8_t *)(uintptr_t)x1)[10] = 9;  // the GPU writes bytes 10 and 20
+    ((uint8_t *)(uintptr_t)x1)[20] = 9;
+    frame++;
+    x[20] = 3, x[30] = 4;  // the CPU writes bytes 20 and 30
+    uint64_t x2 = snap_storage(X, 2048, true);
+    const uint8_t *m2 = (const uint8_t *)(uintptr_t)x2;
+    assert(x2 != x1 && m2[10] == 9 && m2[20] == 3 && m2[30] == 4 && m2[100] == 2 && m2[0] == 1);
+    assert(!memcmp((void *)(uintptr_t)ex->pristine, x, 2048));
+    // 8d. a full table evicts the entry bound longest ago (never the whole table)
+    frame++;
+    for (int i = 0; nrs < 512; i++) assert(snap_storage(HEAP_BASE + (6ull << 20) + 131072 + (uint64_t)i * 256, 256, true));
+    uint64_t a0 = rs_tab[0].addr;
+    rs_tab[3].frame = 0;
+    frame++;
+    uint64_t Z = HEAP_BASE + (6ull << 20) + 65536 + 4096;
+    assert(snap_storage(Z, 256, true) != Z && nrs == 512 && rs_tab[3].addr == Z && rs_tab[0].addr == a0);
     // 9. the game grows its heap into the ring: off, everything in place from then on
     heap_size = snap_base + 4096;
     assert(snap_storage(A, 32640, true) == A && snap_state == 0 && snap_ring_end() == 0);
@@ -412,7 +454,7 @@ int main(int argc, char **argv) {
     assert(!snap_on() && snap_state == -1);
     heap_size = 8ull << 20;
     assert(snap_on() && snap_base == (8ull << 20) && commits == 2 && nrs == 0);
-    puts("PASS: snapshots - probe / in place / copy, level and idle re-probes, exclusions, the two halves and their waits, heap growth, reboot");
+    puts("PASS: snapshots - probe / in place / copy, level and idle re-probes, exclusions, the two halves and their waits, per-frame pool reads without entries, GPU writes kept across a remake, eviction, heap growth, reboot");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
