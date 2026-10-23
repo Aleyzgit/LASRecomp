@@ -8,10 +8,14 @@ extern "C" {
 #include "record.h"
 }
 
+// imgui_impl_vulkan.cpp: fixed vertex input draws nothing on this driver while dynamic vertex input is enabled.
+extern "C" int las_imgui_dyn_vertex = 0;
+
 // Per ImGui context (the start screen and the in-game menu each have one, and the start screen comes back after an
 // in-place reboot while the menu's context lives on): the backend keeps its data in the current context.
 extern "C" bool vk_imgui_backend_init(void) {
     if (ImGui::GetIO().BackendRendererUserData) return true;
+    las_imgui_dyn_vertex = g_vk.vids;
     ImGui_ImplVulkan_InitInfo ii = {};
     ii.ApiVersion = VK_API_VERSION_1_3;
     ii.Instance = g_vk.inst;
