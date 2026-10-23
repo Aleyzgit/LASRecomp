@@ -2880,7 +2880,12 @@ static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
 }
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
 static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
-    if (!snap_on() || !addr || !size || size > SNAP_HALF / 8 || addr < HEAP_BASE || addr - HEAP_BASE + size > snap_base) return addr;
+    if (!snap_on() || !addr || !size || addr < HEAP_BASE || addr - HEAP_BASE + size > snap_base) return addr;
+    if (size > SNAP_HALF / 2) {  // (the tile lists grow with the render resolution: ~1.2 MB at 7680x4320; a half holds two of these)
+        static int logged;
+        if (logged++ < 4) LOG("[vk] storage range %llx+%llu too large for a snapshot: read in place\n", (unsigned long long)addr, (unsigned long long)size);
+        return addr;
+    }
     if (kernel_heap_size() > snap_base) {  // (the game grew its heap into the ring: off from now on)
         static bool logged;
         if (!logged) { logged = true; LOG("[vk] storage snapshots off: the game's heap grew into the ring\n"); }

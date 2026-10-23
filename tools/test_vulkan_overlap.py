@@ -148,7 +148,8 @@ int main(void) {
     pool_flags = 4;
     assert(snap_storage(ring_lo(), 2048, true) == ring_lo());
     assert(snap_storage(HEAP_BASE + heap_size - 1024, 2048, true) == HEAP_BASE + heap_size - 1024);
-    assert(snap_storage(A, SNAP_HALF / 8 + 256, true) == A);
+    assert(snap_storage(A, SNAP_HALF / 2 + 256, true) == A);
+    assert(snap_storage(A + 0x4000, SNAP_HALF / 2, true) != A + 0x4000);  // (the largest allowed: a half holds two)
     assert(snap_storage(HEAP_BASE - 4096, 2048, true) == HEAP_BASE - 4096);
     // 8. the halves: 1 MB copies fill half 0; the switch to half 1 needs no wait (never used); the switch back waits for
     //    the submission pending when half 0 was left, and an old copy is never bound again after a switch
