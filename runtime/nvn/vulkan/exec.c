@@ -2914,6 +2914,8 @@ static struct { uint64_t page; volatile int armed; } watch_pages[WATCH_PAGES];
 static int nwatch_pages;
 static volatile int rs_cpu_wrote[512];  // (by entry index, set by the fault handler)
 static bool heap_is_userptr(void);      // (with the heap import below)
+bool renderer_watch_fault(uint64_t fa);  // (below; registered with dispatch.c's fault routing when the watch is on)
+void rt_fault_watch_hook(bool (*hook)(uint64_t fa));  // (dispatch.c)
 static uint64_t watch_page_size(void) {
     static uint64_t sz;
     if (!sz) {
@@ -2933,6 +2935,7 @@ static bool watch_on(void) {
         if (on && heap_is_userptr()) { on = 0; LOG("[vk] storage write watch off: the guest heap is a userptr import (the hash probe instead)\n"); }
         else LOG("[vk] storage write watch %s (compute-bound ranges copied from the first CPU store; %llu KB pages)\n", on ? "on" : "off (LARECOMP_OVERLAP_WATCH=0)",
                  (unsigned long long)(watch_page_size() >> 10));
+        if (on) rt_fault_watch_hook(renderer_watch_fault);  // (before any page is armed)
     }
     return on;
 }

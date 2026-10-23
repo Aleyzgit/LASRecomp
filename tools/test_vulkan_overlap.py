@@ -102,6 +102,8 @@ static uint64_t stat_snap_bytes, stat_snap_copies;
 ''' + snap + r'''
 static void snap_ring_import_tail(void) {}
 static bool heap_is_userptr(void) { return userptr; }
+static bool (*fault_hook)(uint64_t);  // (dispatch.c's: registered when the watch turns on)
+void rt_fault_watch_hook(bool (*hook)(uint64_t fa)) { fault_hook = hook; }
 static uint64_t ring_lo(void) { return HEAP_BASE + snap_base; }
 static bool in_ring(uint64_t a) { return a >= ring_lo() && a < ring_lo() + SNAP_RING; }
 static bool in_half(uint64_t a, int h) { return a >= ring_lo() + h * SNAP_HALF && a < ring_lo() + (h + 1) * SNAP_HALF; }
@@ -109,7 +111,7 @@ static bool in_half(uint64_t a, int h) { return a >= ring_lo() + h * SNAP_HALF &
 // The write watch (LARECOMP_OVERLAP_WATCH unset): compute-only ranges in place with their pages protected, copied
 // from the first CPU store (the platform's fault handler -> renderer_watch_fault)
 static void watch_tests(void) {
-    assert(snap_on() && watch_on());
+    assert(snap_on() && watch_on() && fault_hook == renderer_watch_fault);  // (the fault routing registered)
     uint64_t A = HEAP_BASE + 0x1000, B = HEAP_BASE + 0x20000, B2 = HEAP_BASE + 0x20800, C = HEAP_BASE + 0x40000, D = HEAP_BASE + 0x60000;
     // W1. a compute-only range starts in place, its pages (16 KB units) write-protected
     assert(snap_storage(A, 32640, true) == A && rs_tab[0].mode == RS_PLACE && nwatch_pages == 3);
