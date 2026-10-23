@@ -260,6 +260,7 @@ void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) {
 // Debug data watchpoint: the page is protected; accesses in [lo, hi) are attributed to the host
 // function (f_<guest addr>) doing them, then the page is reopened until the next re-arm.
 uint64_t g_watch_lo, g_watch_hi;
+uint64_t g_fault_lr;  // (the platform's handler: the faulting thread's link register, for the watch log)
 static uint64_t watch_page;
 static void *watch_thread(void *a) {
     (void)a;
@@ -279,15 +280,16 @@ void watch_arm(void) {
     pthread_create(&t, NULL, watch_thread, NULL);
 }
 
-uint64_t g_fault_lr;  // (the platform's handler: the faulting thread's link register, for the watch log)
+// The renderer's write watch on storage buffers (the Vulkan backend's renderer_watch_fault, exec.c; the Metal one's,
+// renderer.m): registered by the backend when it arms pages, called first for every fault on any thread. A plain
+// pointer, not a weak symbol: an undefined weak function reference doesn't link on Mach-O.
+static bool (*g_watch_hook)(uint64_t fa);
+void rt_fault_watch_hook(bool (*hook)(uint64_t fa)) { g_watch_hook = hook; }
 bool rt_fault_watch(uint64_t fa, uint64_t pc) {
-    uint64_t lr = g_fault_lr;
-    {   // the renderer's write watch on storage buffers (runtime/nvn/renderer.m renderer_watch_fault)
-        extern bool renderer_watch_fault(uint64_t fa) __attribute__((weak));
-        if (renderer_watch_fault && renderer_watch_fault(fa)) return true;
-    }
+    if (g_watch_hook && g_watch_hook(fa)) return true;
     if (!watch_page || fa < watch_page || fa >= watch_page + PLAT_PAGE) return false;
     if (fa >= g_watch_lo && fa < g_watch_hi) {
+        uint64_t lr = g_fault_lr;
         static int hits;  // (LARECOMP_WATCH_ADDR) each (frame, caller) once with its offset, the first 4000
         extern uint64_t renderer_present_count(void);
         static uint64_t last_frame, last_pc;

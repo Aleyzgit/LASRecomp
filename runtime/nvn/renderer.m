@@ -2170,8 +2170,8 @@ static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
 // Write watch (compute-only ranges). The CPU's rewrite of a range can't be seen in its bytes (the light lists are
 // rewritten with the same bytes while the view stands still, and the race is the GPU reading them mid-rewrite), so it
 // is caught as it happens: the pages of a range bound only by compute slots are write-protected (plat_protect) when
-// the range is first bound in a frame; the first CPU store into them faults (the platform's handler calls
-// renderer_watch_fault), the handler opens the page again and, if the store hit inside a watched range, marks that
+// the range is first bound in a frame; the first CPU store into them faults (the platform's handler calls the hook
+// registered with rt_fault_watch_hook, renderer_watch_fault), the handler opens the page again and, if the store hit inside a watched range, marks that
 // range CPU-written: COPY from then on. A store to a watched page outside any range only opens the page. A GPU
 // output is never stored to by the CPU and stays in place. A few pages and at most a few faults a frame.
 // LARECOMP_OVERLAP_WATCH=0: off (compute-only ranges stay in place, as before).
@@ -2179,9 +2179,14 @@ static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
 static struct { uint64_t page; volatile int armed; } watch_pages[WATCH_PAGES];
 static int nwatch_pages;
 static volatile int rs_cpu_wrote[512];  // (by entry index, set by the fault handler)
+bool renderer_watch_fault(uint64_t fa);
 static bool watch_on(void) {
     static int on = -1;
-    if (on < 0) { const char *e = ENV("LARECOMP_OVERLAP_WATCH"); on = !e || atoi(e) != 0; }
+    if (on < 0) {
+        const char *e = ENV("LARECOMP_OVERLAP_WATCH");
+        on = !e || atoi(e) != 0;
+        if (on) { extern void rt_fault_watch_hook(bool (*hook)(uint64_t fa)); rt_fault_watch_hook(renderer_watch_fault); }  // (dispatch.c: faults come here first)
+    }
     return on;
 }
 static void watch_arm_range(const RangeState *e) {
