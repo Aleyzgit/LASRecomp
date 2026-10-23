@@ -212,6 +212,8 @@ cancelled builds keep the previous installed library until a replacement is read
 - **[@rkammoun](https://github.com/rkammoun)** - diagnosed and patched the Metal 16-sampler limit behind the black walls in the Ukuku Prairie cave (#215, fixed in #216)
 - **[@NevesHenry](https://github.com/NevesHenry)** - a clear message on Linux when no folder or file window can open (#298), and the controller rumble test building again and running in CI (#299)
 - **[@ky1vstar](https://github.com/ky1vstar)** - the Linux aarch64 release built natively on an arm64 runner, cutting that build from about 1 h 20 to under 10 minutes (#319)
+- **[@theb0rg](https://github.com/theb0rg)** - the fix for AMD integrated graphics: a blank or broken picture and a crash when loading a save on the Radeon 780M (#335)
+- **[@gtf-dot](https://github.com/gtf-dot)** - the game-text font on Linux (bundled BIZ UDPGothic at the console font's size) and console font files read in either byte order (#330)
 
 Thanks also to everyone who reports issues and tests builds; your logs and screenshots find most of the bugs.
 
