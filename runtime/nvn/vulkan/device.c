@@ -681,7 +681,9 @@ static void image_barrier(VkCommandBuffer cb, VkImage img, VkImageLayout from, V
     rec_CmdPipelineBarrier2(cb, &di);
 }
 
-typedef struct { uint32_t image; VkSemaphore acquired; bool ok; } Frame;
+// id: frames acquired so far; secondary: the window image's rendering open now is the overlay's (vk_overlay_end), for
+// secondary command buffers only
+typedef struct { uint32_t image; VkSemaphore acquired; bool ok, secondary; uint64_t id; } Frame;
 static Frame cur_frame;
 
 // Acquire the next window image and begin rendering into it (cleared to `clear`). Returns false when there is
@@ -713,6 +715,8 @@ bool vk_frame_begin(const float clear[4]) {
     }
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { LOG("[vk] acquire failed: %d\n", r); return false; }
     cur_frame.acquired = acquire_sem[slot];
+    cur_frame.id++;
+    cur_frame.secondary = false;
     slot_seq[slot] = vk_pending_seq();
     VkCommandBuffer cb = vk_cmd();
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
@@ -739,6 +743,7 @@ void vk_frame_suspend(void) {
 }
 void vk_frame_resume(void) {
     if (!cur_frame.ok) return;
+    cur_frame.secondary = false;
     VkCommandBuffer cb = vk_cmd();
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
                                     .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -759,6 +764,93 @@ void *vk_frame_cmd(void) {
     VkCommandBuffer cb = vk_cmd();
     rec_drain();
     return (void *)cb;
+}
+
+// ---- the overlay (menu.mm menu_render: ImGui's FPS counter, run timer, cards, the menu)
+// ImGui's backend (imgui_impl_vulkan.cpp) makes its vkCmd* calls itself, on the thread that presents. With the recorder
+// thread on (record.c), the window image's command buffer and its pool are the recorder's until it has caught up:
+// ImGui recording into that buffer needed a full rec_drain first, every frame an overlay was up, which serialised the
+// two threads (the render thread waited for the recorder to record the whole frame: ~5 ms a frame on a desktop, 20-30
+// on a Steam Deck with only the FPS counter shown). Now ImGui records into a secondary command buffer from a pool of
+// this file's - one per frame slot, never recorded by the recorder - and the recorder executes it in its place in the
+// window image's commands: the window's rendering ends, a rendering of secondary command buffers begins on the same
+// image (its contents loaded) and executes it. That rendering stays open for vk_frame_end to end: nothing is drawn
+// into the window image inline after the overlay.
+// A slot's buffer is recorded again (its pool reset) only once the GPU finished the submission that executed it - the
+// slot comes round after vk_frame_begin waited for the window submission three frames back, so normally that is
+// already so - which implies the recorder made that vkCmdExecuteCommands long before: the pool is this thread's alone
+// whenever it touches it. ImGui's own objects (pipeline, buffers, descriptor sets) were only ever used by this thread.
+// The recorder off, LARECOMP_VK_OVERLAY_DIRECT=1, or a second overlay in one frame: ImGui records into the window
+// image's command buffer itself, after rec_drain (a no-op with the recorder off), as before.
+static VkCommandPool ov_pool[FRAMES];
+static VkCommandBuffer ov_cb[FRAMES];
+static uint64_t ov_seq[FRAMES], ov_frame[FRAMES];  // the submission that executed the slot's buffer; the frame it was for
+static VkCommandBuffer ov_open;                    // (handed out by vk_overlay_begin, until vk_overlay_end)
+static int ov_direct = -1;
+
+static bool ov_slot_ready(void) {  // (the slot's pool and buffer exist, and the buffer is free to record)
+    if (!ov_pool[slot]) {
+        VkCommandPoolCreateInfo pi = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT,
+                                      .queueFamilyIndex = g_vk.qfam};
+        if (vkCreateCommandPool(g_vk.dev, &pi, NULL, &ov_pool[slot]) != VK_SUCCESS) { ov_pool[slot] = VK_NULL_HANDLE; return false; }
+        VkCommandBufferAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = ov_pool[slot],
+                                          .level = VK_COMMAND_BUFFER_LEVEL_SECONDARY, .commandBufferCount = 1};
+        if (vkAllocateCommandBuffers(g_vk.dev, &ai, &ov_cb[slot]) != VK_SUCCESS) {
+            vkDestroyCommandPool(g_vk.dev, ov_pool[slot], NULL);
+            ov_pool[slot] = VK_NULL_HANDLE;
+            return false;
+        }
+        return true;
+    }
+    if (ov_seq[slot] > vk_completed_seq()) vk_wait_seq(ov_seq[slot]);  // (normally done already: see above)
+    VK_CHECK(vkResetCommandPool(g_vk.dev, ov_pool[slot], 0));
+    return true;
+}
+
+// The command buffer for ImGui to record the overlay into (window_cmd: the window image's, inside its rendering), then
+// vk_overlay_end with both
+void *vk_overlay_begin(void *window_cmd) {
+    if (ov_direct < 0) {
+        const char *e = getenv("LARECOMP_VK_OVERLAY_DIRECT");
+        ov_direct = !rec_on() || (e && atoi(e) != 0);
+        LOG("[vk] overlay: %s\n", ov_direct ? "recorded into the window image's command buffer" : "a secondary command buffer the recorder executes");
+    }
+    if (ov_direct || !cur_frame.ok || ov_open || ov_frame[slot] == cur_frame.id || !ov_slot_ready()) {
+        if (cur_frame.ok && cur_frame.secondary) {  // (a second overlay this frame: inline draws again, in a rendering of their own)
+            vk_frame_suspend();
+            vk_frame_resume();
+        }
+        rec_drain();  // (ImGui records into window_cmd itself: the recorder caught up and idle first)
+        return window_cmd;
+    }
+    VkCommandBufferInheritanceRenderingInfo ir = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_RENDERING_INFO,
+                                                  .colorAttachmentCount = 1, .pColorAttachmentFormats = &g_vk.sc_format,
+                                                  .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT};
+    VkCommandBufferInheritanceInfo ii = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_INHERITANCE_INFO, .pNext = &ir};
+    VkCommandBufferBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+                                   .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT | VK_COMMAND_BUFFER_USAGE_RENDER_PASS_CONTINUE_BIT,
+                                   .pInheritanceInfo = &ii};
+    VK_CHECK(vkBeginCommandBuffer(ov_cb[slot], &bi));
+    ov_frame[slot] = cur_frame.id;
+    ov_open = ov_cb[slot];
+    return (void *)ov_open;
+}
+
+void vk_overlay_end(void *window_cmd, void *cmd) {
+    if (!cmd || cmd == window_cmd || (VkCommandBuffer)cmd != ov_open) return;  // (recorded into window_cmd directly)
+    VkCommandBuffer sec = ov_open, cb = (VkCommandBuffer)window_cmd;
+    ov_open = VK_NULL_HANDLE;
+    VK_CHECK(vkEndCommandBuffer(sec));
+    rec_CmdEndRendering(cb);
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = g_vk.sc_views[cur_frame.image],
+                                    .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                    .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .flags = VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT,
+                          .renderArea = {{0, 0}, g_vk.sc_extent}, .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
+    rec_CmdBeginRendering(cb, &ri);
+    rec_CmdExecuteCommands(cb, 1, &sec);
+    cur_frame.secondary = true;
+    ov_seq[slot] = vk_pending_seq();  // (the submission window_cmd goes in)
 }
 
 static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
@@ -935,7 +1027,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         static long menu_at = -1;
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
-        // (ImGui records into cb itself: menu_render drains the recorder right before, when it draws anything)
+        // (ImGui records through vk_overlay_begin / vk_overlay_end, when it draws anything)
         menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
         pp_mark(PP_OVERLAY);
         static long win_shot = -1;
