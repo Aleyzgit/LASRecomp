@@ -63,6 +63,7 @@ snap_harness = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 typedef struct { uint64_t addr, size; } Range;
 static struct { Range sbuf[6][16]; } st;
 static uint8_t *heap_mem;
@@ -175,7 +176,8 @@ static void watch_tests(void) {
 }
 
 int main(int argc, char **argv) {
-    heap_mem = calloc(HEAP_MAX, 1);
+    if (posix_memalign((void **)&heap_mem, 0x10000, HEAP_MAX)) heap_mem = NULL;  // (aligned like the real heap base)
+    else memset(heap_mem, 0, HEAP_MAX);
     assert(heap_mem);
     if (argc > 1 && !strcmp(argv[1], "watch")) { watch_tests(); return 0; }
     if (argc > 1 && !strcmp(argv[1], "userptr")) {  // a userptr heap import (AMD Linux): the watch is off, the probe instead
