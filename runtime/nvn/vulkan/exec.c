@@ -101,7 +101,7 @@ static int passes_in_sub;  // render passes in the submission being recorded (LA
 // before their GPU time is known: in this mode an end counter reports the latest completed frame's GPU span
 // (cq_resolve keeps it host side and no longer writes the game's memory late - the game may have reused the slot).
 // LARECOMP_GPU_OVERLAP=0: off (the wait on the fence's own submission, as before); =1: on.
-#define VK_OVERLAP_DEFAULT 0  // (the default until the Windows / Linux runs verified it: then 1)
+#define VK_OVERLAP_DEFAULT 1  // on where the write watch can run (overlap_on: off by itself without page write tracking)
 static uint64_t deferred_seq;   // (seq_lock) the fence the game was told is done but whose submission wasn't waited for
 static uint64_t stat_deferred;  // SyncWaits returned without waiting (stats)
 static uint64_t stat_snap_bytes, stat_snap_copies;  // storage copies made (snap_storage; stats, per period)

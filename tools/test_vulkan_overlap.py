@@ -13,6 +13,8 @@ root = Path(__file__).resolve().parents[1]
 source = (root / 'runtime/nvn/vulkan/exec.c').read_text()
 defer = source[source.index('static uint64_t overlap_defer('):source.index('\nuint64_t renderer_fence_seq(')]
 snap = source[source.index('#define SNAP_HALF'):source.index('// (debug) LARECOMP_LOG_BINDS=1:')]
+decide = source[source.index('#define VK_OVERLAP_DEFAULT'):source.index('static _Atomic uint64_t g_last_gpu_frame_ticks;')]
+assert 'VK_OVERLAP_DEFAULT 1' in decide, 'the default is on where the write watch is available (Beta 5)'
 assert 'static void snap_ring_import_tail(void);' in snap
 
 defer_harness = r'''
@@ -53,6 +55,32 @@ int main(void) {
         if (w) done = w;  // (the wait completes it)
     }
     puts("PASS: overlap_defer - first fence, defer / wait-previous, done fences, repeats, older fences, two in flight");
+}
+'''
+
+# overlap_on: the switch, the default, and the automatic off without page write tracking
+decide_harness = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define HEAP_BASE 0x7240000000ull
+#define LOG(...) fprintf(stderr, __VA_ARGS__)
+static int tracking = 1;
+static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
+    assert(addr == HEAP_BASE && size == 4096 && !since); *now = 1; return tracking ? 0 : -1;
+}
+static const char *heap_tracking_reason(void) { return "the guest heap is driver memory (dma-buf), which the OS can't track"; }
+''' + decide + r'''
+int main(int argc, char **argv) {
+    assert(argc == 3);
+    tracking = !strcmp(argv[1], "tracked");
+    bool want = !strcmp(argv[2], "on");
+    assert(overlap_on() == want && overlap_on() == want);  // (decided once)
+    printf("PASS: overlap %s, tracking %s, LARECOMP_GPU_OVERLAP=%s\n", want ? "on" : "off", tracking ? "yes" : "no",
+           getenv("LARECOMP_GPU_OVERLAP") ? getenv("LARECOMP_GPU_OVERLAP") : "(unset)");
 }
 '''
 
@@ -339,7 +367,7 @@ int main(int argc, char **argv) {
 '''
 with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
     temporary = Path(temporary)
-    for name, harness in (('defer', defer_harness), ('snap', snap_harness)):
+    for name, harness in (('defer', defer_harness), ('decide', decide_harness), ('snap', snap_harness)):
         cfile = temporary / f'{name}.c'
         cfile.write_text(harness)
         exe = temporary / (f'{name}.exe' if os.name == 'nt' else name)
@@ -347,6 +375,14 @@ with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
                         str(cfile), '-o', str(exe)], check=True)
         env = dict(os.environ)
         env.pop('LARECOMP_OVERLAP_WATCH', None)
+        if name == 'decide':  # default on with tracking, off without (unless forced), =0 off
+            env.pop('LARECOMP_GPU_OVERLAP', None)
+            subprocess.run([str(exe), 'tracked', 'on'], check=True, timeout=10, env=env)
+            subprocess.run([str(exe), 'untracked', 'off'], check=True, timeout=10, env=env)
+            subprocess.run([str(exe), 'untracked', 'on'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='1'))
+            subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(env, LARECOMP_GPU_OVERLAP='0'))
+            subprocess.run([str(exe), 'tracked', 'off'], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))
+            continue
         if name == 'snap':  # the hash probe (watch off), the write watch, no tracking
             subprocess.run([str(exe)], check=True, timeout=10, env=dict(env, LARECOMP_OVERLAP_WATCH='0'))
             subprocess.run([str(exe), 'watch'], check=True, timeout=10, env=env)
