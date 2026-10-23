@@ -1417,6 +1417,14 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                             bgra ? (kCGBitmapByteOrder32Little | kCGImageAlphaNoneSkipFirst) : (CGBitmapInfo)kCGImageAlphaNoneSkipLast);
                         CGImageRef img = CGBitmapContextCreateImage(ctx);
                         char path[256];
+                        static int raw = -1;  // LARECOMP_ASYNC_RAW=1: RGBA8 rows as they are (frame_N_WxH.raw), no encoding - keeps up at 60 fps
+                        if (raw < 0) raw = getenv("LARECOMP_ASYNC_RAW") != NULL;
+                        if (raw) {
+                            snprintf(path, sizeof path, "build/aframes/frame_%05llu_%lux%lu%s.raw", (unsigned long long)fno, (unsigned long)w, (unsigned long)h, bgra ? "_bgra" : "");
+                            FILE *rf = fopen(path, "wb"); if (rf) { fwrite(px, 1, w * h * 4, rf); fclose(rf); }
+                            CGImageRelease(img); CGContextRelease(ctx); CGColorSpaceRelease(cs); free(px);
+                            return;
+                        }
                         snprintf(path, sizeof path, "build/aframes/frame_%05llu.png", (unsigned long long)fno);
                         CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), false);
                         CGImageDestinationRef dest = CGImageDestinationCreateWithURL(url, (__bridge CFStringRef)UTTypePNG.identifier, 1, NULL);
