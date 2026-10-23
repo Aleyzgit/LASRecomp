@@ -42,7 +42,7 @@ llvm-strip --strip-debug "$APPDIR/usr/bin/lasrecomp"  # (symbols stay: crash bac
 cp docs/icon/icon_1024.png "$APPDIR/usr/bin/icon.png"
 cp third_party/fonts/Baloo2/Baloo2-SemiBold.ttf "$APPDIR/usr/bin/"  # (start screen font, OFL)
 cp third_party/fonts/Baloo2/OFL.txt "$APPDIR/usr/bin/Baloo2-OFL.txt"
-cp third_party/fonts/BIZUDPGothic/BIZUDPGothic-Regular.ttf "$APPDIR/usr/bin/"  # (game text font, OFL)
+cp third_party/fonts/BIZUDPGothic/BIZUDPGothic-Regular.ttf "$APPDIR/usr/bin/"  # (game text font on Linux, OFL)
 cp third_party/fonts/BIZUDPGothic/OFL.txt "$APPDIR/usr/bin/BIZUDPGothic-OFL.txt"
 cp third_party/fonts/DejaVu/DejaVuSans.ttf third_party/fonts/DejaVu/DejaVuSans-Bold.ttf "$APPDIR/usr/bin/"  # (last-resort fonts, free license)
 cp third_party/fonts/DejaVu/LICENSE "$APPDIR/usr/bin/DejaVu-LICENSE.txt"

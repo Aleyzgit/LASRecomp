@@ -11,13 +11,15 @@
 //     characters are the substitute's, so Chinese / Korean text can show missing glyphs.
 //     Standard's Japanese gothics are skipped when the game plays in Russian: Japanese fonts carry Cyrillic as
 //     full-width characters (JIS X 0208), every letter a square apart (issue #32) - Arial / DejaVu Sans then.
-//  4. Standard only, ahead of the OS's own: BIZ UDPGothic shipped with the app (third_party/fonts/BIZUDPGothic, SIL OFL),
-//     Morisawa's free font from the same universal-design gothic family as UD Shin Go: the same look on every platform.
-//     (Skipped for Russian like the other Japanese gothics.)
+//  4. Standard only, on Linux and any other platform without a known system font (not macOS / Windows), ahead of
+//     the OS's own: BIZ UDPGothic shipped with the app (third_party/fonts/BIZUDPGothic, SIL OFL), Morisawa's free
+//     font from the same universal-design gothic family as UD Shin Go. (Skipped for Russian like the other Japanese
+//     gothics.)
 //  5. Standard only: DejaVu Sans shipped with the app (third_party/fonts/DejaVu, free license), for systems with none
 //     of the above (Bazzite / Fedora Atomic have no DejaVu - issue #37).
-// A substitute (anything but the console's own files) gets the console font's OS/2 Windows metrics, which the game
-// sizes text by (match_switch_metrics): without that every substitute draws about 1.5x too large.
+// On those same platforms a substitute (anything but the console's own files) gets the console font's OS/2 Windows
+// metrics, which the game sizes text by (match_switch_metrics): without that every substitute draws about 1.5x too
+// large. macOS and Windows keep Hiragino / Yu Gothic exactly as they are, at their current size (OS_FONTS_KNOWN).
 // .bfttf is the console's obfuscated TTF: 8-byte header (magic, size) then every u32 XORed with a fixed key (bfttf_decode).
 // .ttc collections get face 0 copied out as a standalone font (the game's font engine wants one sfnt).
 #include <stdlib.h>
@@ -26,6 +28,14 @@
 
 #include "../hle.h"
 #include "../paths.h"
+
+// macOS and Windows have system fonts known to work well (Hiragino / Yu Gothic): the OS's fonts first, untouched.
+// Everywhere else the bundled BIZ UDPGothic serves ahead of them and every substitute gets the console's metrics.
+#if defined(__APPLE__) || defined(_WIN32)
+#define OS_FONTS_KNOWN 1
+#else
+#define OS_FONTS_KNOWN 0
+#endif
 
 typedef struct { uint64_t addr, size; } Font;
 // SharedFontType: 0 Standard, 1 ChineseSimple, 2 ChineseSimpleExt, 3 ChineseTraditional, 4 Korean, 5 NintendoExt
@@ -190,7 +200,7 @@ static int load_one_checked(const char *path, Font *ft, bool check) {
         d = f0;
         len = l2;
     }
-    if (!console_font) match_switch_metrics(d, len);  // (a .ttf of the console's own font: already these values)
+    if (!console_font && !OS_FONTS_KNOWN) match_switch_metrics(d, len);  // (a .ttf of the console's own: already so)
     if (check && !font_usable(d, len)) {
         LOG("[pl] %s: no glyph for a space or \"\u25A1\" (U+25A1) - skipped\n", path);
         free(d);
@@ -252,8 +262,9 @@ static void load_fonts(void) {
         for (size_t i = 0; !fonts[t].addr && chains[t][i]; i++) {
             const char *f = chains[t][i];
             bool own = strncmp(f, "fonts/", 6) == 0;  // (the console's own files: as they are)
-            // Standard, before the OS's fonts: the bundled BIZ UDPGothic (a Japanese gothic too: not for Russian)
-            if (t == F_STD && !own && !cyrillic && i && strncmp(chains[t][i - 1], "fonts/", 6) == 0 &&
+            // Standard, before the OS's fonts where none is known: the bundled BIZ UDPGothic (a Japanese gothic
+            // too: not for Russian)
+            if (!OS_FONTS_KNOWN && t == F_STD && !own && !cyrillic && i && strncmp(chains[t][i - 1], "fonts/", 6) == 0 &&
                 rt_resource("BIZUDPGothic-Regular.ttf", "third_party/fonts/BIZUDPGothic/BIZUDPGothic-Regular.ttf", bundled, sizeof bundled) &&
                 load_one_checked(bundled, &fonts[t], true))
                 break;
