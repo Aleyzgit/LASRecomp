@@ -56,6 +56,11 @@
 //   spawned, a render scale change; or a frame over 100 ms) frames are left out of the count, late or busy;
 // - the frames over must be spread through the window (some in each quarter of it: 15 frames, 1/4 s at 60), not
 //   bunched as after a hitch nothing signalled.
+// A user setting that changes the GPU's load (the resolution, the upscaler, anti-aliasing: pace_settings_changed) starts
+// the hold and the backoff over: they were learned under the old load (after 4x, where 60 was out of reach, a lower
+// resolution stayed at 30 outdoors, backing off: 10 ms GPU limit, up to 16x the wait). The hold ends and 60 gets a
+// fresh try, with a hitch's grace; frames that don't fit hold again as on a first try. Dynamic's own steps are not
+// a setting change: its scale follows the load, and a reset there would bring back the 60 / 30 flicker on the edge.
 // LARECOMP_PACE=0: off (the game's own choice, flips and all).
 #define PACE_SLOW_NS 20000000ull
 #define PACE_GPU_MS 15.0  // (16.7 ms a frame at 60, less some for the window image and jitter)
@@ -132,6 +137,15 @@ void pace_hitch(const char *why) {
     __atomic_store_n(&hitch_at, plat_now_ns(), __ATOMIC_RELEASE);
 }
 
+// Any thread: a user setting changed the GPU's load (what: "resolution", "upscaler", "anti-aliasing"); pace_frame
+// starts over on its next frame (see above).
+static const char *reset_what;
+void pace_settings_changed(const char *what) {
+    pace_hitch(what[0] == 'r' ? "a resolution setting change" : what[0] == 'u' ? "an upscaler setting change"
+                                                                               : "an anti-aliasing setting change");
+    __atomic_store_n(&reset_what, what, __ATOMIC_RELEASE);
+}
+
 bool pace_is_slow(void) { return pace_slow; }
 uint64_t pace_frames_over(void) {
     uint64_t n = stat_pace_over;
@@ -205,6 +219,15 @@ void pace_frame(void) {
     static uint64_t scene;  // the scene clear / calm counted frames of (pace_scene; 0: none)
     static int gpu_said;    // (logged once per hold: the CPU had headroom but the GPU didn't)
     static int cpu_clear;   // gameplay frames in a row with clear headroom by CPU time alone
+    const char *reset = __atomic_exchange_n(&reset_what, (const char *)NULL, __ATOMIC_ACQ_REL);
+    if (reset && on) {  // a user setting changed the GPU's load: the hold and the backoff start over (see above)
+        LOG("[pace] %s setting changed: back-off cleared, trying 60\n", reset);
+        pace_slow = late_hold = false, backoff = 1, back_at = 0;
+        clear = calm = cpu_clear = 0, scene = 0, gpu_said = 0;
+        nover = nbusy = 0;
+        memset(over, 0, sizeof over);
+        memset(recent, 0, sizeof recent);
+    }
     if (first || p > 100000000ull) {  // (loading, a hitch: not a pace, and maybe a new scene)
         clear = calm = cpu_clear = 0, scene = 0;
         if (!first) {
