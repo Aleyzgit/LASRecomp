@@ -93,6 +93,33 @@ static void edge(double t, int n, Frame *f) {
     zone = (uint64_t)(t / 8.0) + 1;
     f->cpu = 4.5 + noise(1), f->gpu = (heavy ? 18 : 12) + noise(1), f->stall = 0, f->wait = 8;
 }
+// Backoff built up first: held at GPU 20 ms (zone 1), back to 60 at GPU 9 ms (zone 2), held again within 20 s (zone 3:
+// backing off, the 10 ms GPU limit). user_res_change: at 25 s the user lowers the resolution (the setting, and the
+// render scale change it makes), GPU 11.5 ms after: back at 60 within a few seconds (it stayed at 30 outdoors: 11.5 ms
+// is over the backoff's 10 ms). dynres_steps: Dynamic's own steps instead (a render scale change every 2 s, GPU 18 /
+// 16 ms), then 11.5 ms from 25 s: the backoff stays, and so does the hold.
+static void backoff_phases(double t, Frame *f) {
+    f->cpu = 4.5 + noise(1), f->stall = 0, f->wait = 8;
+    f->gpu = (t < 4 ? 20 : t < 10 ? 9 : 20) + noise(1);
+    zone = t < 4 ? 1 : t < 10 ? 2 : 3;
+}
+static void user_res_change(double t, int n, Frame *f) {
+    backoff_phases(t, f);
+    static bool done;
+    if (t >= 25 && !done) done = true, pace_settings_changed("resolution"), pace_hitch("a render scale change"), f->stall = 120;
+    if (t >= 25) f->gpu = 11.5 + noise(1);
+}
+static void dynres_steps(double t, int n, Frame *f) {
+    backoff_phases(t, f);
+    static int last_k = -1;
+    int k = (int)(t / 2.0);
+    if (t >= 14 && t < 25) {
+        if (k != last_k) last_k = k, pace_hitch("a render scale change");
+        f->gpu = (k & 1 ? 16 : 18) + noise(1);
+    }
+    if (t >= 25) f->gpu = 11.5 + noise(1);
+}
+
 // Fits 60 with no hitches: never held.
 static void steady(double t, int n, Frame *f) { f->cpu = 5 + noise(1), f->gpu = 11 + noise(1.5), f->stall = 0, f->wait = 8; }
 
@@ -107,6 +134,13 @@ static int settles(int holds, int backs, double held_s, double lc, bool end, dou
     return holds <= 2 && backs <= 1 && end && lc < secs / 2;  // (at most one try at 60, then 30 for good)
 }
 
+static int res_released(int holds, int backs, double held_s, double lc, bool end, double secs) {
+    return holds == 2 && backs == 2 && !end && lc >= 25 && lc < 28;  // (back at 60 within a few seconds of the change)
+}
+static int backoff_kept(int holds, int backs, double held_s, double lc, bool end, double secs) {
+    return holds == 2 && backs == 1 && end && lc < 25;  // (held again, and still held after the steps and the light part)
+}
+
 static const Case cases[] = {
     {"steady: GPU 11 ms, CPU 5 ms (fits 60)", 60, steady, never_held},
     {"play log hitches: GPU 10-13 ms, door jump / save / texture hash / unsignalled stall / scale step + late bursts",
@@ -116,6 +150,10 @@ static const Case cases[] = {
     {"#310 with hitches: GPU 20 ms, a door jump or save every 2 s", 60, gpu20_hitches, held_after},
     {"#40: CPU 20 ms busy a frame, sustained", 60, cpu20, held_after},
     {"edge: GPU 12 ms quiet / 18 ms heavy, 8 s each", 120, edge, settles},
+    {"user resolution change: held backing off at GPU 20 ms, then the setting lowered to GPU 11.5 ms", 40, user_res_change,
+     res_released},
+    {"Dynamic's own steps: held backing off, scale steps at GPU 16-18 ms, then GPU 11.5 ms (backoff kept)", 45,
+     dynres_steps, backoff_kept},
 };
 
 static int run(const Case *c) {
