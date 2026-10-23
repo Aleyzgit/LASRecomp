@@ -1142,6 +1142,7 @@ void ui_window_init(void) {
 }
 
 SDL_Window *ui_window(void) { return window; }
+bool ui_window_focused(void) { return window && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS); }  // (any thread, for a log)
 
 void backend_init(void) {
     while (!atomic_load(&ui_ready)) SDL_Delay(1);

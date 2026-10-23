@@ -1256,8 +1256,8 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern __thread uint64_t g_blocked_ns;  // (kernel.c: waiting, not work - for the frame pacer, as Vulkan's acquire)
         g_blocked_ns += nd;
         if (nd > 30000000) {
-            static int warned;
-            if (warned++ < 20) LOG("[metal] nextDrawable blocked %llums%s (frame %llu, %d presents still on the GPU)\n",
+            static int warned, warned_long;  // (a block of half a second or more - the layer's timeout - has its own cap)
+            if (warned++ < 20 || (nd >= 500000000 && warned_long++ < 20)) LOG("[metal] nextDrawable blocked %llums%s (frame %llu, %d presents still on the GPU)\n",
                                    (unsigned long long)(nd / 1000000), drawable ? "" : ", none (timed out)", (unsigned long long)frame,
                                    __atomic_load_n(&g_presents_inflight, __ATOMIC_RELAXED));
         }
@@ -1580,6 +1580,7 @@ void ui_window_init(void) {
 }
 
 SDL_Window *ui_window(void) { return window; }
+bool ui_window_focused(void) { return window && (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS); }  // (any thread, for a log)
 void *ui_metal_layer(void) { return (__bridge void *)layer; }
 void *ui_metal_device(void) { return (__bridge void *)dev; }
 
