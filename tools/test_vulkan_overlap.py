@@ -124,15 +124,48 @@ int main(void) {
     b[8] = 0x66;
     uint64_t c4 = snap_storage(B, 2048, true);
     assert(c4 != c3 && ((uint8_t *)(uintptr_t)c4)[8] == 0x66);
-    // 4. a draw-only range (never a compute slot's) in place is moved to COPY when its data changes
+    // 4. a range a draw reads as storage: a copy for good from its first use (no probe: the hash can't see the CPU
+    //    rewriting the same bytes), kept while unchanged, refreshed when changed; a compute bind takes the same copy
     uint64_t c5 = snap_storage(C, 4096, false);
-    assert(c5 != C);
+    assert(c5 != C && rs_tab[2].mode == RS_COPY && rs_tab[2].draw_bound);
+    assert(snap_storage(C, 4096, true) == c5);
     frame++;
-    assert(snap_storage(C, 4096, false) == C && rs_tab[2].mode == RS_PLACE);
+    assert(snap_storage(C, 4096, false) == c5 && snap_storage(C, 4096, true) == c5);
     frame++;
     heap_mem[0x40000 + 5] = 7;
     uint64_t c6 = snap_storage(C, 4096, false);
-    assert(c6 != C && rs_tab[2].mode == RS_COPY);
+    assert(c6 != C && c6 != c5 && rs_tab[2].mode == RS_COPY);
+    level = "Beach";  // a new level: a draw-read range is not probed again, it stays a copy
+    frame++;
+    assert(snap_storage(C, 4096, true) == c6 && rs_tab[2].mode == RS_COPY);
+    level = "Field";
+    // 4b. first seen in a compute-only frame (the title screen): probed, settled in place; later read by a draw:
+    //     copied for good, and the compute binds after that use the same copy even though the data never changes
+    uint64_t H = HEAP_BASE + 0x60000;
+    memset(heap_mem + 0x60000, 8, 2048);
+    frame++;
+    assert(snap_storage(H, 2048, true) != H && rs_tab[3].mode == RS_PROBE);
+    frame++;
+    assert(snap_storage(H, 2048, true) == H && rs_tab[3].mode == RS_PLACE);
+    frame++;
+    assert(snap_storage(H, 2048, true) == H);  // (a compute bind, first in the frame: still in place)
+    uint64_t h1 = snap_storage(H, 2048, false);  // the draw, same frame: a copy from now on
+    assert(h1 != H && in_ring(h1) && rs_tab[3].mode == RS_COPY && rs_tab[3].draw_bound);
+    frame++;
+    assert(snap_storage(H, 2048, true) == h1 && snap_storage(H, 2048, false) == h1);
+    frame += 601;  // unused for 10 s: still not probed again
+    assert(snap_storage(H, 2048, true) == h1 && rs_tab[3].mode == RS_COPY);
+    // 4c. in place from a compute-only probe, then a draw in a later frame (not the same one): copied for good
+    uint64_t I = HEAP_BASE + 0x70000;
+    frame++;
+    assert(snap_storage(I, 2048, true) != I);
+    frame++;
+    assert(snap_storage(I, 2048, true) == I && rs_tab[4].mode == RS_PLACE);
+    frame++;
+    uint64_t i1 = snap_storage(I, 2048, false);
+    assert(i1 != I && rs_tab[4].mode == RS_COPY);
+    frame++;
+    assert(snap_storage(I, 2048, true) == i1);
     // 5. a new level: probed again
     frame++;
     level = "Dungeon";

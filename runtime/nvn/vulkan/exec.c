@@ -2776,13 +2776,18 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
 // Other storage data (the skinning program 72a8da0000's outputs, read in place by the exposure program and by draws
 // binding them as vertex data from an offset into the pool: BowWow's body) is only ever written by the GPU and must
 // stay where the game put it.
-// Which is which is decided per memory range from what the CPU does, with no wait and no probe of the programs: a
-// range's first use in a level is a one-frame PROBE, in which every binder - a compute slot, a draw's storage read -
-// works on a copy taken at translation, so the GPU cannot touch the original. At the range's next use the original is
-// hashed again: changed, the CPU rewrites it - COPY from then on (a fresh copy whenever its data changes, otherwise the
-// one the GPU may have modified, shared by the compute and all its readers); unchanged, it is GPU-only or static - IN
-// PLACE from then on. A range is probed again when the level changes or after 10 s unused; one that no compute slot
-// ever binds is also moved to COPY if its data changes later. ~100 KB copied and hashed per frame in the field.
+// Which is which is decided per memory range, with no wait and no probe of the programs (renderer.m 660bead). A range
+// a draw reads as storage is shader-consumed game data (the lists): COPY for good - every binder of it, the compute
+// dispatches that read or modify it too, works on a copy taken at translation, refreshed whenever its data changes
+// (hash) and otherwise kept, so the GPU's own modifications stay. The CPU's rewrite can't be told from the data:
+// standing still it rewrites the same bytes, and the boxes come from the GPU reading the list while it is rewritten
+// (an M6 at 4x in the woods), so no hash decides this case - and on the title screen a probe would have settled the
+// lists in place for good. A range only compute slots bind gets a one-frame PROBE on its first use in a level (all
+// binders on the copy, the GPU can't touch the original) and its next use looks at the original: changed, the CPU
+// rewrites it - COPY; unchanged, a GPU output or static (the skinning outputs, which draws then bind as vertex data
+// from an offset into the pool) - IN PLACE for good, probed again when the level changes or after 10 s unused. Each
+// range's decision is logged once ("[snap] ...", the small per-object ranges capped). ~100 KB copied and hashed per
+// frame in the field.
 // Where the copies live: shaders address storage by guest address through the heap import (one buffer, lazy chunks,
 // gfast's copy of the bound ranges), which covers only the heap the game set up (gmem_heap_size; Metal has the whole
 // range in one buffer and uses its top). So the ring sits right after the game's heap and gmem_heap_size includes it:
@@ -2796,7 +2801,7 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
 #define SNAP_HALF (8ull << 20)
 #define SNAP_RING (2 * SNAP_HALF)
 enum { RS_PROBE, RS_COPY, RS_PLACE };
-typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen, level; uint8_t mode; bool cs_bound; } RangeState;
+typedef struct { uint64_t addr, size, copy, hash, frame; uint32_t gen, level; uint8_t mode; bool cs_bound, draw_bound; } RangeState;
 static RangeState rs_tab[512];
 static int nrs;
 static int snap_state = -1;        // -1 not decided (the heap not set up yet), 0 off, 1 on
@@ -2854,6 +2859,11 @@ static void rs_level_tick(void) {  // (a new level: every range is probed again 
     const char *lv = game_level_name();
     if (lv && strncmp(lv, last, sizeof last - 1)) { snprintf(last, sizeof last, "%s", lv); rs_level_gen++; }
 }
+static void rs_log(RangeState *e, const char *what, bool cs_slot, uint64_t f) {  // (rare: a new range, a decision)
+    static int n;
+    if (e->size >= 2040 ? n < 100000 : n++ < 200)  // (the small per-object ranges are many: capped)
+        LOG("[snap] %llx+%llu %s (%s bind, frame %llu)\n", (unsigned long long)e->addr, (unsigned long long)e->size, what, cs_slot ? "compute" : "draw", (unsigned long long)f);
+}
 // A copy of e's range in the ring: its guest address, or 0 when none can be made now (see the half switch above)
 static uint64_t rs_copy_make(RangeState *e, uint64_t h) {
     uint64_t aligned = (snap_off + 255) & ~255ull;
@@ -2907,16 +2917,23 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         memset(e, 0, sizeof *e);
         e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
         e->cs_bound = cs_slot;
-        // the probe frame: every binder this frame takes this copy (frame == f below); the decision is at the next
-        // frame's use, when a CPU rewrite can have happened (renderer.m stamps f - 1 here, so a second binder in the
-        // same frame rehashes and finds it unchanged: IN PLACE before the CPU had a chance to write)
+        if (!cs_slot) { e->mode = RS_COPY; e->draw_bound = true; }  // a draw's storage read: copied for good (see above)
+        rs_log(e, cs_slot ? "new: probe" : "new: copy (a draw's storage read)", cs_slot, f);
+        // the probe frame (or the first copy): every binder this frame takes this copy (frame == f below); a probe's
+        // decision is at the next frame's use, when a CPU rewrite can have happened
         c = rs_copy_make(e, range_hash(addr, size));
         if (!c) nrs--;                                 // (no copy possible now: not probed yet)
         return c ? c : addr;
     }
-    if (cs_slot) e->cs_bound = true;
+    if (cs_slot) e->cs_bound = true; else e->draw_bound = true;
     if (e->frame == f) {  // (bound again this frame)
-        if (e->mode == RS_PLACE) return addr;
+        if (e->mode == RS_PLACE && cs_slot) return addr;
+        if (!cs_slot && e->mode != RS_COPY) {  // (a draw's storage read of a range probed / settled in place this frame: copied for good)
+            e->mode = RS_COPY;
+            rs_log(e, "-> copy (a draw's storage read)", cs_slot, f);
+            c = rs_copy_make(e, range_hash(addr, size));
+            return c ? c : addr;
+        }
         if (e->gen == snap_gen) return e->copy;
         c = rs_copy_make(e, e->hash);
         return c ? c : addr;
@@ -2924,17 +2941,30 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     bool again = e->level != rs_level_gen || f - e->frame > 600;  // (a new level, or unused: probe again)
     e->level = rs_level_gen;
     e->frame = f;
+    if (!cs_slot && e->mode != RS_COPY) {  // a draw reads it as storage: copied for good (see above)
+        e->mode = RS_COPY;
+        rs_log(e, "-> copy (a draw's storage read)", cs_slot, f);
+        c = rs_copy_make(e, range_hash(addr, size));
+        return c ? c : addr;
+    }
     if (e->mode == RS_PLACE && !again && e->cs_bound) return addr;
     uint64_t h = range_hash(addr, size);
-    if (again) { e->mode = RS_PROBE; c = rs_copy_make(e, h); return c ? c : addr; }
+    if (again && !e->draw_bound) {  // (a draw-read range stays a copy across levels)
+        e->mode = RS_PROBE;
+        rs_log(e, "probe again (level / unused)", cs_slot, f);
+        c = rs_copy_make(e, h);
+        return c ? c : addr;
+    }
     switch (e->mode) {
     case RS_PLACE:  // (never a compute slot's: a change can only be the CPU's)
         if (h == e->hash) return addr;
         e->mode = RS_COPY;
+        rs_log(e, "in place -> copy (changed later)", cs_slot, f);
         break;
     case RS_PROBE:  // the use after the probe: did the CPU touch the original meanwhile?
-        if (h == e->hash) { e->mode = RS_PLACE; return addr; }
+        if (h == e->hash) { e->mode = RS_PLACE; rs_log(e, "probe -> in place (unchanged)", cs_slot, f); return addr; }
         e->mode = RS_COPY;
+        rs_log(e, "probe -> copy (the CPU rewrote it)", cs_slot, f);
         break;
     default:  // RS_COPY
         if (h == e->hash && e->gen == snap_gen) return e->copy;  // unchanged: the copy (maybe GPU-modified) is current
