@@ -1238,6 +1238,7 @@ void backend_represent(void) {
 
 // The GPU side of a present (the render thread when it's on, rqueue.c): the present pass, the overlay, shots.
 // frame: the number of this present (the game thread's frame when it was queued).
+static int g_presents_inflight;  // present command buffers committed and not yet completed (each holds a drawable)
 void backend_present_now(NvnTexture *t, uint64_t frame) {
     if (rq_stopping()) return;  // quitting: no drawable after the window closed (#40, as Vulkan)
     extern void renderer_submit(void);
@@ -1256,9 +1257,12 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         g_blocked_ns += nd;
         if (nd > 30000000) {
             static int warned;
-            if (warned++ < 20) LOG("[metal] nextDrawable blocked %llums\n", (unsigned long long)(nd / 1000000));
+            if (warned++ < 20) LOG("[metal] nextDrawable blocked %llums%s (frame %llu, %d presents still on the GPU)\n",
+                                   (unsigned long long)(nd / 1000000), drawable ? "" : ", none (timed out)", (unsigned long long)frame,
+                                   __atomic_load_n(&g_presents_inflight, __ATOMIC_RELAXED));
         }
-        if (!drawable) return;
+        if (!drawable) return;  // (timed out: this frame isn't shown; the window keeps the last one)
+        __atomic_add_fetch(&g_presents_inflight, 1, __ATOMIC_RELAXED);
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = drawable.texture;
@@ -1423,6 +1427,11 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 }];
             }
         }
+        if (!(b && b->tex)) {  // (nothing drawn into the cleared drawable: a black frame would show)
+            static int n;
+            if (n++ < 20) LOG("[metal] present of frame %llu without an image (texture %p backend %p)\n", (unsigned long long)frame, t, b);
+        }
+        [cb addCompletedHandler:^(id<MTLCommandBuffer> done) { (void)done; __atomic_sub_fetch(&g_presents_inflight, 1, __ATOMIC_RELAXED); }];
         if (deadline) [cb presentDrawable:drawable atTime:CACurrentMediaTime() + 1.0 / 60.0];
         else [cb presentDrawable:drawable];
         [cb commit];
