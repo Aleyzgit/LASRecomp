@@ -2839,7 +2839,7 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
 #define SNAP_HALF (8ull << 20)
 #define SNAP_RING (2 * SNAP_HALF)
 enum { RS_PROBE, RS_COPY, RS_PLACE };
-typedef struct { uint64_t addr, size, copy, pristine, hash, frame; uint32_t gen, level, wgen; uint8_t mode; bool cs_bound, draw_bound; } RangeState;  // (wgen: watch_check; pristine: rs_copy_make)
+typedef struct { uint64_t addr, size, copy, pristine, hash, frame, seg_hash[3]; uint32_t gen, level, wgen, looks; uint8_t mode; bool cs_bound, draw_bound, gpu_out; } RangeState;  // (wgen, seg_hash, looks, gpu_out: watch_check; pristine: rs_copy_make)
 static RangeState rs_tab[512];
 static uint64_t rs_store_frame[512];  // (watch: the frame of the previous CPU write seen on a range's own pages)
 static int nrs;
@@ -3034,45 +3034,54 @@ static bool watch_on(void) {
 // 1ea4b16). So a range of 256 bytes or more counts only its dirty pages that no watched range under 256 bytes shares;
 // the light / exposure lists (32640 / 2040 bytes, one allocation the CPU memcpys) share pages only with each other
 // and keep their coverage. A small range counts every dirty page of its own.
-// Nor does a store outside every range (per-frame constants next to a buffer; Metal's fault handler only opens the
-// page then) - and a dirty bit on a page the range shares with unwatched memory may be just that (#355: BowWow's
-// outputs beside such constants on Linux, copied, his body came apart in the Witch's hut; where they land is the
-// heap layout's luck, Windows included). So a range of 256 bytes or more in an allocation that has pages of its own
-// (the watched ranges of 256 bytes or more around it, less than 256 bytes apart: BowWow's outputs, the four lists)
-// counts only a dirty page inside that allocation - a store into one of its buffers; a page at its edge, shared
-// with memory outside, doesn't count. The lists' memcpy dirties their inner pages, which the small lists' page may
-// not be. An allocation within two pages has none of its own: every dirty page counts, as before.
+// Nor does a store beside a GPU output on a page it shares with other memory (#355, Linux: BowWow's outputs next to
+// per-frame constants and CPU-written draw buffers - wherever the heap put them - were copied and his body came
+// apart in the Witch's hut and in Sale's house). Metal's fault handler sees the store's address; the page bits
+// don't, so the watch learns which ranges the GPU writes instead (renderer.m c50a999 learns it per program, with a
+// GPU wait): while a range is in place, a part of it whose pages the CPU didn't touch since the last look but whose
+// bytes changed was written by the GPU (DMA sets no dirty bit). Parts: the range's bytes on its first page, on its
+// pages wholly inside it, on its last page. A GPU output (gpu_out) counts only a store on a page wholly its own, as
+// a store into it. The light / exposure lists, which a program writes too, are rewritten by the CPU every frame -
+// their pages are never clean - so they never look like outputs and keep the rules above. A store on an edge page
+// counts from a range's third look on, so the GPU's first writes (two frames at most with the overlap) are seen
+// before. Learning stops after 600 looks (an input the GPU never writes); while it lasts, each part's first 4 KB are hashed.
+static int pages_seen_written(uint64_t addr, uint64_t size, uint32_t since);  // (the page tables below: no OS query)
 static int watch_check(RangeState *e) {
     uint32_t since = e->wgen, now = e->wgen;
-    int w = pages_cpu_written(e->addr, e->size, since, &now);
+    int w = pages_cpu_written(e->addr, e->size, since, &now);  // (stamps every page of the range: the parts below read the stamps)
     e->wgen = now;
-    if (w != 1 || e->size < 256) return w;
-    uint64_t lo = e->addr, hi = e->addr + e->size;  // (the allocation: its watched neighbours, transitively)
-    for (bool grew = true; grew;) {
-        grew = false;
-        for (int k = 0; k < nrs; k++) {
-            const RangeState *o = &rs_tab[k];
-            if (o->size < 256 || o->addr >= hi + 256 || o->addr + o->size + 256 <= lo) continue;
-            if (o->addr < lo) lo = o->addr, grew = true;
-            if (o->addr + o->size > hi) hi = o->addr + o->size, grew = true;
+    if (w < 0 || e->size < 256) return w;
+    uint64_t end = e->addr + e->size, p1 = (e->addr + WATCH_PAGE - 1) & ~(WATCH_PAGE - 1), pe = end & ~(WATCH_PAGE - 1);
+    uint64_t lo[3] = {e->addr, p1, pe >= p1 ? pe : end}, hi[3] = {p1 < end ? p1 : end, p1 < pe ? pe : p1, end};  // first page, inner pages, last page
+    if (!e->gpu_out && e->looks < 600) {
+        for (int i = 0; i < 3; i++) {
+            if (lo[i] >= hi[i]) continue;
+            uint64_t n = hi[i] - lo[i] < WATCH_PAGE ? hi[i] - lo[i] : WATCH_PAGE;  // (a page of each part: an output is rewritten whole)
+            uint64_t h = range_hash(lo[i], n);
+            if (e->looks && h != e->seg_hash[i] && pages_seen_written(lo[i], n, since) == 0) {
+                e->gpu_out = true;
+                static int logged;
+                if (logged++ < 200) LOG("[snap] %llx+%llu GPU-written (its bytes changed with no CPU write): only stores on pages wholly its own copy it\n",
+                                   (unsigned long long)e->addr, (unsigned long long)e->size);
+            }
+            e->seg_hash[i] = h;
         }
     }
-    uint64_t plo = (lo + WATCH_PAGE - 1) & ~(WATCH_PAGE - 1), phi = hi & ~(WATCH_PAGE - 1);  // (its pages of its own)
-    uint32_t pg_now;
-    if (plo < phi) {
-        if (pages_cpu_written(plo, phi - plo, since, &pg_now) != 1) return 0;  // (only its edge pages: someone else's)
-    } else plo = e->addr & ~(WATCH_PAGE - 1), phi = e->addr + e->size;
-    for (; plo < phi; plo += WATCH_PAGE) {
+    e->looks++;
+    if (w != 1) return 0;
+    if (lo[1] < hi[1] && pages_seen_written(lo[1], hi[1] - lo[1], since) == 1) return 1;  // (a page wholly its own)
+    if (e->gpu_out || e->looks < 3) return 0;  // (a GPU output's edge pages are its neighbours'; a new range: the GPU's writes first)
+    for (int i = 0; i < 3; i += 2) {  // its first and last page, shared with other memory
+        if (lo[i] >= hi[i]) continue;
+        uint64_t plo = lo[i] & ~(WATCH_PAGE - 1);
         bool small_mate = false;
         for (int k = 0; k < nrs && !small_mate; k++) {
             const RangeState *o = &rs_tab[k];
             if (o != e && o->size < 256 && o->cs_bound && o->addr < plo + WATCH_PAGE && plo < o->addr + o->size) small_mate = true;
         }
-        if (small_mate) continue;
-        // (this page written since the range's last look? The looks above stamped it: no OS bits left)
-        if (pages_cpu_written(plo, WATCH_PAGE, since, &pg_now) == 1) return 1;
+        if (!small_mate && pages_seen_written(plo, WATCH_PAGE, since) == 1) return 1;
     }
-    return 0;  // (only pages shared with small parameter blocks or memory outside the allocation were written)
+    return 0;  // (only pages shared with small parameter blocks were written: theirs)
 }
 
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
@@ -4384,6 +4393,14 @@ static int pages_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t 
 int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) { return pages_written(addr, size, since, now, true); }
 // The storage write watch (watch_check): CPU writes only; the GPU's own writes to the range (DMA) don't count
 static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) { return pages_written(addr, size, since, now, false); }
+// Pages [addr, addr+size) stamped written after generation `since` by the looks so far (no OS query: the caller just
+// looked at them). 1 yes, 0 no, -1 no tracking.
+static int pages_seen_written(uint64_t addr, uint64_t size, uint32_t since) {
+    if (!size || addr < HEAP_BASE || addr - HEAP_BASE + size > HEAP_MAX || !pt_init()) return -1;
+    for (uint64_t p = (addr - HEAP_BASE) / VC_PAGE; p < (addr - HEAP_BASE + size + VC_PAGE - 1) / VC_PAGE; p++)
+        if (vc_page_gen[p] > since) return 1;
+    return 0;
+}
 
 // Heap pages [lo, hi) (offsets) written by the GPU: never cached from now on.
 static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
