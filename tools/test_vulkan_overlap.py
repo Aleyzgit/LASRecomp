@@ -109,6 +109,7 @@ static int track_off;  // (no tracking: -1)
 static uint8_t page_dirty[HEAP_MAX / 4096];
 static uint32_t page_gen[HEAP_MAX / 4096], pgen = 1;
 static unsigned looks;
+static uint64_t race_at, race_size, race_poke;  // (W14)
 static void cpu_wrote(uint64_t addr) { page_dirty[(addr - HEAP_BASE) / 4096] = 1; }
 static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now) {
     if (track_off) return -1;
@@ -122,6 +123,11 @@ static int pages_cpu_written(uint64_t addr, uint64_t size, uint32_t since, uint3
         if (page_gen[p] > since) w = 1;
     }
     *now = g;
+    if (race_at && addr == race_at && size == race_size) {  // (a game-thread store right after this look, before the hash)
+        heap_mem[race_poke - HEAP_BASE]++;
+        page_dirty[(race_poke - HEAP_BASE) / 4096] = 1;
+        race_at = 0;
+    }
     return w;
 }
 static bool userptr;
@@ -335,7 +341,53 @@ static void watch_tests(void) {
         got = snap_storage(IN, 3104, true);
     }
     assert(got != IN);
-    puts("PASS: write watch - in place + tracked, CPU writes that keep coming make a copy for good (a single one doesn't), no demotion on level / idle, GPU writes ignored, a shared page marks both, a page shared with a small parameter block doesn't, nor a store beside a GPU output on its shared pages (#355, both Linux layouts), the lists at any page offset, a prior write is consumed, draw reads copy, other lookers");
+    // W14 (review): a CPU store landing between a look and the part hashes changes the bytes of a part whose pages the
+    //     look saw clean. Asked again after the hash, it is the CPU's: the part is not taken for a GPU output, and the
+    //     store counts at the next look (with a second one, a copy).
+    uint64_t Q = HEAP_BASE + 0x600000 + 0x700;
+    frame++;
+    assert(snap_storage(Q, 22048, true) == Q);
+    int qi = -1;
+    for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == Q) qi = i;
+    for (int f = 0; f < 3; f++) { frame++; assert(snap_storage(Q, 22048, true) == Q); }  // (past the new-range looks)
+    race_at = Q, race_size = 22048, race_poke = Q + 0x1000;  // (its inner pages, in the hashed first 4 KB)
+    frame++;
+    assert(snap_storage(Q, 22048, true) == Q && !race_at && rs_tab[qi].gpu_parts == 0);
+    frame++;
+    assert(snap_storage(Q, 22048, true) == Q && rs_tab[qi].gpu_parts == 0);  // (the raced store, seen at this look: noted)
+    cpu_wrote(Q + 0x1000);
+    frame++;
+    assert(snap_storage(Q, 22048, true) != Q && rs_tab[qi].mode == RS_COPY);  // (another: writes that keep coming)
+    // W15 (review): learning starts again when a range comes back after more than 8 frames, or on a new level - the
+    //     heap there may hold a CPU input now. A 3104-byte range learned GPU-written, unbound 20 frames, then written by
+    //     the CPU on a shared page every frame and no longer by the GPU: copied. Same after a level change.
+    for (int v = 0; v < 2; v++) {
+        uint64_t U = HEAP_BASE + 0x620000 + (uint64_t)v * 0x10000 + 0x500;
+        frame++;
+        assert(snap_storage(U, 3104, true) == U);
+        int ui = -1;
+        for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == U) ui = i;
+        for (int f = 0; f < 4; f++) { gpu_wrote(U, 3104); frame++; assert(snap_storage(U, 3104, true) == U); }
+        assert(rs_tab[ui].gpu_parts);
+        if (v == 0) frame += 20; else { level = v == 1 ? "Lv01TailCave" : "Field"; frame++; }
+        for (int f = 0; f < 5; f++) { cpu_wrote(U + 0x40); frame++; got = snap_storage(U, 3104, true); }
+        assert(got != U && rs_tab[ui].mode == RS_COPY);
+    }
+    // W16 (review): GPU-written parts are learned one by one. A range whose first page part the GPU writes (a counter)
+    //     and whose last page the CPU writes is copied: only the first part's page is excused.
+    uint64_t V = HEAP_BASE + 0x660000 + 0x800;
+    frame++;
+    assert(snap_storage(V, 0x3000, true) == V);
+    int vi = -1;
+    for (int i = 0; i < nrs; i++) if (rs_tab[i].addr == V) vi = i;
+    for (int f = 0; f < 6; f++) {
+        heap_mem[V - HEAP_BASE + 8]++;  // (the GPU: its first page part)
+        cpu_wrote(V + 0x2f00);          // (the CPU: its last page)
+        frame++;
+        got = snap_storage(V, 0x3000, true);
+    }
+    assert(rs_tab[vi].gpu_parts == 1 && got != V && rs_tab[vi].mode == RS_COPY);
+    puts("PASS: write watch - in place + tracked, CPU writes that keep coming make a copy for good (a single one doesn't), no demotion on level / idle, GPU writes ignored, a shared page marks both, a page shared with a small parameter block doesn't, nor a store beside a GPU output on its shared pages (#355, both Linux layouts), learning: a store between look and hash, reuse after a gap / level, per part, the lists at any page offset, a prior write is consumed, draw reads copy, other lookers");
 }
 
 int main(int argc, char **argv) {
