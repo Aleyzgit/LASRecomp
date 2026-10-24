@@ -90,9 +90,8 @@ def apply(mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
             raise RuntimeError(f'{name}: no actor {vtype:#x} in {room_name}')
         act = acts[0]
         act.type = 0xB0
-        if model_name not in ('HeartPiece', 'HeartContainer'):
-            act.posY += 0.25  # (1/6 tile up, a bit smaller: other models sit lower than a heart piece)
-            act.scaleX = act.scaleY = act.scaleZ = 0.75
+        # vanilla position and scale for every model: the actor's dive pickup area follows them, and raised or shrunk
+        # (0.25 up / 0.75 / data.MODEL_SIZES) it could only be collected right at its centre (EagleTowerExit, 2026-10-24)
         while len(act.parameters) < 8:
             act.parameters.append(b'')
         act.parameters[1] = bytes(model_path, 'utf-8')
@@ -100,11 +99,6 @@ def apply(mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
         act.parameters[3] = bytes(name, 'utf-8')
         act.parameters[4] = bytes(flag, 'utf-8')
         act.parameters[5] = b'true' if item_key == 'Seashell' else b'false'
-        if model_name in data.MODEL_SIZES:
-            s = data.MODEL_SIZES[model_name]
-            act.scaleX *= s
-            act.scaleY *= s
-            act.scaleZ *= s
         if model_name in data.MODEL_ROTATIONS:
             act.rotY = data.MODEL_ROTATIONS[model_name]
         with open(out(rel), 'wb') as fh:
