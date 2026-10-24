@@ -3034,22 +3034,45 @@ static bool watch_on(void) {
 // 1ea4b16). So a range of 256 bytes or more counts only its dirty pages that no watched range under 256 bytes shares;
 // the light / exposure lists (32640 / 2040 bytes, one allocation the CPU memcpys) share pages only with each other
 // and keep their coverage. A small range counts every dirty page of its own.
+// Nor does a store outside every range (per-frame constants next to a buffer; Metal's fault handler only opens the
+// page then) - and a dirty bit on a page the range shares with unwatched memory may be just that (#355: BowWow's
+// outputs beside such constants on Linux, copied, his body came apart in the Witch's hut; where they land is the
+// heap layout's luck, Windows included). So a range of 256 bytes or more in an allocation that has pages of its own
+// (the watched ranges of 256 bytes or more around it, less than 256 bytes apart: BowWow's outputs, the four lists)
+// counts only a dirty page inside that allocation - a store into one of its buffers; a page at its edge, shared
+// with memory outside, doesn't count. The lists' memcpy dirties their inner pages, which the small lists' page may
+// not be. An allocation within two pages has none of its own: every dirty page counts, as before.
 static int watch_check(RangeState *e) {
     uint32_t since = e->wgen, now = e->wgen;
     int w = pages_cpu_written(e->addr, e->size, since, &now);
     e->wgen = now;
     if (w != 1 || e->size < 256) return w;
-    for (uint64_t plo = e->addr & ~(WATCH_PAGE - 1); plo < e->addr + e->size; plo += WATCH_PAGE) {
+    uint64_t lo = e->addr, hi = e->addr + e->size;  // (the allocation: its watched neighbours, transitively)
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (int k = 0; k < nrs; k++) {
+            const RangeState *o = &rs_tab[k];
+            if (o->size < 256 || o->addr >= hi + 256 || o->addr + o->size + 256 <= lo) continue;
+            if (o->addr < lo) lo = o->addr, grew = true;
+            if (o->addr + o->size > hi) hi = o->addr + o->size, grew = true;
+        }
+    }
+    uint64_t plo = (lo + WATCH_PAGE - 1) & ~(WATCH_PAGE - 1), phi = hi & ~(WATCH_PAGE - 1);  // (its pages of its own)
+    uint32_t pg_now;
+    if (plo < phi) {
+        if (pages_cpu_written(plo, phi - plo, since, &pg_now) != 1) return 0;  // (only its edge pages: someone else's)
+    } else plo = e->addr & ~(WATCH_PAGE - 1), phi = e->addr + e->size;
+    for (; plo < phi; plo += WATCH_PAGE) {
         bool small_mate = false;
         for (int k = 0; k < nrs && !small_mate; k++) {
             const RangeState *o = &rs_tab[k];
             if (o != e && o->size < 256 && o->cs_bound && o->addr < plo + WATCH_PAGE && plo < o->addr + o->size) small_mate = true;
         }
         if (small_mate) continue;
-        uint32_t pg_now;  // (this page written since the range's last look? The look above stamped it: no OS bits left)
-        if (pages_cpu_written(plo, WATCH_PAGE, since, &pg_now) == 1) return 1;  // (a dirty page of its own)
+        // (this page written since the range's last look? The looks above stamped it: no OS bits left)
+        if (pages_cpu_written(plo, WATCH_PAGE, since, &pg_now) == 1) return 1;
     }
-    return 0;  // (only pages shared with small parameter blocks were written: theirs)
+    return 0;  // (only pages shared with small parameter blocks or memory outside the allocation were written)
 }
 
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
