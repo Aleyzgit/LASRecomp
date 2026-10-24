@@ -41,6 +41,12 @@ This is a beta release. That means bugs are likely, crashes could occur, randomi
 
 Known issues and their status are on the [GitHub issues page](https://github.com/peiikai/LASRecomp/issues).
 
+## Steam Deck
+
+- Add the AppImage to Steam as a non-Steam game and play it from there. In Desktop Mode, games Steam didn't launch
+  get Steam's desktop controller layout, which sends extra keyboard presses.
+- If it won't start, add this to the game's launch options in Steam: `APPIMAGE_EXTRACT_AND_RUN=1 %command%`
+
 ## Features
 
 **Runs natively**

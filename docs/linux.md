@@ -29,8 +29,8 @@ Switch pads) the user needs access to `/dev/hidraw*`, which most distributions g
 (`steam-devices`, or Steam installed); without them the controller still works through the kernel driver. Started from
 Steam with Steam Input on, the game sees Steam's virtual Xbox controller (Xbox prompts).
 
-If the AppImage won't start with a FUSE error, install your distribution's `fuse3` package (the AppImage runtime
-needs `fusermount3`), or run it as `./LAS.Recomp-...-linux-x86_64.AppImage --appimage-extract-and-run`.
+If the AppImage won't start with a FUSE error, install your distribution's `fuse3` package, or run it with
+`APPIMAGE_EXTRACT_AND_RUN=1`. On a Steam Deck, put `APPIMAGE_EXTRACT_AND_RUN=1 %command%` in the game's launch options.
 
 ## Building from source
 Ubuntu / Debian packages (other distributions: the same libraries under their names). SDL3 must be 3.4 or newer
