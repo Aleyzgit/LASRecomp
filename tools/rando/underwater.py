@@ -44,6 +44,7 @@ def _level_dir(romfs, level):
 
 
 def apply(mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
+    import oead  # (here: location_rooms.py imports this module for SPOTS alone)
     common_out = os.path.join(out_dir, 'romfs', 'region_common')
     common_in = os.path.join(romfs, 'region_common')
 
@@ -89,9 +90,7 @@ def apply(mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
         if not acts:
             raise RuntimeError(f'{name}: no actor {vtype:#x} in {room_name}')
         act = acts[0]
-        act.type = 0xB0
-        # vanilla position and scale for every model: the actor's dive pickup area follows them, and raised or shrunk
-        # (0.25 up / 0.75 / data.MODEL_SIZES) it could only be collected right at its centre (EagleTowerExit, 2026-10-24)
+        act.type = 0xB0  # (vanilla position: the model shows where the heart piece did, and the pickup box is there)
         while len(act.parameters) < 8:
             act.parameters.append(b'')
         act.parameters[1] = bytes(model_path, 'utf-8')
@@ -99,6 +98,8 @@ def apply(mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
         act.parameters[3] = bytes(name, 'utf-8')
         act.parameters[4] = bytes(flag, 'utf-8')
         act.parameters[5] = b'true' if item_key == 'Seashell' else b'false'
+        if model_name in data.MODEL_SIZES:  # (the song characters; the pickup box doesn't scale with the actor)
+            act.scaleX = act.scaleY = act.scaleZ = data.MODEL_SIZES[model_name]
         if model_name in data.MODEL_ROTATIONS:
             act.rotY = data.MODEL_ROTATIONS[model_name]
         with open(out(rel), 'wb') as fh:
@@ -122,6 +123,15 @@ def apply(mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
     hp['shellSensor'].append({'category': 9, 'parameter': '$5'})
     if patch is not None:
         vals.append(oead_tools.dictToStruct(patch))
+    # A dive collects the item when Link's dive reaches its collision box (shape 3: parameters = the box's full x / y / z
+    # size, centred offset.y above the actor; the actor's scale doesn't change it). Measured 2026-10-24: the heart
+    # piece's 0.8 x 0.65 x 0.6 is collected diving within about 0.6 (x) / 0.5 (z) of the centre, and a dive reaches
+    # about 1.25 below the water surface, just at the top of that box on the floor of Martha's Bay (15J): dives there
+    # missed even dead centre. 3 x 1.3 x 3 is collected within about one tile (1.5) on every side, and its top is still
+    # 0.7+ below a swimming Link (swimming over it doesn't collect it). (After the append, which moves the array; a new
+    # buffer, as PatchHeartPiece's copy - dry heart pieces, unchanged - shared the old one's data.)
+    hp = next(v for v in vals if v['symbol'] == 'ItemHeartPiece')
+    hp['collision']['parameters'] = oead.BufferF32([3.0, 1.3, 3.0])
     oead_tools.writeSheet(out('datasheets/Npc.gsheet'), npcs)
     items = oead_tools.readSheet(path('datasheets/Items.gsheet'))
     for it in items['values']:
