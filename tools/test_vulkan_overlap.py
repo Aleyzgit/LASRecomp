@@ -141,6 +141,14 @@ const char *game_level_name(void) { return level; }
 static uint64_t stat_snap_bytes, stat_snap_copies;
 ''' + snap + r'''
 static void snap_ring_import_tail(void) {}
+static int pages_seen_written(uint64_t addr, uint64_t size, uint32_t since) {  // (the stamps the looks left)
+    if (track_off) return -1;
+    for (uint64_t p = (addr - HEAP_BASE) / 4096; p < (addr - HEAP_BASE + size + 4095) / 4096; p++) if (page_gen[p] > since) return 1;
+    return 0;
+}
+static void gpu_wrote(uint64_t addr, uint64_t size) {  // (a dispatch's output: bytes change, no dirty bit)
+    for (uint64_t o = 0; o + 8 <= size; o += 256) heap_mem[addr - HEAP_BASE + o]++;
+}
 static bool heap_is_userptr(void) { return userptr; }
 static uint64_t ring_lo(void) { return HEAP_BASE + snap_base; }
 static bool in_ring(uint64_t a) { return a >= ring_lo() && a < ring_lo() + SNAP_RING; }
@@ -184,9 +192,13 @@ static void watch_tests(void) {
     level = "Beach";
     frame += 601;
     assert(snap_storage(C, 2048, true) == C && rs_tab[1].mode == RS_PLACE);
-    // W5. two ranges on one page (the light lists): a CPU write into one marks both
+    // W5. two ranges on one page (the light lists): a CPU write into one marks both - from their third look on (a
+    //     store on a shared page: the first two looks leave the GPU's first writes time to show)
     frame++;
     assert(snap_storage(B, 2048, true) == B && snap_storage(B2, 2048, true) == B2);
+    cpu_wrote(B2 + 8);
+    frame++;
+    assert(snap_storage(B, 2048, true) == B && snap_storage(B2, 2048, true) == B2 && rs_tab[2].mode == RS_PLACE);  // (not even noted)
     cpu_wrote(B2 + 16);
     frame++;
     assert(snap_storage(B, 2048, true) == B && snap_storage(B2, 2048, true) == B2);  // (noted)
@@ -213,6 +225,8 @@ static void watch_tests(void) {
     uint64_t F = HEAP_BASE + 0xA0000;
     frame++;
     assert(snap_storage(F, 2048, true) == F);
+    frame++;
+    assert(snap_storage(F, 2048, true) == F);  // (its second look: from the third on, a store on its shared page counts)
     uint32_t g;
     for (int i = 0; i < 2; i++) {  // (written in two frames, someone else looking first each time)
         cpu_wrote(F + 4);
@@ -250,11 +264,11 @@ static void watch_tests(void) {
     cpu_wrote(I);  // (a lone write 21 frames later: still not a rewrite)
     frame++;
     assert(snap_storage(I, 4096, true) == I && rs_tab[9].mode == RS_PLACE);
-    // W11 (#355). BowWow's skinning outputs as the Linux log laid them out: eight 22048-byte outputs 224 bytes apart,
-    //     then (992 bytes on) four 3104-byte ones 224 bytes apart, with per-frame constants the CPU stores every frame
-    //     in the untracked memory before, between and after them (no watched range there, not even a small one). Such
-    //     a store says nothing about the outputs (Metal: "a store outside every range only opens the page"): none is
-    //     copied. A store on a page inside the outputs' allocation, twice, still is.
+    // W11 (#355). BowWow's skinning outputs as the first Linux log laid them out: eight 22048-byte outputs 224 bytes
+    //     apart, then (992 bytes on) four 3104-byte ones 224 bytes apart, which the GPU writes every frame, with
+    //     per-frame constants the CPU stores in the memory before, between and after them (no watched range there).
+    //     The outputs' bytes change on pages the CPU didn't touch: GPU outputs, and a store beside them doesn't copy
+    //     them. A store on a page wholly inside one, in two frames, still does.
     uint64_t X = HEAP_BASE + 0x200000, O[8], T[4];
     for (int i = 0; i < 8; i++) O[i] = X + 0x700 + (uint64_t)i * 0x5700;
     for (int i = 0; i < 4; i++) T[i] = X + 0x2c800 + (uint64_t)i * 0xd00;
@@ -265,6 +279,10 @@ static void watch_tests(void) {
         cpu_wrote(X + 0x100);    // (before the first output, on its first page)
         cpu_wrote(X + 0x2c500);  // (between the last 22048 output's tail and the first 3104 one, on both their pages)
         cpu_wrote(X + 0x2f800);  // (after the last 3104 output, on its page)
+        if (f >= 1) {  // (the dispatch of the frame they were made in lands two frames later at most: the overlap)
+            for (int i = 0; i < 8; i++) gpu_wrote(O[i], 22048);
+            for (int i = 0; i < 4; i++) gpu_wrote(T[i], 3104);
+        }
         frame++;
         for (int i = 0; i < 8; i++) assert(snap_storage(O[i], 22048, true) == O[i]);
         for (int i = 0; i < 4; i++) assert(snap_storage(T[i], 3104, true) == T[i]);
@@ -272,8 +290,6 @@ static void watch_tests(void) {
     uint64_t got = 0;
     for (int f = 0; f < 2; f++) { cpu_wrote(O[0] + 0x2000); frame++; got = snap_storage(O[0], 22048, true); }  // (a store inside output 0, in two frames)
     assert(got != O[0]);
-    for (int f = 0; f < 2; f++) { cpu_wrote(T[1] + 0x10); frame++; got = snap_storage(T[1], 3104, true); }  // (inside 3104 output 1: a page inside the allocation)
-    assert(got != T[1]);
     for (int i = 2; i < 8; i++) assert(snap_storage(O[i], 22048, true) == O[i]);
     // W12. the light / exposure lists (32640, 32640, 2040, 2040: one allocation the CPU memcpys every frame), at any
     //      offset in the page: all four are copied, also the small list whose only page it shares with other memory
@@ -282,14 +298,44 @@ static void watch_tests(void) {
         const uint64_t Z[4] = {32640, 32640, 2040, 2040};
         frame++;
         for (int i = 0; i < 4; i++) assert(snap_storage(R[i], Z[i], true) == R[i]);
-        for (int f = 0; f < 2; f++) {
+        for (int f = 0; f < 3; f++) {  // (every frame: the small lists' shared page counts from their third look)
             for (uint64_t p = L; p < L + 0x10800 + 2040; p += 1024) cpu_wrote(p);
+            gpu_wrote(R[2], 2040);  // (the exposure program writes the list too: never taken for an output, its page is never clean)
             frame++;
             for (int i = 0; i < 4; i++) snap_storage(R[i], Z[i], true);
         }
         for (int i = 0; i < 4; i++) assert(snap_storage(R[i], Z[i], true) != R[i]);
     }
-    puts("PASS: write watch - in place + tracked, CPU writes that keep coming make a copy for good (a single one doesn't), no demotion on level / idle, GPU writes ignored, a shared page marks both, a page shared with a small parameter block doesn't, nor stores outside every range beside an allocation (#355), the lists at any page offset, a prior write is consumed, draw reads copy, other lookers");
+    // W13 (#355, second log: Sale's house after the crane game). BowWow's buffers made again where the heap had room:
+    //     3104-byte ones 0x1800 apart (3040 bytes between them: no group), 22048-byte ones right after (gap 0) a 32768-byte
+    //     buffer draws read, which the CPU rewrites every frame, so their first page is the CPU's too. Addresses as in
+    //     the log (7283xxxxxx -> K + xxxxxx). Constants in the gaps dirty one page of each 3104-byte output every frame.
+    //     None of the outputs is copied; the draw buffers are (a draw's read); a 3104-byte buffer the CPU writes and
+    //     the GPU doesn't (an input: a bone palette) is still copied.
+    uint64_t K = HEAP_BASE + 0x400000 - 0xf0000;
+    const uint64_t t13[6] = {0xf8500, 0xf9d00, 0xfb500, 0xfcd00, 0xfe500, 0xffd00}, o13[2] = {0x123500, 0x187700}, d13[3] = {0x11b500, 0x17f700, 0x101500};
+    frame++;
+    for (int i = 0; i < 6; i++) assert(snap_storage(K + t13[i], 3104, true) == K + t13[i]);
+    for (int i = 0; i < 2; i++) assert(snap_storage(K + o13[i], 22048, true) == K + o13[i]);
+    for (int i = 0; i < 3; i++) assert(snap_storage(K + d13[i], 32768, false) != K + d13[i]);
+    uint64_t IN = K + 0x1c0f00;  // (the input, 0x...f00 like 72827b8f00: on two pages)
+    assert(snap_storage(IN, 3104, true) == IN);
+    for (int f = 0; f < 12; f++) {
+        for (int i = 0; i < 3; i++) for (uint64_t p = K + d13[i]; p < K + d13[i] + 32768; p += 1024) cpu_wrote(p);
+        cpu_wrote(K + 0xf9500), cpu_wrote(K + 0xfc500), cpu_wrote(K + 0xff500);  // (pages f9, fc, ff: one of each 3104's two)
+        cpu_wrote(IN + 0x40), cpu_wrote(IN + 0x200);
+        if (f >= 1) {
+            for (int i = 0; i < 6; i++) gpu_wrote(K + t13[i], 3104);
+            for (int i = 0; i < 2; i++) gpu_wrote(K + o13[i], 22048);
+        }
+        frame++;
+        for (int i = 0; i < 6; i++) assert(snap_storage(K + t13[i], 3104, true) == K + t13[i]);
+        for (int i = 0; i < 2; i++) assert(snap_storage(K + o13[i], 22048, true) == K + o13[i]);
+        for (int i = 0; i < 3; i++) assert(snap_storage(K + d13[i], 32768, false) != K + d13[i]);
+        got = snap_storage(IN, 3104, true);
+    }
+    assert(got != IN);
+    puts("PASS: write watch - in place + tracked, CPU writes that keep coming make a copy for good (a single one doesn't), no demotion on level / idle, GPU writes ignored, a shared page marks both, a page shared with a small parameter block doesn't, nor a store beside a GPU output on its shared pages (#355, both Linux layouts), the lists at any page offset, a prior write is consumed, draw reads copy, other lookers");
 }
 
 int main(int argc, char **argv) {
