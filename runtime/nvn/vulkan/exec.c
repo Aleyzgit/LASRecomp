@@ -2839,7 +2839,7 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
 #define SNAP_HALF (8ull << 20)
 #define SNAP_RING (2 * SNAP_HALF)
 enum { RS_PROBE, RS_COPY, RS_PLACE };
-typedef struct { uint64_t addr, size, copy, pristine, hash, frame, seg_hash[3]; uint32_t gen, level, wgen, looks; uint8_t mode; bool cs_bound, draw_bound, gpu_out; } RangeState;  // (wgen, seg_hash, looks, gpu_out: watch_check; pristine: rs_copy_make)
+typedef struct { uint64_t addr, size, copy, pristine, hash, frame, seg_hash[3]; uint32_t gen, level, wgen, looks; uint8_t mode, gpu_parts; bool cs_bound, draw_bound; } RangeState;  // (wgen, seg_hash, looks, gpu_parts: watch_check; pristine: rs_copy_make)
 static RangeState rs_tab[512];
 static uint64_t rs_store_frame[512];  // (watch: the frame of the previous CPU write seen on a range's own pages)
 static int nrs;
@@ -3037,14 +3037,20 @@ static bool watch_on(void) {
 // Nor does a store beside a GPU output on a page it shares with other memory (#355, Linux: BowWow's outputs next to
 // per-frame constants and CPU-written draw buffers - wherever the heap put them - were copied and his body came
 // apart in the Witch's hut and in Sale's house). Metal's fault handler sees the store's address; the page bits
-// don't, so the watch learns which ranges the GPU writes instead (renderer.m c50a999 learns it per program, with a
-// GPU wait): while a range is in place, a part of it whose pages the CPU didn't touch since the last look but whose
-// bytes changed was written by the GPU (DMA sets no dirty bit). Parts: the range's bytes on its first page, on its
-// pages wholly inside it, on its last page. A GPU output (gpu_out) counts only a store on a page wholly its own, as
-// a store into it. The light / exposure lists, which a program writes too, are rewritten by the CPU every frame -
-// their pages are never clean - so they never look like outputs and keep the rules above. A store on an edge page
-// counts from a range's third look on, so the GPU's first writes (two frames at most with the overlap) are seen
-// before. Learning stops after 600 looks (an input the GPU never writes); while it lasts, each part's first 4 KB are hashed.
+// don't, so the watch learns which parts of a range the GPU writes (renderer.m c50a999 learns it per program, with a
+// GPU wait; the translator can't say which storage slot a store goes to - its pointers are formed once and reused
+// across loops and indirect branches, some loaded from memory): while a range is in place, a part of it whose pages
+// the CPU didn't touch since the last look - asked again after the hash, so a store landing between the look and
+// the hash isn't taken for the GPU's - but whose bytes changed was written by the GPU (DMA sets no dirty bit).
+// Parts: the range's bytes on its first page, on its pages wholly inside it, on its last page (gpu_parts bits 0-2;
+// the first 4 KB of each are hashed). A store on a page wholly its own always counts. A store on its first or last
+// page (shared with other memory) doesn't when that part, or its inner part (an output is written whole: BowWow's
+// 22048-byte ones, whose first page a CPU-rewritten draw buffer shares, so it is never clean), or - for a range
+// without an inner part - its other edge part is GPU-written. The light / exposure lists, which a program writes
+// too, are rewritten by the CPU every frame - their pages are never clean - so they never look written by the GPU.
+// A store on a shared page counts from a range's third look on, so the GPU's first writes (two frames at most with
+// the overlap) are seen first. Learning starts again when a range is bound after more than 8 frames without or on a
+// new level (snap_storage: the heap may hold something else there now) and stops after 600 looks.
 static int pages_seen_written(uint64_t addr, uint64_t size, uint32_t since);  // (the page tables below: no OS query)
 static int watch_check(RangeState *e) {
     uint32_t since = e->wgen, now = e->wgen;
@@ -3053,16 +3059,18 @@ static int watch_check(RangeState *e) {
     if (w < 0 || e->size < 256) return w;
     uint64_t end = e->addr + e->size, p1 = (e->addr + WATCH_PAGE - 1) & ~(WATCH_PAGE - 1), pe = end & ~(WATCH_PAGE - 1);
     uint64_t lo[3] = {e->addr, p1, pe >= p1 ? pe : end}, hi[3] = {p1 < end ? p1 : end, p1 < pe ? pe : p1, end};  // first page, inner pages, last page
-    if (!e->gpu_out && e->looks < 600) {
+    if (e->gpu_parts != 7 && e->looks < 600) {
         for (int i = 0; i < 3; i++) {
-            if (lo[i] >= hi[i]) continue;
+            if (lo[i] >= hi[i] || (e->gpu_parts >> i & 1)) continue;
             uint64_t n = hi[i] - lo[i] < WATCH_PAGE ? hi[i] - lo[i] : WATCH_PAGE;  // (a page of each part: an output is rewritten whole)
             uint64_t h = range_hash(lo[i], n);
-            if (e->looks && h != e->seg_hash[i] && pages_seen_written(lo[i], n, since) == 0) {
-                e->gpu_out = true;
+            uint32_t g2;  // (asked again after the hash: a CPU store between the look and the hash is the CPU's; its stamp
+                          //  stays newer than e->wgen, so the next look counts it)
+            if (e->looks && h != e->seg_hash[i] && pages_seen_written(lo[i], n, since) == 0 && pages_cpu_written(lo[i], n, now, &g2) == 0) {
+                e->gpu_parts |= (uint8_t)(1u << i);
                 static int logged;
-                if (logged++ < 200) LOG("[snap] %llx+%llu GPU-written (its bytes changed with no CPU write): only stores on pages wholly its own copy it\n",
-                                   (unsigned long long)e->addr, (unsigned long long)e->size);
+                if (logged++ < 200) LOG("[snap] %llx+%llu GPU-written (%s: its bytes changed with no CPU write)\n", (unsigned long long)e->addr,
+                                        (unsigned long long)e->size, i == 0 ? "first page" : i == 1 ? "inner pages" : "last page");
             }
             e->seg_hash[i] = h;
         }
@@ -3070,9 +3078,11 @@ static int watch_check(RangeState *e) {
     e->looks++;
     if (w != 1) return 0;
     if (lo[1] < hi[1] && pages_seen_written(lo[1], hi[1] - lo[1], since) == 1) return 1;  // (a page wholly its own)
-    if (e->gpu_out || e->looks < 3) return 0;  // (a GPU output's edge pages are its neighbours'; a new range: the GPU's writes first)
+    if (e->looks < 3) return 0;  // (a new range: the GPU's first writes first)
     for (int i = 0; i < 3; i += 2) {  // its first and last page, shared with other memory
         if (lo[i] >= hi[i]) continue;
+        bool inner = lo[1] < hi[1];
+        if ((e->gpu_parts >> i & 1) || (e->gpu_parts & 2) || (!inner && (e->gpu_parts >> (2 - i) & 1))) continue;  // (the GPU's: a store there is a neighbour's)
         uint64_t plo = lo[i] & ~(WATCH_PAGE - 1);
         bool small_mate = false;
         for (int k = 0; k < nrs && !small_mate; k++) {
@@ -3081,7 +3091,7 @@ static int watch_check(RangeState *e) {
         }
         if (!small_mate && pages_seen_written(plo, WATCH_PAGE, since) == 1) return 1;
     }
-    return 0;  // (only pages shared with small parameter blocks were written: theirs)
+    return 0;  // (only pages shared with small parameter blocks, or GPU-written parts' neighbours, were written)
 }
 
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
@@ -3167,6 +3177,8 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     // probe again on a new level or after 10 s unused - only the hash fallback's in-place ranges: a copied range stays
     // copied (a draw's storage read, a CPU store seen), a watched one just gets its pages armed again
     bool again = !watch_on() && e->mode == RS_PLACE && (e->level != rs_level_gen || f - e->frame > 600);
+    if (e->mode == RS_PLACE && (e->level != rs_level_gen || f - e->frame > 8))  // (the watch's learning, again: the heap there may be reused)
+        e->gpu_parts = 0, e->looks = 0;
     e->level = rs_level_gen;
     e->frame = f;
     if (!cs_slot && e->mode != RS_COPY) {  // a draw reads it as storage: copied for good (see above)
