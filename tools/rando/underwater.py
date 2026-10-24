@@ -35,6 +35,8 @@ SPOTS = {
 # flags: the heart pieces use LAS's own (data.HEART_FLAGS, made by flags.py); the seashells get two new ones
 SHELL_FLAGS = {'kanalet-moat-north': 'KanaletSunkenShellGet', 'taltal-sunken': 'TaltalSunkenShellGet'}
 RAISE = 0.75  # how far above the vanilla floor spot the sunken items float (apply())
+# model sizes underwater (others 1.5, the heart piece 1): small or big-at-1 models picked so they read as well as the key
+SIZES = {'FullMoonCello': 2.5, 'Mamu': 0.75, 'ManboTamegoro': 0.9}
 
 
 def _level_dir(romfs, level):
@@ -94,10 +96,10 @@ def apply(mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, data):
         act.type = 0xB0
         # Seen through the water (a blurred low-resolution view), items on the floor are hard to make out: every one is
         # raised RAISE (the pickup box is lowered as much below, in Npc.gsheet: it stays where the heart piece's was), and
-        # other models than the heart piece are drawn half again as large (the song characters at their own sizes).
+        # other models than the heart piece are drawn half again as large (a few at their own sizes: SIZES, MODEL_SIZES).
         act.posY += RAISE
         if model_name not in ('HeartPiece', 'HeartContainer'):
-            act.scaleX = act.scaleY = act.scaleZ = data.MODEL_SIZES.get(model_name, 1.5)
+            act.scaleX = act.scaleY = act.scaleZ = SIZES.get(model_name, data.MODEL_SIZES.get(model_name, 1.5))
         while len(act.parameters) < 8:
             act.parameters.append(b'')
         act.parameters[1] = bytes(model_path, 'utf-8')
