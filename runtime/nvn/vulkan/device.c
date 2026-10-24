@@ -411,10 +411,19 @@ static void create_device(void) {
     }
     {   // dynamic vertex input (exec.c): fewer pipelines; LARECOMP_VK_DYN_VERTEX=0 keeps the layout in each pipeline
         const char *e = getenv("LARECOMP_VK_DYN_VERTEX");
-        bool off = e && !atoi(e);
+        bool off = e && *e && !atoi(e);
+        // Intel's frozen Windows driver for its older integrated GPUs (UHD 630, Ice Lake...: Vulkan 1.3.215 and older)
+        // draws nothing with it - a black picture (#8, #357); LARECOMP_VK_DYN_VERTEX=1 still turns it on there
+        bool intel_legacy = false;
+#ifdef _WIN32
+        intel_legacy = g_vk.props.vendorID == 0x8086 && g_vk.props.apiVersion <= VK_MAKE_API_VERSION(0, 1, 3, 215);
+#endif
+        if (intel_legacy && !(e && *e)) off = true;
         g_vk.vids = vids_ext && have_vids.vertexInputDynamicState && !off;
         if (g_vk.vids) ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
-        else LOG("[vk] vertex input: in each pipeline (%s)\n", off ? "LARECOMP_VK_DYN_VERTEX=0" :
+        else LOG("[vk] vertex input: in each pipeline (%s)\n",
+                 intel_legacy && !(e && *e) ? "Intel's older Windows driver: drew nothing with it" :
+                 off ? "LARECOMP_VK_DYN_VERTEX=0" :
                  !vids_ext ? "no VK_EXT_vertex_input_dynamic_state" : "vertexInputDynamicState not supported");
     }
 #ifdef VK_EXT_graphics_pipeline_library
