@@ -3531,13 +3531,21 @@ static bool guest_heap_dmabuf(void) {
     vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
     const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT |
                                        VK_MEMORY_PROPERTY_HOST_CACHED_BIT;  // (cached: the game's CPU work runs in it)
-    int type = -1;
+    int type = -1, largest_type = -1;
     uint64_t largest = 0;  // (the largest heap with a cached host-visible type, for the log when none is big enough)
     for (uint32_t i = 0; i < mp.memoryTypeCount && type < 0; i++) {
         if ((mp.memoryTypes[i].propertyFlags & want) != want) continue;
         uint64_t hs = mp.memoryHeaps[mp.memoryTypes[i].heapIndex].size;
         if (hs >= size) type = (int)i;
-        else if (hs > largest) largest = hs;
+        else if (hs > largest) largest = hs, largest_type = (int)i;
+    }
+    // A heap's size is how the driver splits what the kernel lets the GPU map (RADV on an APU: part of GTT is reported
+    // as device-local), not a limit of one allocation: the largest cached heap is tried anyway (a ROG Ally: 3305 MB for
+    // 3328; a Steam Deck: 3072), and a refused allocation falls back below as before.
+    if (type < 0 && largest_type >= 0) {
+        LOG("[vk] heap as driver memory: the cached system memory heap (%llu MB) is smaller than the guest heap (%llu MB); "
+            "trying it anyway\n", (unsigned long long)(largest >> 20), (unsigned long long)(size >> 20));
+        type = largest_type;
     }
     if (type < 0) {
         if (largest)  // (Steam Deck: a 3072 MB system heap)
@@ -3677,7 +3685,11 @@ void backend_guest_heap_prepare(void) {
 #ifdef __linux__
     // driver memory: write tracking can't watch that mapping (its queries over the heap would fail; PAGEMAP_SCAN
     // refuses a range without userfaultfd write protection), so it's off there too
-    if (gmem_dmabuf) { plat_write_tracking_off("the guest heap is driver memory"); return; }
+    if (gmem_dmabuf) {
+        plat_write_tracking_off("the guest heap is driver memory");
+        plat_soft_write_tracking(HEAP_BASE, HEAP_BASE + HEAP_MAX);  // (no userptr: a protection change is the CPU's alone)
+        return;
+    }
     if (!g_vk.host_import || getenv("LARECOMP_VK_NO_GMEM") || g_vk.props.vendorID == 0x10DE) return;
     gmem_userptr = true;
     plat_write_tracking_off(gc_lazy ? "the guest heap is imported in userptr chunks" : "the guest heap is a userptr import");
