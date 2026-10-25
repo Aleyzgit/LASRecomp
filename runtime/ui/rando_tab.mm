@@ -156,14 +156,12 @@ struct GenOpts {
 };
 static GenOpts g_opts;
 
-// Triforce hunt rows: "Pieces needed" 3 / 12 / 24 / Custom; Custom's count is picked in the right pane (a stepper and a
-// slider), reached with Right / A on the row and left with B (as the Controls tab's Configure inputs page)
+// Triforce hunt rows: "Pieces needed" 3 / 12 / 24 / Custom; with Custom, a row under it picks the count
 static const int kTriPresets[3] = {3, 12, 24};
 static int g_tri_custom = 24;      // the Custom count (kept while a preset is chosen)
 static int g_tri_mode = 2;         // 0..2 a preset, 3 Custom (follows a loaded seed ID)
-static bool g_tri_row_on, g_tri_in_right, g_tri_right_hover, g_tri_to_right, g_tri_to_row;
-static int g_tri_back_frame = -10;  // the frame B went back from the right pane (the menu mustn't close on it)
-extern "C" bool rando_tab_took_back(void) { return g_tri_back_frame == ImGui::GetFrameCount(); }
+static int g_back_frame = -10;     // the frame B went back a step in the right column (the menu mustn't close on it)
+extern "C" bool rando_tab_took_back(void) { return g_back_frame == ImGui::GetFrameCount(); }
 static void tri_mode_from_opts(void) {
     g_tri_mode = 3;
     for (int i = 0; i < 3; i++) if (g_opts.tri_needed == kTriPresets[i]) g_tri_mode = i;
@@ -574,142 +572,29 @@ bool spoiler_view_draw(const std::string &seed, float scale);  // spoiler_view.m
 extern "C" void pets_ui_draw(void);  // pets_ui.mm: call a found pet
 static std::string g_spoiler_seed;  // seed whose spoiler page is open
 
-extern "C" void rando_tab_draw(float scale) {
-    (void)scale;
-    if (!g_scanned) scan();
-    static bool spoiler_test;  // LARECOMP_SPOILER_TEST=<seed>: open that seed's spoiler page (test hook)
-    if (!spoiler_test && getenv("LARECOMP_SPOILER_TEST")) { spoiler_test = true; g_spoiler_seed = getenv("LARECOMP_SPOILER_TEST"); }
-    if (!g_spoiler_seed.empty()) {  // the spoiler page replaces the tab until Back
-        if (!spoiler_view_draw(g_spoiler_seed, scale)) g_spoiler_seed.clear();
-        return;
-    }
-    static bool opts_once;  // the options the player last set (larecomp.ini)
-    if (!opts_once) { opts_once = true; opts_load(); }
-    static bool id_once;  // LARECOMP_RANDO_ID=<seed ID>: the tab starts with that ID's options (test hook)
-    if (const char *t = getenv("LARECOMP_RANDO_ID"); !id_once && t) {
-        id_once = true;
-        std::string err = seed_id_decode(t, g_opts);
-        if (!err.empty()) LOG("[rando] test seed ID: %s\n", err.c_str());
-        tri_mode_from_opts();
-        if (getenv("LARECOMP_TRI_RIGHT")) g_tri_to_right = true;  // (test: the Custom count's pane, cursor on it)
-    }
-    static bool test_once;  // LARECOMP_RANDO_GEN_TEST=1|<name>[:<seed ID>]: generate a seed (with that ID's options)
-    if (const char *t = getenv("LARECOMP_RANDO_GEN_TEST"); !test_once && t) {  // as soon as the tab is shown (test hook)
-        test_once = true;
-        std::string nm = t;
-        if (size_t c = nm.find(':'); c != std::string::npos) {
-            std::string err = seed_id_decode(nm.c_str() + c + 1, g_opts);
-            if (!err.empty()) LOG("[rando] test seed ID: %s\n", err.c_str());
-            nm.resize(c);
-        }
-        strlcpy(g_opts.seed, nm.size() > 1 ? nm.c_str() : "MenuTest", sizeof g_opts.seed);
-        start_generation();
-    }
-    poll_generation();
-    bool busy = g_gen_pid || g_gen_done;  // the generation overlay is up: the whole panel is greyed out under it
-    ImGui::BeginDisabled(busy);
-    // (the start screen: no game loaded, nothing playing - and the seed's patches mustn't be applied yet)
-    const char *active = !g_start_screen && rando_seed_dir() ? rando_seed_dir() + 6 : NULL;
-    if (active) pets_ui_draw();  // (in game, a seed with companions: call one - above the panes)
+// ---- the tab, in two columns (as the Controls tab's Configure inputs): Seeds and the seed option categories on the
+// left with a new seed's name, ID and Generate seed under them; the chosen category's rows (or the seed list, or a
+// seed's actions) on the right. Each category's rows are in their own function below.
+enum { CAT_SEEDS, CAT_GENERAL, CAT_GOAL, CAT_ITEMS, CAT_EXTRA, CAT_WORLD, CAT_ENEMIES, CAT_COMPANIONS, CAT_OTHER, N_CAT };
+static const char *const k_cat_name[N_CAT] = {"Seeds", "General", "Goal", "Items", "Extra checks", "World",
+                                              "Enemies & bosses", "Companions", "Other"};
+static int g_cat = CAT_GENERAL;
+static bool g_in_right;            // the cursor is in the right column (last frame)
+static int g_last_frame = -10;     // (a frame without this tab: the cursor starts over)
+static std::string g_act_seed;     // the seed whose actions the right column shows ("": the seed list)
+static std::string g_focus_seed;   // (FOCUS_SEED: this seed's row)
+static bool g_confirm_delete;
+enum { FOCUS_NONE, FOCUS_CAT, FOCUS_RIGHT, FOCUS_SEED, FOCUS_DELETE, FOCUS_CANCEL, FOCUS_TRI };
+static int g_focus;                // put the cursor on this row when it's drawn
 
-    // Two panes (option_rows.h): seeds, the player's display settings, then a new seed's options; the right pane
-    // describes the selected / hovered row.
-    opt_begin("##rando", scale);
+static void take_focus(int want) {
+    if (g_focus != want || opt_counting()) return;
+    g_focus = FOCUS_NONE;
+    opt_focus_item();
+}
 
-    // ---- seeds: a row each; A / click opens its actions
-    opt_section("Seeds");
-    if (active && opt_action("Switch to vanilla", "", "Leaves this seed and plays the game without the randomizer. "
-                                                       "Each seed keeps its own save files."))
-        play_seed("");
-    static std::string act_seed;  // the seed whose actions box is open
-    for (const Seed &s : g_seeds) {
-        bool is_active = active && s.name == active;
-        std::string d = "Seed ID: " + (s.id.empty() ? std::string("-") : s.id) + "\nLogic: " +
-                        (s.logic.empty() ? std::string("-") : s.logic) +
-                        (s.race ? "\nRace mode. Seed hash: " + hash_names(s.id) : std::string()) +
-                        "\n\nPlay it, read its spoiler log, copy its ID to share, rename or delete it. Each seed has its "
-                        "own save files.";
-        if (opt_action(s.name.c_str(), is_active ? "Playing" : s.logic.c_str(), d.c_str(), false)) {
-            act_seed = s.name;
-            ImGui::OpenPopup("##seedact");
-        }
-    }
-    if (g_seeds.empty()) {
-        opt_disable_next();
-        opt_action("No seeds yet", "", "Make one with the options under New seed, then Generate seed.");
-    }
-    {  // the seed's actions
-        static bool confirm_delete, renaming;
-        static char rename_buf[64];
-        if (ImGui::IsPopupOpen("##seedact") == false) confirm_delete = renaming = false;
-        if (ImGui::BeginPopupModal("##seedact", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-            const Seed *sp = NULL;
-            for (const Seed &x : g_seeds) if (x.name == act_seed) sp = &x;
-            float bw = 300 * scale;
-            if (!sp) ImGui::CloseCurrentPopup();
-            else {
-                const Seed &s = *sp;
-                bool is_active = active && s.name == active;
-                ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", s.name.c_str());
-                ImGui::Spacing();
-                bool close = false;
-                if (renaming) {
-                    ImGui::SetNextItemWidth(bw * 2);
-                    if (!osk_is_open() && !ImGui::IsAnyItemActive()) ImGui::SetKeyboardFocusHere();
-                    if (ui_input_text("##rename", rename_buf, sizeof rename_buf, ImGuiInputTextFlags_EnterReturnsTrue, NULL,
-                                      "Rename seed")) {
-                        std::string to_name = clean_name(rename_buf), to = "rando/" + to_name;
-                        struct stat sb;
-                        if (!to_name.empty() && to_name != s.name) {
-                            if (!stat(to.c_str(), &sb)) g_gen_status = "A seed named \"" + to_name + "\" already exists.";
-                            else if (rename(("rando/" + s.name).c_str(), to.c_str()) == 0) {
-                                // (seeds made before seed IDs name their spoiler after the folder)
-                                rename((to + "/spoiler_" + s.name + ".txt").c_str(), (to + "/spoiler_" + to_name + ".txt").c_str());
-                                LOG("[rando] renamed seed %s -> %s\n", s.name.c_str(), to_name.c_str());
-                            }
-                        }
-                        renaming = false;
-                        close = true;
-                    }
-                    if (ui_input_text_cancelled()) renaming = false;
-                } else if (confirm_delete) {
-                    ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Delete this seed and its save files?");
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.7f, 0.15f, 0.15f, 1));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f, 0.2f, 0.2f, 1));
-                    if (ImGui::Button("Delete seed + saves", ImVec2(bw, 0))) { delete_seed(s.name); close = true; }
-                    ImGui::PopStyleColor(2);
-                    ImGui::SameLine();
-                    ImGui::SetItemDefaultFocus();
-                    if (ImGui::Button("Cancel", ImVec2(bw, 0))) confirm_delete = false;
-                } else {
-                    if (!is_active && ImGui::Button("Play", ImVec2(bw, 0))) { ImGui::CloseCurrentPopup(); play_seed(s.name.c_str()); }
-                    ImGui::BeginDisabled(s.race && !s.race_done);  // (race mode: shut until the credits)
-                    if (ImGui::Button(s.race && !s.race_done ? "Spoiler log (locked)" : "Spoiler log", ImVec2(bw, 0))) {
-                        g_spoiler_seed = s.name;
-                        close = true;
-                    }
-                    ImGui::EndDisabled();
-                    ImGui::BeginDisabled(s.id.empty());
-                    if (ImGui::Button("Copy seed ID", ImVec2(bw, 0))) ImGui::SetClipboardText(s.id.c_str());
-                    ImGui::EndDisabled();
-                    ImGui::BeginDisabled(is_active);  // (the game is reading its files)
-                    if (ImGui::Button("Rename", ImVec2(bw, 0))) { renaming = true; strlcpy(rename_buf, s.name.c_str(), sizeof rename_buf); }
-                    if (ImGui::Button("Delete", ImVec2(bw, 0))) confirm_delete = true;
-                    ImGui::EndDisabled();
-                    if (ImGui::Button("Close", ImVec2(bw, 0))) close = true;
-                }
-                if (!renaming && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
-                    if (confirm_delete) confirm_delete = false;
-                    else close = true;
-                }
-                if (close) { ImGui::CloseCurrentPopup(); scan(); }
-            }
-            ImGui::EndPopup();
-        }
-    }
-
-    // ---- the player's own settings (not part of a seed)
-    opt_section("General");
+// ---- the categories' rows
+static void rows_general(void) {
     {  // starting items (part of the seed)
         bool sw = !g_opts.no_start_sword, sh = !g_opts.no_start_shield, oc = !g_opts.no_start_ocarina;
         if (opt_toggle("Start with Sword", &sw, true, "Link starts with the sword. Off: it's placed in the world, with logic."))
@@ -729,72 +614,36 @@ extern "C" void rando_tab_draw(float scale) {
     opt_toggle("Treat Tunics as Upgrades", &g_opts.tunic_upgrades, false,
                "The red and blue tunics add up instead of replacing each other: the blue one always halves the damage "
                "Link takes, the red one always strengthens his attacks, and with both he has both.");
-    if (opt_toggle("Check tracker on overworld map", &g_settings.tracker, true,
+    if (opt_toggle("Check tracker on overworld map", &g_settings.tracker, true,  // (the player's own, not part of a seed)
                    "The overworld map marks the checks you have and haven't done yet."))
         settings_save();
+}
 
-    // ---- a new seed
-    opt_section("New seed");
-    opt_text("Seed name", g_opts.seed, sizeof g_opts.seed, "Random",
-             "The seed's name (its folder). Leave it empty for a random one.");
-    {  // Seed ID: the ID of these options + this seed's random part; type / paste one to load a shared seed
-        static char idbuf[48];
-        static std::string id_msg;
-        if (!g_opts.rng) g_opts.rng = new_rng();
-        if (!opt_text_editing("Seed ID")) seed_id_encode(g_opts, idbuf, sizeof idbuf);
-        std::string d = "A seed ID holds the random seed and every option below: the same ID on the same LAS Recomp "
-                        "version makes the same seed. Enter a shared ID here to load its options.";
-        if (!id_msg.empty()) d += "\n\n" + id_msg;
-        if (opt_text("Seed ID", idbuf, sizeof idbuf, "", d.c_str())) {
-            GenOpts t = g_opts;
-            id_msg = seed_id_decode(idbuf, t);
-            if (id_msg.empty()) {
-                char keep[64];
-                strlcpy(keep, g_opts.seed, sizeof keep);
-                g_opts = t;
-                strlcpy(g_opts.seed, keep, sizeof g_opts.seed);
-                tri_mode_from_opts();
-                id_msg = "Loaded: the options are set from this ID.";
-            }
-        }
-        if (opt_action("Copy new seed's ID", "", "Copies the seed ID above, to share the seed.")) ImGui::SetClipboardText(idbuf);
-        if (opt_action("New seed ID", "", "A new random seed with the same options.")) { g_opts.rng = new_rng(); id_msg.clear(); }
-    }
-
-    opt_section("Goal");
-    {
-        bool hunt = g_opts.tri_needed > 0;
-        if (opt_toggle("Triforce hunt", &hunt, false,
-                       "Collect Triforce pieces: the last one needed rolls the credits. The Wind Fish isn't needed."))
-            g_opts.tri_needed = hunt ? (g_tri_mode < 3 ? kTriPresets[g_tri_mode] : g_tri_custom) : 0;
+static void rows_goal(void) {
+    bool hunt = g_opts.tri_needed > 0;
+    if (opt_toggle("Triforce hunt", &hunt, false,
+                   "Collect Triforce pieces: the last one needed rolls the credits. The Wind Fish isn't needed."))
+        g_opts.tri_needed = hunt ? (g_tri_mode < 3 ? kTriPresets[g_tri_mode] : g_tri_custom) : 0;
+    opt_indent(1);
+    static const char *const pn[] = {"3", "12", "24", "Custom"};
+    if (!hunt) opt_disable_next();
+    if (opt_choice("Pieces needed", &g_tri_mode, pn, 4, 2, "How many pieces finish the game.", false))
+        g_opts.tri_needed = g_tri_mode < 3 ? kTriPresets[g_tri_mode] : g_tri_custom;
+    if (hunt && g_tri_mode == 3) {  // Custom: the count
         opt_indent(1);
-        static const char *const pn[] = {"3", "12", "24", "Custom"};
-        if (!hunt) opt_disable_next();
-        if (opt_choice("Pieces needed", &g_tri_mode, pn, 4, 2, "How many pieces finish the game.", false))
-            g_opts.tri_needed = g_tri_mode < 3 ? kTriPresets[g_tri_mode] : g_tri_custom;
-        ImGuiID row = ImGui::GetItemID();
-        bool focused = ImGui::IsItemFocused();
-        g_tri_row_on = hunt && g_tri_mode == 3 && (focused || ImGui::IsItemHovered());
-        if (g_tri_to_row) {  // (back from the right pane)
-            g_tri_to_row = false;
-            ImGui::SetFocusID(row, ImGui::GetCurrentWindow());
-            ImGui::SetNavCursorVisible(true);
-        }
-        // on Custom: Right / A (or a click) takes the cursor to the count on the right
-        if (g_tri_row_on && (ImGui::IsItemClicked() ||
-                             (focused && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight, false) ||
-                                          ImGui::IsKeyPressed(ImGuiKey_GamepadLStickRight, false) ||
-                                          ImGui::IsKeyPressed(ImGuiKey_RightArrow, false) ||
-                                          ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||
-                                          ImGui::IsKeyPressed(ImGuiKey_Enter, false) || ImGui::IsKeyPressed(ImGuiKey_Space, false)))))
-            g_tri_to_right = true;
-        static const char *const ex[] = {"None", "+25%", "+50%"};
-        if (!hunt) opt_disable_next();
-        opt_choice("Extra pieces", &g_opts.tri_extra, ex, 3, 0, "More pieces than needed are hidden, so you can skip some.");
+        int v = g_tri_custom;
+        if (opt_int("Custom", &v, 1, 50, 1, 24, "%d", "How many pieces finish the game: 1 to 50."))
+            g_tri_custom = v, g_opts.tri_needed = v;
+        take_focus(FOCUS_TRI);
         opt_indent(-1);
     }
+    static const char *const ex[] = {"None", "+25%", "+50%"};
+    if (!hunt) opt_disable_next();
+    opt_choice("Extra pieces", &g_opts.tri_extra, ex, 3, 0, "More pieces than needed are hidden, so you can skip some.");
+    opt_indent(-1);
+}
 
-    opt_section("Items");
+static void rows_items(void) {
     static const char *ditems[] = {"Shuffled", "Start with stone beaks", "Start with maps + compasses", "Start with all three"};
     opt_choice("Dungeon items", &g_opts.dungeon_items, ditems, 4, 0,
                "Maps, compasses and stone beaks: shuffled into the item pool, or given at the start.");
@@ -812,8 +661,9 @@ extern "C" void rando_tab_draw(float scale) {
         for (int i = 0; i < 7; i++) if (abs(rup[i] - g_opts.start_rupees) < abs(rup[ri] - g_opts.start_rupees)) ri = i;
         if (opt_choice("Starting rupees", &ri, rup_names, 7, 0, "Rupees in Link's wallet at the start.")) g_opts.start_rupees = rup[ri];
     }
+}
 
-    opt_section("Extra checks");
+static void rows_extra_checks(void) {
     opt_toggle("Bushsanity", &g_opts.bushes, false,
                "Every bush on the island hides an item from the pool (about 310 more checks; bushes over a hole and tall "
                "grass stay as they are). Unchecked bushes are golden: cut one to reveal its item.");
@@ -848,8 +698,9 @@ extern "C" void rando_tab_draw(float scale) {
     opt_toggle("Dampe's rewards", &g_opts.inc_dampe, false, "Dampe's Chamber Dungeon challenge rewards hold items from the pool.");
     opt_toggle("Trade quest gifts", &g_opts.inc_trade, false, "The trade quest characters' gifts hold items from the pool.");
     opt_toggle("Color Dungeon Blupees", &g_opts.inc_blue, false, "The Color Dungeon's blupees hold items from the pool.");
+}
 
-    opt_section("World");
+static void rows_world(float scale) {
     {  // entrances, as levers: dungeon entrances = shuffle-dungeons (LAS); houses & caves = entrance-tier 2 (single
        // interiors + connector caves, tools/rando/las_headless.py), decoupled with them. (Tier 1, the old "dungeons only"
        // level, reads as the dungeon lever.)
@@ -876,7 +727,8 @@ extern "C" void rando_tab_draw(float scale) {
                    "With Houses & caves: leaving a house puts you outside a different door than the one you came in by.");
         opt_indent(-1);
         if (last) ImGui::OpenPopup("##entlast");
-        if (ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        if (!opt_counting() &&
+            ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             ImGui::TextUnformatted("With the entrance randomizer on, at least one kind of entrance must be shuffled.");
             ImGui::Spacing();
             ImGui::SetItemDefaultFocus();
@@ -915,8 +767,9 @@ extern "C" void rando_tab_draw(float scale) {
     opt_toggle("Open Mabe Village", &g_opts.open_mabe, false, "Mabe Village's paths are open from the start.");
     opt_toggle("Randomize environments", &g_opts.environments, false,
                "Each area gets another area's lighting and atmosphere (cosmetic).");
+}
 
-    opt_section("Enemies & bosses");
+static void rows_enemies(void) {
     opt_toggle("Randomize enemies", &g_opts.randomize_enemies, false, "Enemies are shuffled around the island.");
     opt_indent(1);
     {
@@ -948,8 +801,9 @@ extern "C" void rando_tab_draw(float scale) {
                "that kind. Until you find it the mini-boss doesn't show up and its room's way on stays shut.");
     opt_toggle("No Guardian Acorns / Pieces of Power", &g_opts.no_buffs, false,
                "Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power.");
+}
 
-    opt_section("Companions");
+static void rows_companions(void) {
     opt_toggle("Flying Rooster", &g_opts.pet_rooster, false,
                "The Flying Rooster is an item: found, he follows you. The logic counts him wherever he can stand in for "
                "the feather or hookshot.");
@@ -960,8 +814,9 @@ extern "C" void rando_tab_draw(float scale) {
                "Marin is an item in the pool, and the desert stays closed until you find her.");
     opt_toggle("Companions allowed in dungeons", &g_opts.pets_in_dungeons, false,
                "BowWow, the Rooster and the others follow Link into dungeons; the logic counts what they can do there.");
+}
 
-    opt_section("Other");
+static void rows_other(void) {
     opt_toggle("Hookshot anything", &g_opts.hookshot_any, false,
                "The Hookshot latches onto any wall or object it hits, not only hookshot targets. The logic counts the "
                "gaps this crosses. Seeds made with it always have Hookshot Anything on.");
@@ -973,48 +828,241 @@ extern "C" void rando_tab_draw(float scale) {
     opt_toggle("Spoiler log", &g_opts.spoiler, true, "Writes where every item is, to read from the seed's Spoiler log.");
     opt_toggle("Race mode", &g_opts.race, false,
                "The spoiler log stays shut until the credits, and the title screen shows a seed hash to compare.");
+}
 
-    ImGui::Dummy(ImVec2(0, 8 * scale));
+static void cat_rows(int c, float scale) {
+    switch (c) {
+    case CAT_GENERAL: rows_general(); break;
+    case CAT_GOAL: rows_goal(); break;
+    case CAT_ITEMS: rows_items(); break;
+    case CAT_EXTRA: rows_extra_checks(); break;
+    case CAT_WORLD: rows_world(scale); break;
+    case CAT_ENEMIES: rows_enemies(); break;
+    case CAT_COMPANIONS: rows_companions(); break;
+    case CAT_OTHER: rows_other(); break;
+    }
+}
+
+// ---- Seeds: the seed list, or a seed's actions
+static void rows_seeds(const char *active) {
+    if (!g_act_seed.empty()) {
+        const Seed *sp = NULL;
+        for (const Seed &x : g_seeds) if (x.name == g_act_seed) sp = &x;
+        if (!sp) { g_act_seed.clear(), g_confirm_delete = false; return; }
+        const Seed &s = *sp;
+        bool is_active = active && s.name == active;
+        static char rename_buf[64];
+        if (!opt_text_editing("Rename")) strlcpy(rename_buf, s.name.c_str(), sizeof rename_buf);
+        if (g_confirm_delete) {
+            ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Delete this seed and its save files?");
+            ImGui::Spacing();
+            opt_warn_next();
+            if (opt_action("Delete seed + saves", "", NULL)) {
+                delete_seed(s.name);
+                g_act_seed.clear(), g_confirm_delete = false, g_focus = FOCUS_RIGHT;
+                scan();
+                return;
+            }
+            if (opt_action("Cancel", "", NULL)) g_confirm_delete = false, g_focus = FOCUS_DELETE;
+            take_focus(FOCUS_CANCEL);
+            return;
+        }
+        if (!is_active && opt_action("Play", "", NULL)) play_seed(s.name.c_str());
+        if (s.race && !s.race_done) opt_disable_next();  // (race mode: shut until the credits)
+        if (opt_action("Spoiler log", s.race && !s.race_done ? "Locked" : "", NULL)) g_spoiler_seed = s.name;
+        if (s.id.empty()) opt_disable_next();
+        if (opt_action("Copy seed ID", "", NULL)) ImGui::SetClipboardText(s.id.c_str());
+        if (is_active) opt_disable_next();  // (the game is reading its files)
+        if (opt_text("Rename", rename_buf, sizeof rename_buf, "", NULL)) {
+            std::string to_name = clean_name(rename_buf), to = "rando/" + to_name;
+            struct stat sb;
+            if (!to_name.empty() && to_name != s.name) {
+                if (!stat(to.c_str(), &sb)) g_gen_status = "A seed named \"" + to_name + "\" already exists.";
+                else if (rename(("rando/" + s.name).c_str(), to.c_str()) == 0) {
+                    // (seeds made before seed IDs name their spoiler after the folder)
+                    rename((to + "/spoiler_" + s.name + ".txt").c_str(), (to + "/spoiler_" + to_name + ".txt").c_str());
+                    LOG("[rando] renamed seed %s -> %s\n", s.name.c_str(), to_name.c_str());
+                    g_act_seed = to_name;
+                }
+            }
+            scan();
+            return;
+        }
+        if (is_active) opt_disable_next();
+        if (opt_action("Delete", "", NULL)) g_confirm_delete = true, g_focus = FOCUS_CANCEL;
+        take_focus(FOCUS_DELETE);
+        return;
+    }
+    if (active && opt_action("Switch to vanilla", "", "Leaves this seed and plays the game without the randomizer. "
+                                                       "Each seed keeps its own save files."))
+        play_seed("");
+    for (const Seed &s : g_seeds) {
+        bool is_active = active && s.name == active;
+        std::string d = "Seed ID: " + (s.id.empty() ? std::string("-") : s.id) + "\nLogic: " +
+                        (s.logic.empty() ? std::string("-") : s.logic) +
+                        (s.race ? "\nRace mode. Seed hash: " + hash_names(s.id) : std::string()) +
+                        "\n\nPlay it, read its spoiler log, copy its ID to share, rename or delete it. Each seed has its "
+                        "own save files.";
+        if (opt_action(s.name.c_str(), is_active ? "Playing" : s.logic.c_str(), d.c_str(), false))
+            g_act_seed = s.name, g_confirm_delete = false, g_focus = FOCUS_RIGHT;
+        if (g_focus == FOCUS_SEED && s.name == g_focus_seed) take_focus(FOCUS_SEED);
+    }
+    if (g_focus == FOCUS_SEED) g_focus = FOCUS_RIGHT;  // (that seed is gone: the first row)
+    if (g_seeds.empty()) {
+        opt_disable_next();
+        opt_action("No seeds yet", "", "Make one with Generate seed.");
+    }
+}
+
+// the seed info above its actions
+static void seed_header(const char *active) {
+    for (const Seed &s : g_seeds) {
+        if (s.name != g_act_seed) continue;
+        ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", s.name.c_str());
+        ImGui::TextDisabled("Seed ID: %s", s.id.empty() ? "-" : s.id.c_str());
+        if (s.race) ImGui::TextDisabled("Race mode. Seed hash: %s", hash_names(s.id).c_str());
+        if (active && s.name == active) ImGui::TextDisabled("Playing");
+        ImGui::Spacing();
+    }
+}
+
+extern "C" void rando_tab_draw(float scale) {
+    if (!g_scanned) scan();
+    static bool spoiler_test;  // LARECOMP_SPOILER_TEST=<seed>: open that seed's spoiler page (test hook)
+    if (!spoiler_test && getenv("LARECOMP_SPOILER_TEST")) { spoiler_test = true; g_spoiler_seed = getenv("LARECOMP_SPOILER_TEST"); }
+    if (!g_spoiler_seed.empty()) {  // the spoiler page replaces the tab until Back
+        if (!spoiler_view_draw(g_spoiler_seed, scale)) g_spoiler_seed.clear();
+        return;
+    }
+    static bool opts_once;  // the options the player last set (larecomp.ini)
+    if (!opts_once) { opts_once = true; opts_load(); }
+    static bool id_once;  // LARECOMP_RANDO_ID=<seed ID>: the tab starts with that ID's options (test hook)
+    if (const char *t = getenv("LARECOMP_RANDO_ID"); !id_once && t) {
+        id_once = true;
+        std::string err = seed_id_decode(t, g_opts);
+        if (!err.empty()) LOG("[rando] test seed ID: %s\n", err.c_str());
+        tri_mode_from_opts();
+    }
+    static bool test_once;  // LARECOMP_RANDO_GEN_TEST=1|<name>[:<seed ID>]: generate a seed (with that ID's options)
+    if (const char *t = getenv("LARECOMP_RANDO_GEN_TEST"); !test_once && t) {  // as soon as the tab is shown (test hook)
+        test_once = true;
+        std::string nm = t;
+        if (size_t c = nm.find(':'); c != std::string::npos) {
+            std::string err = seed_id_decode(nm.c_str() + c + 1, g_opts);
+            if (!err.empty()) LOG("[rando] test seed ID: %s\n", err.c_str());
+            nm.resize(c);
+        }
+        strlcpy(g_opts.seed, nm.size() > 1 ? nm.c_str() : "MenuTest", sizeof g_opts.seed);
+        start_generation();
+    }
+    poll_generation();
+
+    int frame = ImGui::GetFrameCount();
+    if (frame - g_last_frame > 1) g_focus = FOCUS_NONE, g_in_right = false, g_confirm_delete = false;  // (back on the tab)
+    g_last_frame = frame;
+    // (test) LARECOMP_RANDO_CAT=<category name, e.g. extra checks>[:right]: that category shown (right: the cursor on its
+    // first row); LARECOMP_RANDO_SEED_OPEN=<seed>: that seed's actions; LARECOMP_TRI_RIGHT=1: the Triforce hunt's Custom
+    // count row. For a few frames, past the menu putting the cursor on the tab bar.
+    static int hook_frames = -1, hook_focus;
+    if (hook_frames < 0) {
+        hook_frames = 0;
+        if (const char *h = getenv("LARECOMP_RANDO_CAT")) {
+            for (int c = 0; c < N_CAT; c++)
+                if (!strncasecmp(h, k_cat_name[c], strlen(k_cat_name[c]))) g_cat = c;
+            hook_focus = strstr(h, ":right") ? FOCUS_RIGHT : FOCUS_CAT, hook_frames = 10;
+        }
+        if (const char *h = getenv("LARECOMP_RANDO_SEED_OPEN")) g_cat = CAT_SEEDS, g_act_seed = h, hook_focus = FOCUS_RIGHT, hook_frames = 10;
+        if (getenv("LARECOMP_TRI_RIGHT")) g_cat = CAT_GOAL, hook_focus = FOCUS_TRI, hook_frames = 10;
+    }
+    if (hook_frames > 0) hook_frames--, g_focus = hook_focus;
+
+    bool busy = g_gen_pid || g_gen_done;  // the generation overlay is up: the whole panel is greyed out under it
+    // B / Esc in the right column: a step back (delete confirm -> the seed's actions -> the seed list -> the category);
+    // Left too, on a row that doesn't step with left / right
+    if (g_in_right && !busy && !ui_text_busy() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) &&
+        (opt_pressed_back() || (opt_pressed_left() && !opt_focused_lr()))) {
+        g_back_frame = frame;
+        if (g_confirm_delete) g_confirm_delete = false, g_focus = FOCUS_DELETE;
+        else if (!g_act_seed.empty()) g_focus_seed = g_act_seed, g_act_seed.clear(), g_focus = FOCUS_SEED;
+        else g_focus = FOCUS_CAT;
+    }
+
+    // which categories differ from their defaults (a dot on the row)
+    bool changed[N_CAT] = {};
+    for (int c = CAT_GENERAL; c < N_CAT; c++) {
+        opt_count_begin();
+        cat_rows(c, scale);
+        changed[c] = opt_count_end() > 0;
+    }
+
+    ImGui::BeginDisabled(busy);
+    // (the start screen: no game loaded, nothing playing - and the seed's patches mustn't be applied yet)
+    const char *active = !g_start_screen && rando_seed_dir() ? rando_seed_dir() + 6 : NULL;
+    if (active) pets_ui_draw();  // (in game, a seed with companions: call one - above the panes)
+
+    opt_begin("##rando", scale);
+    opt_compact();
+    for (int c = 0; c < N_CAT; c++) {
+        if (g_in_right && c == g_cat) opt_mark_next();
+        char n[16];
+        snprintf(n, sizeof n, "%d", (int)g_seeds.size());
+        bool open = opt_link(k_cat_name[c], NULL, c == CAT_SEEDS ? n : NULL, changed[c]);
+        bool clicked = ImGui::IsItemClicked();
+        if (c == g_cat) take_focus(FOCUS_CAT);
+        bool pick = (opt_item_nav_focused() && g_cat != c) || open;  // (moving down the list shows each)
+        if (pick && g_cat != c) g_act_seed.clear(), g_confirm_delete = false;
+        if (pick) g_cat = c;
+        if (open && !clicked) g_focus = FOCUS_RIGHT;  // (A / Right: the cursor goes to its rows)
+        if (open && c == CAT_SEEDS) g_act_seed.clear(), g_confirm_delete = false;
+    }
+
+    // ---- a new seed
+    opt_section("New seed");
+    opt_text("Seed name", g_opts.seed, sizeof g_opts.seed, "Random",
+             "The seed's name (its folder). Leave it empty for a random one.");
+    {  // Seed ID: the ID of these options + this seed's random part; type / paste one to load a shared seed
+        static char idbuf[48];
+        static std::string id_msg;
+        if (!g_opts.rng) g_opts.rng = new_rng();
+        if (!opt_text_editing("Seed ID")) seed_id_encode(g_opts, idbuf, sizeof idbuf);
+        std::string d = "A seed ID holds the random seed and every seed option: the same ID on the same LAS Recomp "
+                        "version makes the same seed. Enter a shared ID here to load its options.";
+        if (!id_msg.empty()) d += "\n\n" + id_msg;
+        if (opt_text("Seed ID", idbuf, sizeof idbuf, "", d.c_str())) {
+            GenOpts t = g_opts;
+            id_msg = seed_id_decode(idbuf, t);
+            if (id_msg.empty()) {
+                char keep[64];
+                strlcpy(keep, g_opts.seed, sizeof keep);
+                g_opts = t;
+                strlcpy(g_opts.seed, keep, sizeof g_opts.seed);
+                tri_mode_from_opts();
+                id_msg = "Loaded: the options are set from this ID.";
+            }
+        }
+        opt_pair_next();
+        if (opt_action("Copy new seed's ID", "", "Copies the seed ID above, to share the seed.")) ImGui::SetClipboardText(idbuf);
+        if (opt_action("New seed ID", "", "A new random seed with the same options.")) { g_opts.rng = new_rng(); id_msg.clear(); }
+    }
     if (opt_action("Generate seed", "", "Makes a seed with these options. It shows up under Seeds, ready to play."))
         start_generation();
     if (!g_gen_status.empty() && !busy) {  // (e.g. a rename that failed)
         opt_disable_next();
         opt_action(g_gen_status.c_str(), "", g_gen_status.c_str(), false);
     }
-    // the right pane: the row's description, or with the Triforce hunt's Custom count there, the count to pick
-    static bool tri_test = getenv("LARECOMP_TRI_RIGHT") != NULL;  // (test: the Custom count's pane stays shown)
-    bool custom = g_opts.tri_needed > 0 && g_tri_mode == 3 && (g_tri_row_on || g_tri_in_right || g_tri_right_hover ||
-                                                                 g_tri_to_right || tri_test);
-    if (!custom) {
-        g_tri_in_right = g_tri_right_hover = false;
-        opt_end();
-    } else {
-        if (g_tri_in_right && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false))) {
-            g_tri_back_frame = ImGui::GetFrameCount();  // B: back to the row
-            g_tri_to_row = true;
-        }
-        opt_split();
-        ImGui::SetWindowFontScale(1.3f);  // (as the descriptions)
-        ImGui::TextWrapped("How many pieces finish the game: 1 to 50.");
-        ImGui::SetWindowFontScale(1.0f);
-        ImGui::Spacing();
-        opt_section("Custom");
-        int v = g_tri_custom;
-        if (opt_int("Pieces needed", &v, 1, 50, 1, 24, "%d", NULL)) g_tri_custom = v;
-        if (g_tri_to_right) {
-            g_tri_to_right = false;
-            ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
-            ImGui::SetNavCursorVisible(true);
-        }
-        g_tri_in_right = ImGui::IsItemFocused() && !g_tri_to_row;
-        ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);  // (the slider is for the mouse: the row above steps it)
-        ImGui::SetNextItemWidth(-1);
-        if (ImGui::SliderInt("##tricount", &v, 1, 50, "")) g_tri_custom = v;
-        ImGui::PopItemFlag();
-        g_tri_right_hover = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) || ImGui::IsItemActive();
-        g_opts.tri_needed = g_tri_custom;
-        opt_split_end();
-    }
+
+    // ---- the right column: the chosen category's rows, the description under them
+    opt_split();
+    if (g_cat == CAT_SEEDS && !g_act_seed.empty()) seed_header(active);
+    else opt_section(k_cat_name[g_cat]);
+    opt_list_begin();
+    if (g_focus == FOCUS_RIGHT) g_focus = FOCUS_NONE, opt_focus_next_row();
+    if (g_cat == CAT_SEEDS) rows_seeds(active);
+    else cat_rows(g_cat, scale);
+    opt_list_end();
+    g_in_right = opt_in_right();
+    opt_desc_text();
+    opt_split_end();
     ImGui::EndDisabled();
     opts_save_if_changed();
     gen_overlay(scale);
