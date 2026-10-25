@@ -1,5 +1,7 @@
 // Two-pane settings pages (see option_rows.h): rows on the left, the selected / hovered row's description on the right.
 #include <ctype.h>
+#include <float.h>
+#include <stdint.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +21,18 @@ extern "C" {
 static float g_scale = 1;
 static std::string g_desc_hover, g_desc_focus, g_desc_shown;  // this frame's hovered / selected row, and the last shown
 static std::string g_desc_first;  // the page's first row (shown until a row is selected or hovered)
+static bool g_hov_set, g_foc_set;  // (a row was hovered / selected this frame, even one without a description)
+static std::string g_left_hover, g_left_focus;  // (opt_split: the left pane's, kept for opt_desc_text)
+static bool g_left_hov_set, g_left_foc_set;
+static bool g_counting;  // (opt_count_begin: rows are only checked, not drawn)
+static int g_count;
+static uint32_t g_count_hash;
+static bool g_lr_row, g_focused_lr;  // (the row being drawn steps with left / right; the selected one does)
+static float g_row_h = 1.9f;  // (a row's height, in font sizes: opt_compact makes it lower)
+static int g_half;  // (opt_pair_next: 1 the next row is a line's left half, 2 its right half)
+static float g_desc_w, g_desc_max, g_desc_max_last;  // (opt_list_begin: the description's width; the page's tallest)
+static bool g_listed;  // (this page has opt_list_begin's list on the right)
+static std::string g_page;  // (the page drawn last: its last shown description isn't carried to another)
 
 static const ImU32 kGold = IM_COL32(236, 194, 84, 255);
 static bool g_next_disabled;
@@ -71,6 +85,10 @@ void opt_begin(const char *id, float scale) {
     if (g_take_first) ImGui::NavMoveRequestCancel();  // (this frame's Down goes to the first row instead)
     g_indent = 0;
     g_desc_hover.clear(), g_desc_focus.clear();
+    g_hov_set = g_foc_set = g_left_hov_set = g_left_foc_set = false;
+    g_row_h = 1.9f, g_listed = false;
+    g_desc_max_last = g_desc_max, g_desc_max = 0;
+    if (g_page != id) g_page = id, g_desc_shown.clear(), g_desc_max_last = 0, g_desc_w = 0;
     ImVec2 avail = ImGui::GetContentRegionAvail();
     ImGui::PushID(id);
     ImGui::BeginChild("##rows", ImVec2(avail.x * 0.48f, avail.y), ImGuiChildFlags_None, ImGuiWindowFlags_NavFlattened);
@@ -81,6 +99,7 @@ void opt_begin(const char *id, float scale) {
 }
 
 void opt_section(const char *title) {
+    if (g_counting) return;
     std::string t = title;
     for (char &c : t) c = (char)toupper((unsigned char)c);
     if (ImGui::GetCursorPosY() > ImGui::GetStyle().WindowPadding.y + 1) ImGui::Dummy(ImVec2(0, 10 * g_scale));
@@ -91,16 +110,32 @@ void opt_section(const char *title) {
 // arrows: ◀ value ▶ (a choice of several, or a stepper): left / right step it, and the arrows click too
 // chevron: a ">" on the right (opt_link)
 static int row(const char *label, const std::string &value, bool changed, const char *desc, bool upper = true,
-               bool arrows = false, bool chevron = false) {
+               bool arrows = false, bool chevron = false, bool dot = false) {
+    bool lr = arrows || g_lr_row;
+    g_lr_row = false;
+    if (g_counting) {  // (opt_count_begin: tally only)
+        if (changed && !g_next_disabled) g_count++;
+        for (const char *c = value.c_str();; c++) {
+            g_count_hash = (g_count_hash ^ (uint8_t)*c) * 0x01000193u;
+            if (!*c) break;
+        }
+        g_next_disabled = g_next_mark = g_next_warn = false;
+        g_half = 0;
+        return 0;
+    }
     // a label a row above already has (Save Editor: Bombs, Magic Powder under Equipment and Ammo) gets an id of its
     // own: two rows with one id share the controller's cursor - ImGui kept the later one's place, so Up / Down from
     // the first went on from the second (a row far below, or the edge of the view)
     int dup = g_ids[ImGui::GetID(label)]++;
     ImGui::PushID(label);
     if (dup) ImGui::PushID(dup);
-    if (g_indent) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + g_indent * 28 * g_scale);  // (an option of the row above)
+    int half = g_half;
+    g_half = half == 1 ? 2 : 0;
+    if (half == 2) ImGui::SameLine();
+    else if (g_indent) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + g_indent * 28 * g_scale);  // (an option of the row above)
     ImVec2 p = ImGui::GetCursorScreenPos();
-    float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetFontSize() * 1.9f;
+    float w = ImGui::GetContentRegionAvail().x, h = ImGui::GetFontSize() * g_row_h;
+    if (half == 1) w = (w - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
     ImGui::PushStyleColor(ImGuiCol_NavCursor, ImVec4(0, 0, 0, 0));  // (the row's own border shows the selection)
     bool clicked = ImGui::InvisibleButton("##row", ImVec2(w, h), ImGuiButtonFlags_EnableNav);
     ImGui::PopStyleColor();
@@ -142,9 +177,14 @@ static int row(const char *label, const std::string &value, bool changed, const 
         for (ImGuiKey k : {ImGuiKey_GamepadDpadLeft, ImGuiKey_GamepadDpadRight, ImGuiKey_LeftArrow, ImGuiKey_RightArrow})
             ImGui::SetKeyOwner(k, ImGui::GetItemID());
     }
-    if (foc) g_desc_focus = desc ? desc : "";
-    if (hov) g_desc_hover = desc ? desc : "";
+    if (foc) g_desc_focus = desc ? desc : "", g_foc_set = true, g_focused_lr = lr && !off;
+    if (hov) g_desc_hover = desc ? desc : "", g_hov_set = true;
     if (g_desc_first.empty() && desc) g_desc_first = desc;
+    if (desc && *desc && g_desc_w > 0) {  // (opt_list_begin's room for the description: the page's tallest)
+        float fs13 = ImGui::GetFontSize() * 1.3f;
+        float dh = ImGui::GetFont()->CalcTextSizeA(fs13, FLT_MAX, g_desc_w, desc).y;
+        if (dh > g_desc_max) g_desc_max = dh;
+    }
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
     float r = 9 * g_scale, pad = 16 * g_scale, fs = ImGui::GetFontSize();
@@ -180,6 +220,11 @@ static int row(const char *label, const std::string &value, bool changed, const 
         right -= cw + fs * 0.55f;
         if (step == 1) step = 2;  // (Right opens it too)
     }
+    if (dot) {  // a gold dot: something under this row was changed
+        float dr = fs * 0.17f;
+        dl->AddCircleFilled(ImVec2(right - dr, ty + fs * 0.52f), dr, kGold);
+        right -= dr * 2 + fs * 0.5f;
+    }
     if (!value.empty()) {
         float vw = ImGui::CalcTextSize(value.c_str()).x, vx = right - vw;
         dl->AddText(ImVec2(vx, ty), off ? IM_COL32(110, 110, 102, 255) : warn ? IM_COL32(240, 110, 90, 255)
@@ -191,6 +236,7 @@ static int row(const char *label, const std::string &value, bool changed, const 
 }
 
 bool opt_toggle(const char *label, bool *v, bool def, const char *desc) {
+    g_lr_row = true;  // (left / right flip it)
     if (!row(label, *v ? "On" : "Off", *v != def, desc)) return false;  // (any step flips it)
     *v = !*v;
     return true;
@@ -239,6 +285,7 @@ bool opt_button(const char *label, const char *desc) { return row(label, "", fal
 bool opt_radio(const char *label, bool selected, const char *desc) {
     bool off = g_next_disabled;
     bool chosen = row(label, "", false, desc) == 2;
+    if (g_counting) return false;
     ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     float r = ImGui::GetFontSize() * 0.32f, cx = b.x - 16 * g_scale - r, cy = (a.y + b.y) * 0.5f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -260,6 +307,7 @@ bool opt_colour(const char *label, CosColour *c, int slot, const char *desc) {
     int sp = col_pick(c, slot);  // (Default: the seed's own colour, shown as such)
     if (c->pick == COL_DEFAULT && sp != COL_DEFAULT) snprintf(seed, sizeof seed, "Seed: %s", g_col_names[sp]), names[0] = seed;
     bool changed = opt_choice(label, &c->pick, names, N_COL, COL_DEFAULT, desc);
+    if (g_counting) return false;
     if (changed && c->pick == COL_CUSTOM && prev != COL_CUSTOM)  // (Custom starts from the colour it was on)
         c->rgb = prev > COL_DEFAULT && prev < COL_RANDOM ? g_col_rgb[prev] : (c->rgb ? c->rgb : 0xF2F0EA);
     if (c->pick != COL_CUSTOM) return changed;
@@ -304,7 +352,9 @@ bool opt_colour(const char *label, CosColour *c, int slot, const char *desc) {
     return changed;
 }
 
-bool opt_link(const char *label, const char *desc) { return row(label, "", false, desc, true, false, true) == 2; }
+bool opt_link(const char *label, const char *desc, const char *value, bool marked) {
+    return row(label, value ? value : "", false, desc, true, false, true, marked) == 2;
+}
 
 static ImGuiID g_text_editing;  // the text row turned into a field (one at a time)
 bool opt_text_editing(const char *label) { return g_text_editing && g_text_editing == ImGui::GetID(label); }
@@ -313,7 +363,7 @@ bool opt_text(const char *label, char *buf, size_t cap, const char *hint, const 
     ImGuiID &editing = g_text_editing;
     static int focus;        // frames left to give it the keyboard focus
     ImGuiID id = ImGui::GetID(label);
-    if (editing != id) {
+    if (editing != id || g_counting) {
         if (row(label, buf[0] ? buf : (hint ? hint : ""), false, desc) == 2) editing = id, focus = 2;
         return false;
     }
@@ -352,6 +402,15 @@ static void right_begin(const char *id, ImGuiWindowFlags flags) {
 }
 
 void opt_desc_text(void) {
+    // after opt_list_begin's rows: a row of the right pane hovered wins, then the left's hovered, the right's selected,
+    // the left's selected (other pages: the left's, as left_end picked)
+    if (g_listed) {
+        if (g_hov_set) g_desc_shown = g_desc_hover;
+        else if (g_left_hov_set) g_desc_shown = g_left_hover;
+        else if (g_foc_set) g_desc_shown = g_desc_focus;
+        else if (g_left_foc_set) g_desc_shown = g_left_focus;
+        else if (g_desc_shown == g_desc_first) g_desc_shown.clear();  // (nothing chosen yet: none)
+    }
     ImGui::SetWindowFontScale(1.3f);  // (the description reads at a glance)
     ImGui::PushTextWrapPos(0);
     ImGui::TextUnformatted(g_desc_shown.c_str());
@@ -369,6 +428,9 @@ void opt_end(void) {
 
 void opt_split(void) {
     left_end();
+    g_left_hover = g_desc_hover, g_left_focus = g_desc_focus, g_left_hov_set = g_hov_set, g_left_foc_set = g_foc_set;
+    g_desc_hover.clear(), g_desc_focus.clear();
+    g_hov_set = g_foc_set = false;
     right_begin("##right", ImGuiWindowFlags_None);
     g_pane = 1;
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 4 * g_scale));  // (as the left)
@@ -379,4 +441,54 @@ void opt_split_end(void) {
     ImGui::PopStyleVar();
     ImGui::EndChild();
     ImGui::PopID();
+}
+
+void opt_compact(void) { g_row_h = 1.4f; }
+void opt_pair_next(void) { g_half = 1; }
+
+void opt_list_begin(void) {
+    // room under the list for the page's longest description (as last frame measured it; 2 lines at least): a longer
+    // list scrolls
+    g_desc_w = ImGui::GetContentRegionAvail().x, g_listed = true;
+    float line = ImGui::GetFontSize() * 1.3f, avail = ImGui::GetContentRegionAvail().y;
+    float desc = (g_desc_max_last > line * 2 ? g_desc_max_last : line * 2) + 16 * g_scale;
+    float maxh = avail - desc > avail * 0.35f ? avail - desc : avail * 0.35f;
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxh));
+    ImGui::BeginChild("##list", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened);
+}
+
+void opt_list_end(void) {
+    ImGui::EndChild();
+    ImGui::Dummy(ImVec2(0, 10 * g_scale));
+}
+
+void opt_focus_next_row(void) { g_take_first = true; }
+
+bool opt_focused_lr(void) { return g_focused_lr; }
+
+bool opt_in_right(void) { return g_row_focus >= 0 && g_row_focus < (int)g_row_pane.size() && g_row_pane[g_row_focus] == 1; }
+
+void opt_focus_item(void) {
+    ImGui::SetFocusID(ImGui::GetItemID(), ImGui::GetCurrentWindow());
+    ImGui::SetNavCursorVisible(true);
+    ImGui::ScrollToItem(ImGuiScrollFlags_KeepVisibleEdgeY);
+}
+
+bool opt_item_nav_focused(void) { return ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible; }
+
+bool opt_pressed_back(void) {
+    return ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false);
+}
+
+bool opt_pressed_left(void) {
+    return ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_GamepadLStickLeft) ||
+           ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
+}
+
+void opt_count_begin(void) { g_counting = true, g_count = 0, g_count_hash = 0x811c9dc5u; }
+bool opt_counting(void) { return g_counting; }
+int opt_count_end(uint32_t *hash) {
+    g_counting = false;
+    if (hash) *hash = g_count_hash;
+    return g_count;
 }
