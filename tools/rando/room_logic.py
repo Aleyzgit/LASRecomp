@@ -30,8 +30,11 @@ blocks inside the room), the exact enemies / switches behind each shutter, key c
 import json
 import os
 import re
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import rooms  # noqa: E402  (cell positions: Eagle's Tower's grid doesn't follow its names)
 
 LEVELS = {
     'Lv10ClothesDungeon': (0, 'color-dungeon'), 'Lv01TailCave': (1, 'tail-cave'), 'Lv02BottleGrotto': (2, 'bottle-grotto'),
@@ -52,12 +55,13 @@ EXIT_REQ = {}  # catalog room -> frozenset of atoms leaving it needs (mini-boss 
 RANDOMIZED_SUBTYPES = ('chest', 'boss', 'enemy', 'drop', 'npc', 'standing', 'overworld-statue', 'dungeon-statue')
 
 
-def cell_pos(cell):  # '06C' -> (col 2, row 6)
-    return ord(cell[2]) - ord('A'), int(cell[:2])
+def cell_pos(cell, level=None):  # '06C' -> (col 2, row 6) (Eagle's Tower: its own grid, rooms.POSITIONS)
+    p = rooms.POSITIONS.get(level, {}).get(cell[:3])
+    return p if p else (ord(cell[2]) - ord('A'), int(cell[:2]))
 
 
-def cell_name(col, row):
-    return f'{row:02d}{chr(ord("A") + col)}'
+def cell_name(col, row, level=None):
+    return rooms.cell_name(level, col, row).rsplit('_', 1)[1] if level else f'{row:02d}{chr(ord("A") + col)}'
 
 
 # ---------------------------------------------------------------- conditions: parse, strip, print
@@ -212,8 +216,7 @@ def lock_flag(romfs, room, side):
         out = []
         try:
             r = leb.Room(open(_rooms._leb_path(romfs, room), 'rb').read())
-            col, row = cell_pos(room.rsplit('_', 1)[1])
-            x0, z0 = 15.0 * col, 12.0 * (row - 1)
+            x0, z0 = _rooms.cell_origin(room)
             for a in r.actors:
                 if a.type != 0xED:
                     continue
@@ -343,7 +346,7 @@ def rooms_neighbour(room, side):
 def level_graph(cat, romfs, level, layout, jump_rows, openings):
     """{cell: [(cell, frozenset req)]} directed edges; lock count."""
     n = LEVELS[level][0]
-    pos = {cell_pos(c): c for c in layout}
+    pos = {cell_pos(c, level): c for c in layout}
     edges = {c: [] for c in layout}
     flags = set()  # distinct locks: one per 'opened' flag (a vanilla door's two halves share it)
     for cell, room in layout.items():
@@ -368,7 +371,7 @@ def level_graph(cat, romfs, level, layout, jump_rows, openings):
             edges[cell].append((target, req))
     for cell, room in layout.items():
         op = openings(cat, room)
-        c, r = cell_pos(cell)
+        c, r = cell_pos(cell, level)
         for side in 'NSWE':
             nb = pos.get((c + STEP[side][0], r + STEP[side][1]))
             if nb is None:
@@ -496,9 +499,9 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             rooms_at.setdefault(room, []).append((level, cell))
             for d in cat.get(room, {}).get('doors', []):
                 if len(d) > 3 and d[2] == 'bossdoor':  # the boss sits behind it
-                    c, r = cell_pos(cell)
+                    c, r = cell_pos(cell, level)
                     dc, dr = STEP[d[0]]
-                    boss_cell[level] = cell_name(c + dc, r + dr)
+                    boss_cell[level] = cell_name(c + dc, r + dr, level)
         edges, locks = level_graph(cat, romfs, level, layout, jump_rows, dungeon_gen.openings)
         start = dungeon_gen.ENTRANCES[level].rsplit('_', 1)[1]
         terms = reach_terms(edges, start, region)
@@ -738,8 +741,8 @@ def boss_door_ok(cat, romfs, level, layout, rows):
             allowed.add(cell)
         for d in cat.get(room, {}).get('doors', []):
             if len(d) > 3 and d[2] == 'bossdoor':
-                c, r = cell_pos(cell)
-                allowed.add(cell_name(c + STEP[d[0]][0], r + STEP[d[0]][1]))
+                c, r = cell_pos(cell, level)
+                allowed.add(cell_name(c + STEP[d[0]][0], r + STEP[d[0]][1], level))
     # beyond the boss arena (the instrument room, the Color Dungeon's reward room): reached through the arena
     todo = [c for c in allowed if c in behind]
     while todo:

@@ -105,7 +105,9 @@ def map_shift(romfs, level, cell):
 
 def on_map(romfs, level, c, r):
     """Cell (c, r) is drawn on its floor's map paper."""
-    sx, sy = map_shift(romfs, level, cell_name(level, c, r))
+    name = cell_name(level, c, r)
+    sx, sy = map_shift(romfs, level, name)
+    c, r = ord(name[-1]) - ord('A'), int(name[-3:-1])  # (the map draws a cell by its name: Eagle's Tower)
     x0, y0 = c * MAP_CELL_W - 326 + sx, 259 - r * MAP_CELL_H + sy
     return x0 >= -326 - MAP_TOL and x0 + MAP_CELL_W <= 326 + MAP_TOL and y0 >= -259 - MAP_TOL and \
         y0 + MAP_CELL_H <= 259 + MAP_TOL
@@ -135,12 +137,16 @@ def movable(v):
 
 
 def cell_name(level, col, row):
-    return f'{level}_{row:02d}{chr(ord("A") + col)}'
+    return rooms.cell_name(level, col, row)  # (Eagle's Tower: names don't match positions, rooms.POSITIONS)
 
 
 def cell_pos(name):
-    rc = name.rsplit('_', 1)[1][:3]
-    return ord(rc[2]) - ord('A'), int(rc[:2])
+    return rooms.cell_pos(name)
+
+
+def grid_size(level):
+    """(columns, rows) of the level's grid: 8 x 8, Eagle's Tower 10 x 10 (rooms.GRIDS)."""
+    return rooms.GRIDS.get(level, (COLS, ROWS))
 
 
 # A level's map texture archive: archives over 255 textures crashed - a LAS BNTX writer bug (relocation stride,
@@ -232,7 +238,8 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
 
     so = {k: {s: () if s in exits.get(k, ()) else op[k][s] for s in 'NSWE'} for k in op}  # (hot: precomputed)
     orig_nb = {k: {s: rooms.neighbour(k, s) for s in 'NSWE'} for k in op}
-    names = {(c, r): cell_name(level, c, r) for c in range(-1, COLS + 1) for r in range(0, ROWS + 2)}
+    cols, rows = grid_size(level)
+    names = {(c, r): cell_name(level, c, r) for c in range(-1, cols + 1) for r in range(0, rows + 2)}
 
     def side_open(room, s):
         return so[room][s]
@@ -274,7 +281,7 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     taken = {cell_pos(n) for n in offgrid if re.match(r'.*_\d\d[A-Z]$', n)}
 
     def inside(c, r):
-        return 0 <= c < COLS and 1 <= r <= ROWS and (c, r) not in taken and (not romfs or on_map(romfs, level, c, r))
+        return 0 <= c < cols and 1 <= r <= rows and (c, r) not in taken and (not romfs or on_map(romfs, level, c, r))
 
     for attempt in range(tries):
         rng = random.Random(f'{seed}-{level}-{attempt}')
@@ -1107,7 +1114,7 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                     continue
                 taken = {cell_pos(k) for k in L}
                 reserved = {cell_pos(n) for n in offgrid_rooms(romfs, cat, lv) if re.match(r'.*_\d\d[A-Z]$', n)}
-                free_cells = [(c, r) for c in range(COLS) for r in range(1, ROWS + 1)
+                free_cells = [(c, r) for c in range(grid_size(lv)[0]) for r in range(1, grid_size(lv)[1] + 1)
                               if (c, r) not in taken and (c, r) not in reserved and on_map(romfs, lv, c, r)]
                 rng.shuffle(free_cells)
                 for c, r in free_cells:
@@ -1289,8 +1296,7 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
         starts[e.name.decode()] = struct.unpack_from('<4f', e.data, 0)
     # test / warp starts: one named after each cell at its centre (warp straight into any generated room)
     for cell in layout:
-        rc = cell.rsplit('_', 1)[1]
-        x0, z0 = (ord(rc[2]) - ord('A')) * 15.0, (int(rc[:2]) - 1) * 12.0
+        x0, z0 = rooms.cell_origin(cell)
         starts.setdefault(cell, (x0 + 7.5, 0.0, z0 + 6.0, 0.0))
     lvb = level_builder.build(base, rooms_list, starts=None if all_starts else starts, static=False)
     p = os.path.join(out, 'region_common', 'level', level, level + '.lvb')
@@ -1427,10 +1433,11 @@ def _dungeon_map_rooms(romfs, out, layout, entrance):
 
 def ascii_map(layout):
     cells = {cell_pos(k): v for k, v in layout.items()}
+    cols, rows = grid_size(rooms.level_of(next(iter(layout)))) if layout else (COLS, ROWS)
     lines = []
-    for r in range(1, ROWS + 1):
+    for r in range(1, rows + 1):
         lines.append(' '.join((cells[(c, r)].split('_')[0][2:4] + cells[(c, r)][-3:]) if (c, r) in cells else '  .   '
-                              for c in range(COLS)))
+                              for c in range(cols)))
     return '\n'.join(lines)
 
 

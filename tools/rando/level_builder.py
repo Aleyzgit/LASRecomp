@@ -35,8 +35,8 @@ LEAF = 3
 
 
 def cell_box(name):
-    rc = name.rsplit('_', 1)[1][:3]
-    x0, z0 = (ord(rc[2]) - ord('A')) * 15.0, (int(rc[:2]) - 1) * 12.0
+    import rooms  # (Eagle's Tower: names don't match positions)
+    x0, z0 = rooms.cell_origin(name)
     return x0, z0, x0 + 15.0, z0 + 12.0
 
 
