@@ -87,15 +87,16 @@ def _and(*conds):
     return ' & '.join(f'({c})' for c in parts) if parts else None
 
 
-def scan(romfs, leb):
-    """All randomizable pots: list of dicts with level, room, key, pos."""
+def scan(romfs, leb, missable=MISSABLE_ROOMS):
+    """All randomizable pots: list of dicts with level, room, key, pos. missable: rooms whose pots stay vanilla
+    (room shuffle seeds: eagle_tower.MISSABLE_ROOMS_COLLAPSED - the tower starts collapsed)."""
     pots = []
     for f in sorted(glob.glob(os.path.join(romfs, 'region_common', 'level', '*', '*.leb'))):
         level = os.path.basename(os.path.dirname(f))
         if level.startswith(SKIP_LEVEL_PREFIX) or level in SKIP_LEVELS:
             continue
         room_name = os.path.basename(f)[:-4]
-        if room_name in MISSABLE_ROOMS:
+        if room_name in missable:
             continue
         with open(f, 'rb') as fh:
             room = leb.Room(fh.read())

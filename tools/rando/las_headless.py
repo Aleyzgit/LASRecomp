@@ -226,6 +226,9 @@ def main():
     if settings.get('hookshot-anything'):  # new routes before anything reads the logic (room shuffle, entrances)
         import hookshot_logic
         print('hookshot anything:', hookshot_logic.apply(logic_defs), 'routes', flush=True)
+    import eagle_tower  # room shuffle: Eagle's Tower starts collapsed (its flags: player_start.py; tools/rando/eagle_tower.py)
+    if eagle_tower.collapsed(settings):
+        print("eagle's tower collapsed:", eagle_tower.apply_logic(logic_defs), 'conditions', flush=True)
 
     # keysanity: the freed dungeon items must be placed with logic (LAS only logic-checks 'important' items)
     ks_free = {'keys': ('key-',), 'keys+nk': ('key-', 'nightmare-key-'),
@@ -249,7 +252,8 @@ def main():
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'entrance_data.yml')) as f:
             entrance_data = yaml.safe_load(f)
         import random as _rnd
-        pot_locs, skipped = pots_mod.add_to_logic(pots_mod.scan(romfs, leb), logic_defs, item_defs, entrance_data,
+        missable = eagle_tower.MISSABLE_ROOMS_COLLAPSED if eagle_tower.collapsed(settings) else pots_mod.MISSABLE_ROOMS
+        pot_locs, skipped = pots_mod.add_to_logic(pots_mod.scan(romfs, leb, missable), logic_defs, item_defs, entrance_data,
                                                   settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-pots"))
         print('pots:', len(pot_locs), 'locations', ('(no logic for: ' + ', '.join(sorted(skipped)) + ')') if skipped else '',
               flush=True)
