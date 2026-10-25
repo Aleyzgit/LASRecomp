@@ -824,7 +824,7 @@ static void rows_other(void) {
     opt_toggle("Boss cutscenes", &g_opts.boss_cutscenes, false, "Bosses' intro cutscenes play.");
     opt_toggle("Randomize music", &g_opts.randomize_music, false, "The game's music tracks are shuffled.");
     opt_toggle("Random cosmetics", &g_opts.random_cosmetics, false,
-               "The seed gets its own colors and season. Your choices in the Cosmetics tab still win.");
+               "The seed gets its own random colors. Your choices in the Cosmetics tab still win.");
     opt_toggle("Spoiler log", &g_opts.spoiler, true, "Writes where every item is, to read from the seed's Spoiler log.");
     opt_toggle("Race mode", &g_opts.race, false,
                "The spoiler log stays shut until the credits, and the title screen shows a seed hash to compare.");
