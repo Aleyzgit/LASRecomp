@@ -150,6 +150,35 @@ MSTALFOS_JUMP_SITE = A.MSTALFOS_JUMP_SITE  # fsub s0, s0, s1
 
 
 
+# Moldorm's only attack collider (the one that hurts Link) is on his head: "AttackColComp" on the head model's "body"
+# bone with the attack data DeguTail:body_attack; his body segments only push. On the Field (seeds) the body segments
+# get the same attack (runtime/hle/miniboss.c rt_moldorm_attacks): touching any part hurts, and the hit's invincibility
+# lets Link run through him - the damage boost past every other overworld enemy. MOLDORM_SHAPE_SITE: the head's
+# collider description (bl f_70000cdae0: x0 its block, x1 the shape, x2 the bone) is kept to build theirs from;
+# MOLDORM_ATTACK_SITE: after the head's AttackColComp is made (bl f_7000043220), theirs are.
+MOLDORM_SHAPE_SITE = A.MOLDORM_SHAPE_SITE
+MOLDORM_ATTACK_SITE = A.MOLDORM_ATTACK_SITE
+
+
+def _moldorm_shape(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x97f8d372, hex(w)  # bl f_70000cdae0
+    return (addr_text('{ extern void rt_moldorm_shape(Cpu *); extern void f_@COLLIDER_DESC_INIT@(Cpu *); rt_moldorm_shape(c); '
+                      'c->x[30] = 0x@MOLDORM_SHAPE_RETURN@ull; f_@COLLIDER_DESC_INIT@(c); }') +
+            f'  /* {a:#x}: bl 0xcdae0 (Moldorm head attack shape: kept) */')
+
+
+def _moldorm_attack(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x97f6a92f, hex(w)  # bl f_7000043220
+    return (addr_text('{ extern void f_@ATTACK_COL_COMP_CREATE@(Cpu *); extern void rt_moldorm_attacks(Cpu *); '
+                      'c->x[30] = 0x@MOLDORM_ATTACK_RETURN@ull; f_@ATTACK_COL_COMP_CREATE@(c); rt_moldorm_attacks(c); }') +
+            f'  /* {a:#x}: bl 0x43220 (Moldorm head attack made; on the Field his body segments get one too) */')
+
+
+PATCHES[MOLDORM_SHAPE_SITE] = _moldorm_shape
+PATCHES[MOLDORM_ATTACK_SITE] = _moldorm_attack
+
 # Moblin Chief deletes himself in his init (main+0x1f8af0) unless a story bit is set (player status +0xac bit 7 - his
 # hideout's time); on the Field (seeds) that check is skipped. The defeated check before it stays.
 MCHIEF_STORY_SITE = A.MCHIEF_STORY_SITE  # tbnz w8, #7, 0x70001f8b58

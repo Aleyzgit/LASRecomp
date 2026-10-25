@@ -240,6 +240,14 @@
     "7000e93b80": {
       "word": "910203ff",
       "sha256": "fc088625ca90de138051512cbbb57924e810c88c665eb91087050ea7af9984e5"
+    },
+    "7000298d18": {
+      "word": "97f8d372",
+      "sha256": "4193cb90cd774bd2ca889356f563db5be5483c8f0492f30ebb9be1e6e65fca2f"
+    },
+    "7000298d64": {
+      "word": "97f6a92f",
+      "sha256": "b4fba1afe357dc5a4ea0b9b8025637cb81ee8788248efcae0f09bfec3b23b8fd"
     }
   },
   "hooks_sha256": "236b51cd2a074e93a321baaa4e9afc7d85c273ed8a4e2617cf413d10e21340b8"

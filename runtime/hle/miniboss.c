@@ -654,6 +654,23 @@ static void moldorm_walls(Seen *s, const Kind *k, uint64_t frame) {
     if (ENV("LARECOMP_LOG_ROAM")) LOG("[roam] Moldorm at %.1f %.1f turns back\n", p[0], p[2]);
 }
 
+// Moldorm's five parts each have a CharaBodyCollision (actor +0x1548 .. +0x1588, every 0x10): in his arena he shoves
+// Link around with them, on the Field they were a wall Link couldn't damage-boost through. Switched off there (the
+// component's own enable, vfunc +0x58 with false) as he starts; his body segments hurt instead (rt_moldorm_attacks).
+static void moldorm_solid_off(Cpu *c, uint64_t actor) {
+    uint64_t saved[31], sp = c->sp;
+    memcpy(saved, c->x, sizeof saved);
+    for (int part = 0; part < 5; part++) {
+        uint64_t comp = LD64(actor + 0x1548 + part * 0x10);
+        if (!comp || LD64(comp) != GA(CHARA_BODY_COLLISION_VT)) continue;
+        c->x[0] = comp, c->x[1] = 0;
+        guest_call(c, LD64(LD64(comp) + 0x58));
+    }
+    memcpy(c->x, saved, sizeof saved);
+    c->sp = sp;
+}
+
+static void moldorm_attacks_tick(Cpu *c);
 void miniboss_tick(Cpu *c, uint64_t frame) {
     if (ENV("LARECOMP_MB_SCAN") || ENV("LARECOMP_MB_SCAN_NAME")) scan_tick(frame);
     force_tick(c, frame);
@@ -671,6 +688,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
     if (!pc) return;
     const float *lp = (const float *)(uintptr_t)(pc + 0x80);
     memcpy(g_link, lp, sizeof g_link), g_have_link = true;
+    moldorm_attacks_tick(c);
     if (ENV("LARECOMP_LOG_MB_ST") && frame % 120 == 0)  // (RE: which are still updated)
         for (int i = 0; i < MAX_SEEN; i++)
             if (g_seen[i].obj)
@@ -705,6 +723,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
             if (s->woken && !strcmp(k->name, "Moldorm")) moldorm_walls(s, k, frame);
             if (s->woken) continue;
             s->woken = 1;
+            s->woken_at = frame;
             uint64_t saved[31], sp = c->sp;
             memcpy(saved, c->x, sizeof saved);
             c->x[0] = s->obj;
@@ -718,6 +737,7 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
                 memcpy(c->x, saved, sizeof saved);
                 c->sp = sp;
             }
+            if (!strcmp(k->name, "Moldorm")) moldorm_solid_off(c, s->obj);
             LOG("[miniboss] f%llu %s armed%s\n", (unsigned long long)frame, k->name,
                 k->chg ? " and started" : " (its start event plays when Link enters its box)");
             marker_set(1);
@@ -757,5 +777,77 @@ void miniboss_tick(Cpu *c, uint64_t frame) {
         c->sp = sp;
         LOG("[miniboss] f%llu %s woken (Link %.1f away; it stood at %.1f %.1f)\n", (unsigned long long)frame, k->name,
             sqrtf(dx * dx + dz * dz), p[0], p[2]);
+    }
+}
+
+// Moldorm on the Field: his body segments get the head's attack (tools/patches.py MOLDORM_*): touching any part hurts
+// and the hit's invincibility lets Link through, as past other overworld enemies. Built as the head's is: its collider
+// description (kept by rt_moldorm_shape as the head's is made) on the segment's model and its "root" bone, the
+// component (f_7000043220, named AttackColComp1..3), the attack data DeguTail:body_attack (vfunc +0x80), enabled
+// (+0xa8). Our references are dropped once he's gone (moldorm_attacks_tick).
+static uint8_t g_mshape[0x100], g_mshape_s[0x20];
+static bool g_mshape_ok;
+static struct { uint64_t actor, ctrl[3]; } g_mextra[16];
+
+void rt_moldorm_shape(Cpu *c) {
+    g_mshape_ok = false;
+    if (!rt_gohma_free()) return;
+    memcpy(g_mshape, (void *)(uintptr_t)c->x[0], sizeof g_mshape);
+    memcpy(g_mshape_s, (void *)(uintptr_t)c->x[1], sizeof g_mshape_s);
+    g_mshape_ok = true;
+}
+
+void rt_moldorm_attacks(Cpu *c) {
+    if (!g_mshape_ok || !rt_gohma_free()) return;
+    g_mshape_ok = false;
+    static uint64_t mem;  // (guest scratch: block, shape, name / model pairs, out, strings)
+    if (!mem) mem = (uint64_t)(uintptr_t)hle_alloc(0x400);
+    uint64_t blk = mem, shp = mem + 0x100, nm = mem + 0x140, mdl = mem + 0x160, out = mem + 0x180, root = mem + 0x1a0,
+             cname = mem + 0x1b0;
+    strcpy((char *)(uintptr_t)root, "root");
+    uint64_t actor = c->x[20], saved[31], sp = c->sp, pc = c->pc;
+    __uint128_t v0 = c->v[0], v1 = c->v[1];
+    memcpy(saved, c->x, sizeof saved);
+    int slot = -1;
+    for (int i = 0; i < 16 && slot < 0; i++) if (!g_mextra[i].actor) slot = i;
+    for (int part = 1; part <= 3; part++) {
+        uint64_t model = LD64(actor + 0x14a8 + part * 0x10), mctrl = LD64(actor + 0x14b0 + part * 0x10);
+        if (!model) continue;
+        memcpy((void *)(uintptr_t)blk, g_mshape, sizeof g_mshape);
+        ST64(blk + 0x10, model), ST64(blk + 0x18, mctrl);
+        memcpy((void *)(uintptr_t)shp, g_mshape_s, sizeof g_mshape_s);
+        ST64(shp + 0x10, shp + 0x18);
+        c->x[0] = blk, c->x[1] = shp, c->x[2] = root;
+        guest_call(c, GA(COLLIDER_DESC_INIT));
+        snprintf((char *)(uintptr_t)cname, 16, "AttackColComp%d", part);
+        ST64(nm, cname), ST64(nm + 8, strlen((const char *)(uintptr_t)cname));
+        ST64(mdl, model), ST64(mdl + 8, mctrl);
+        ST64(out, 0), ST64(out + 8, 0);
+        c->x[0] = out, c->x[1] = actor, c->x[2] = nm, c->x[3] = mdl, c->x[4] = blk;
+        guest_call(c, GA(ATTACK_COL_COMP_CREATE));
+        uint64_t comp = LD64(out);
+        if (comp) {
+            c->x[0] = comp, c->x[1] = GA(DEGU_TAIL_BODY_ATTACK_STRING);  // "DeguTail:body_attack"
+            c->pc = LD64(LD64(comp) + 0x80), guest_call(c, c->pc);
+            c->x[0] = comp, c->x[1] = 1;
+            guest_call(c, LD64(LD64(comp) + 0xa8));
+        }
+        if (slot >= 0) g_mextra[slot].actor = actor, g_mextra[slot].ctrl[part - 1] = LD64(out + 8);
+        LOG("[miniboss] Moldorm %llx: body segment %d attack %s\n", (unsigned long long)actor, part, comp ? "on" : "failed");
+    }
+    memcpy(c->x, saved, sizeof saved);
+    c->v[0] = v0, c->v[1] = v1, c->sp = sp, c->pc = pc;
+}
+
+static void moldorm_attacks_tick(Cpu *c) {  // (he's gone - deleted or another actor in his place: our references go)
+    for (int i = 0; i < 16; i++) {
+        if (!g_mextra[i].actor || LD64(g_mextra[i].actor) == GA(MOLDORM_VTABLE)) continue;
+        uint64_t saved[31], sp = c->sp;
+        memcpy(saved, c->x, sizeof saved);
+        for (int k = 0; k < 3; k++)
+            if (g_mextra[i].ctrl[k]) { c->x[0] = g_mextra[i].ctrl[k]; guest_call(c, GA(SP_RELEASE)); }
+        memcpy(c->x, saved, sizeof saved);
+        c->sp = sp;
+        memset(&g_mextra[i], 0, sizeof g_mextra[i]);
     }
 }
