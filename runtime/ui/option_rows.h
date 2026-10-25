@@ -8,6 +8,8 @@
 //   opt_end();
 #pragma once
 #include <stdint.h>
+#include <string>
+#include <vector>
 
 void opt_begin(const char *id, float scale);
 void opt_section(const char *title);
@@ -98,3 +100,9 @@ bool opt_in_right(void);
 // B / Esc, and Left (d-pad, stick, arrow key), pressed this frame
 bool opt_pressed_back(void);
 bool opt_pressed_left(void);
+// Rows between these are only read, not drawn (the Randomizer's summary): each enabled row with a value goes into out.
+// Calls of the caller's own that use the last item (ImGui::IsItemFocused, popups) must be skipped while opt_collecting().
+struct OptLine { std::string label, value; bool changed; };
+void opt_collect_begin(std::vector<OptLine> *out);
+bool opt_collecting(void);
+void opt_collect_end(void);

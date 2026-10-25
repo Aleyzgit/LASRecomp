@@ -33,6 +33,7 @@ static bool g_listed;  // (this page has opt_list_begin's list on the right)
 static std::string g_page;  // (the page drawn last: its last shown description isn't carried to another)
 
 static bool g_next_disabled;
+static std::vector<OptLine> *g_collect;  // (opt_collect_begin: rows are only read, not drawn)
 static bool g_row_button;  // (the next row is an action: a green button)
 void opt_disable_next(void) { g_next_disabled = true; }
 static bool g_next_mark, g_next_warn;
@@ -102,6 +103,7 @@ void opt_begin(const char *id, float scale) {
 }
 
 void opt_section(const char *title) {
+    if (g_collect) return;
     std::string t = title;
     for (char &c : t) c = (char)toupper((unsigned char)c);
     if (ImGui::GetCursorPosY() > ImGui::GetStyle().WindowPadding.y + 1) ImGui::Dummy(ImVec2(0, 10 * g_scale));
@@ -115,6 +117,12 @@ static int row(const char *label, const std::string &value, bool changed, const 
                bool arrows = false, bool chevron = false) {
     bool lr = arrows || g_lr_row;
     g_lr_row = false;
+    if (g_collect) {
+        if (!g_next_disabled && !value.empty()) g_collect->push_back({label, value, changed});
+        g_next_disabled = g_next_mark = g_next_warn = g_row_button = false;
+        g_half = 0;
+        return 0;
+    }
     // a label a row above already has (Save Editor: Bombs, Magic Powder under Equipment and Ammo) gets an id of its
     // own: two rows with one id share the controller's cursor - ImGui kept the later one's place, so Up / Down from
     // the first went on from the second (a row far below, or the edge of the view)
@@ -282,6 +290,7 @@ bool opt_button(const char *label, const char *desc) {
 bool opt_radio(const char *label, bool selected, const char *desc) {
     bool off = g_next_disabled;
     bool chosen = row(label, "", false, desc) == 2;
+    if (g_collect) return false;
     ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     float r = ImGui::GetFontSize() * 0.32f, cx = b.x - 16 * g_scale - r, cy = (a.y + b.y) * 0.5f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -306,6 +315,7 @@ bool opt_colour(const char *label, CosColour *c, int slot, const char *desc) {
     int sp = col_pick(c, slot);  // (Default: the seed's own colour, shown as such)
     if (c->pick == COL_DEFAULT && sp != COL_DEFAULT) snprintf(seed, sizeof seed, "Seed: %s", g_col_names[sp]), names[0] = seed;
     bool changed = opt_choice(label, &c->pick, names, N_COL, COL_DEFAULT, desc);
+    if (g_collect) return false;
     if (changed && c->pick == COL_CUSTOM && prev != COL_CUSTOM)  // (Custom starts from the colour it was on)
         c->rgb = prev > COL_DEFAULT && prev < COL_RANDOM ? g_col_rgb[prev] : (c->rgb ? c->rgb : 0xF2F0EA);
     if (c->pick != COL_CUSTOM) return changed;
@@ -361,7 +371,7 @@ bool opt_text(const char *label, char *buf, size_t cap, const char *hint, const 
     ImGuiID &editing = g_text_editing;
     static int focus;        // frames left to give it the keyboard focus
     ImGuiID id = ImGui::GetID(label);
-    if (editing != id) {
+    if (editing != id || g_collect) {
         if (row(label, buf[0] ? buf : (hint ? hint : ""), false, desc) == 2) editing = id, focus = 2;
         return false;
     }
@@ -490,3 +500,7 @@ bool opt_pressed_left(void) {
     return ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_GamepadLStickLeft) ||
            ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
 }
+
+void opt_collect_begin(std::vector<OptLine> *out) { g_collect = out; }
+bool opt_collecting(void) { return g_collect != NULL; }
+void opt_collect_end(void) { g_collect = NULL; }

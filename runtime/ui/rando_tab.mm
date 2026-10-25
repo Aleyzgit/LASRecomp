@@ -589,7 +589,7 @@ enum { FOCUS_NONE, FOCUS_CAT, FOCUS_RIGHT, FOCUS_SEED, FOCUS_DELETE, FOCUS_CANCE
 static int g_focus;                // put the cursor on this row when it's drawn
 
 static void take_focus(int want) {
-    if (g_focus != want) return;
+    if (g_focus != want || opt_collecting()) return;
     g_focus = FOCUS_NONE;
     opt_focus_item();
 }
@@ -728,7 +728,7 @@ static void rows_world(float scale) {
                    "With Houses & caves: leaving a house puts you outside a different door than the one you came in by.");
         opt_indent(-1);
         if (last) ImGui::OpenPopup("##entlast");
-        if (ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        if (!opt_collecting() && ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             ImGui::TextUnformatted("With the entrance randomizer on, at least one kind of entrance must be shuffled.");
             ImGui::Spacing();
             ImGui::SetItemDefaultFocus();
@@ -841,6 +841,82 @@ static void cat_rows(int c, float scale) {
     case CAT_COMPANIONS: rows_companions(); break;
     case CAT_OTHER: rows_other(); break;
     }
+}
+
+// ---- the options picked, read-only (Generate seed under the cursor): the new seed's name and ID, then each category's
+// options that aren't their default (LARECOMP_RANDO_SUMMARY_ALL=1, test: every option), in two columns when one is too
+// long for the pane
+static void seed_summary(float scale) {
+    static int all = -1;
+    if (all < 0) all = getenv("LARECOMP_RANDO_SUMMARY_ALL") != NULL;
+    const PlasticTheme &pt = plastic_theme();
+    struct Item { bool head; std::string a, b; };
+    std::vector<Item> items;
+    int shown = 0;
+    for (int c = CAT_GENERAL; c < N_CAT; c++) {
+        std::vector<OptLine> v;
+        opt_collect_begin(&v);
+        cat_rows(c, scale);
+        opt_collect_end();
+        bool head = false;
+        for (const OptLine &l : v) {
+            if (!all && !l.changed) continue;
+            if (!head) items.push_back({true, k_cat_name[c], ""}), head = true;
+            items.push_back({false, l.label, l.value}), shown++;
+        }
+    }
+    char id[48];
+    seed_id_encode(g_opts, id, sizeof id);
+    opt_section("Your options");
+    ImGui::SetWindowFontScale(0.8f);
+    float fs = ImGui::GetFontSize(), lh = fs * 1.12f, gap = fs * 0.4f;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    auto pair = [&](ImVec2 at, float w, const char *a, const char *b, ImU32 ca) {  // "label: value", cut at w
+        dl->PushClipRect(at, ImVec2(at.x + w, at.y + lh), true);
+        std::string la = std::string(a) + ": ";
+        dl->AddText(at, ca, la.c_str());
+        dl->AddText(ImVec2(at.x + ImGui::CalcTextSize(la.c_str()).x, at.y), pt.value_changed, b);
+        dl->PopClipRect();
+    };
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float W = ImGui::GetContentRegionAvail().x;
+    pair(p, W, "Seed", g_opts.seed[0] ? g_opts.seed : "Random", pt.text);
+    pair(ImVec2(p.x, p.y + lh), W, "Seed ID", id, pt.text);
+    p.y += lh * 2 + gap;
+    float H = ImGui::GetContentRegionAvail().y - lh * 2 - gap * 2;  // (room left, the closing line under it)
+    float total = 0;
+    for (const Item &it : items) total += it.head ? lh + gap : lh;
+    int cols = total > H ? 2 : 1;
+    float cw = cols == 2 ? (W - fs) * 0.5f : W;
+    size_t split = items.size();  // (the second column starts at a category: the most even split)
+    if (cols == 2) {
+        float acc = 0, best = total;
+        for (size_t i = 0; i < items.size(); i++) {
+            if (items[i].head && i && fmaxf(acc, total - acc) < best) best = fmaxf(acc, total - acc), split = i;
+            acc += items[i].head ? lh + gap : lh;
+        }
+    }
+    float y0 = p.y, y = y0, x = p.x, ymax = y0;
+    for (size_t i = 0; i < items.size(); i++) {
+        if (i == split) x += cw + fs, y = y0;
+        const Item &it = items[i];
+        if (it.head) {
+            if (y > y0) y += gap;
+            std::string t = it.a;
+            for (char &c : t) c = (char)toupper((unsigned char)c);
+            dl->AddText(ImVec2(x, y), pt.section, t.c_str());
+        } else
+            pair(ImVec2(x + fs * 0.5f, y), cw - fs * 0.5f, it.a.c_str(), it.b.c_str(), pt.text);
+        y += lh;
+        ymax = fmaxf(ymax, y);
+    }
+    if (!all) {
+        const char *rest = shown ? "Everything else is the default." : "Every option is the default.";
+        dl->AddText(ImVec2(p.x, ymax + gap), pt.text_dim, rest);
+        ymax += gap + lh;
+    }
+    ImGui::Dummy(ImVec2(W, ymax - ImGui::GetCursorScreenPos().y));
+    ImGui::SetWindowFontScale(1.0f);
 }
 
 // ---- Seeds: the seed list, or a seed's actions
@@ -1038,6 +1114,10 @@ extern "C" void rando_tab_draw(float scale) {
     }
     if (opt_action("Generate seed", "", "Makes a seed with these options. It shows up under Seeds, ready to play."))
         start_generation();
+    // (under the cursor: the right column sums up the options instead; LARECOMP_RANDO_SUMMARY=1, test: always)
+    static int summary_test = -1;
+    if (summary_test < 0) summary_test = getenv("LARECOMP_RANDO_SUMMARY") != NULL;
+    bool summary = ImGui::IsItemHovered() || opt_item_nav_focused() || summary_test;
     if (!g_gen_status.empty() && !busy) {  // (e.g. a rename that failed)
         opt_disable_next();
         opt_action(g_gen_status.c_str(), "", g_gen_status.c_str(), false);
@@ -1045,15 +1125,18 @@ extern "C" void rando_tab_draw(float scale) {
 
     // ---- the right column: the chosen category's rows, the description under them
     opt_split();
-    if (g_cat == CAT_SEEDS && !g_act_seed.empty()) seed_header(active);
-    else opt_section(k_cat_name[g_cat]);
-    opt_list_begin();
-    if (g_focus == FOCUS_RIGHT) g_focus = FOCUS_NONE, opt_focus_next_row();
-    if (g_cat == CAT_SEEDS) rows_seeds(active);
-    else cat_rows(g_cat, scale);
-    opt_list_end();
+    if (summary) seed_summary(scale);
+    else {
+        if (g_cat == CAT_SEEDS && !g_act_seed.empty()) seed_header(active);
+        else opt_section(k_cat_name[g_cat]);
+        opt_list_begin();
+        if (g_focus == FOCUS_RIGHT) g_focus = FOCUS_NONE, opt_focus_next_row();
+        if (g_cat == CAT_SEEDS) rows_seeds(active);
+        else cat_rows(g_cat, scale);
+        opt_list_end();
+        opt_desc_text();
+    }
     g_in_right = opt_in_right();
-    opt_desc_text();
     opt_split_end();
     ImGui::EndDisabled();
     opts_save_if_changed();
