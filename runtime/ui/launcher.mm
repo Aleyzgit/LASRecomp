@@ -88,34 +88,41 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 #endif
 
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
-// it): beta_<n> until 1.0, then v<major>.<minor>.<patch>. A test build (a pre-release for a few players to try a fix)
-// is test-<name>: the start screen says "Test build <name>", and it previews LARECOMP_TEST_OF - the update check
-// offers that release (or a later one) as soon as it's out, so its players move to it.
-#define LARECOMP_VERSION "beta_5"
-#define LARECOMP_TEST_OF "beta_6"
+// it): beta_<n> until 1.0, then v<major>.<minor>.<patch>; a beta's hotfix is beta_<n>.<m> ("Beta <n> Hotfix <m>"). A
+// test build (a pre-release for a few players to try a fix) is test-<name>: the start screen says "Test build <name>",
+// and it previews LARECOMP_TEST_OF - the update check offers that release (or a later one) as soon as it's out, so its
+// players move to it.
+#define LARECOMP_VERSION "beta_5.2"
+#define LARECOMP_TEST_OF "beta_5.3"
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
 
 // ------------------------------------------------------------------ update check
 // The start screen asks GitHub for the project's releases once per launch (a background curl, which macOS and
 // Windows 10+ ship) and offers the best one if it outranks this build: any v1.0.0+ above every beta, betas by
-// number; other tags (the alpha_* ones) are ignored. Offline / no curl / anything unexpected: nothing is shown.
+// number, a beta's hotfixes (beta_<n>.<m>) between it and the next beta; other tags (the alpha_* ones) are ignored.
+// (Beta 5 and earlier only know beta_<n>: they never offer a hotfix.) Offline / no curl / anything unexpected:
+// nothing is shown.
 #define RELEASES_URL "https://api.github.com/repos/peiikai/LASRecomp/releases?per_page=100"
 #define RELEASE_PAGE "https://github.com/peiikai/LASRecomp/releases/tag/"
 
 static long long tag_rank(const std::string &t) {
-    int n, a, b, c;
+    int n, m, a, b, c;
     char end;
-    if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1 && n > 0) return n;
+    if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1 && n > 0) return (long long)n << 12;
+    if (sscanf(t.c_str(), "beta_%d.%d%c", &n, &m, &end) == 2 && n > 0 && m > 0 && m < 4096)
+        return ((long long)n << 12) + m;
     if (sscanf(t.c_str(), "v%d.%d.%d%c", &a, &b, &c, &end) == 3 && a >= 1 && b >= 0 && c >= 0 && b < 4096 && c < 4096)
         return (1LL << 48) + ((long long)a << 24) + ((long long)b << 12) + c;
     return -1;
 }
 
-// "Beta 2" / "1.0.0" (with_word: "Version 1.0.0")
+// "Beta 2" / "Beta 5 Hotfix 1" / "1.0.0" (with_word: "Version 1.0.0")
 static std::string tag_label(const std::string &t, bool with_word) {
-    int n;
+    int n, m;
     char end;
     if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1) return "Beta " + std::to_string(n);
+    if (sscanf(t.c_str(), "beta_%d.%d%c", &n, &m, &end) == 2 && m > 0)
+        return "Beta " + std::to_string(n) + " Hotfix " + std::to_string(m);
     if (!t.compare(0, 5, "test-")) return "Test build " + t.substr(5);
     std::string v = t.size() > 1 && t[0] == 'v' ? t.substr(1) : t;
     return with_word ? "Version " + v : v;
