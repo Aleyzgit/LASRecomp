@@ -700,6 +700,8 @@ static void fill_state(Cpu *c) {
       pot_bush_game_tick(c, renderer_present_count());
       extern void shell_spots_tick(Cpu *c, uint64_t frame);
       shell_spots_tick(c, renderer_present_count());
+      extern void apple_trees_tick(Cpu *c, uint64_t frame);
+      apple_trees_tick(c, renderer_present_count());
       extern void qol_tick(void);
       qol_tick();
       extern void run_timer_tick(void);

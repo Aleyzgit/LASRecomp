@@ -36,7 +36,7 @@
 #include "../hle.h"
 #include "../rando.h"
 
-#define MAXSPOTS 128  // (31 spots + a "shell" row per digsanity tile holding a Secret Seashell: up to 81)
+#define MAXSPOTS 160  // (31 spots + a "shell" row per digsanity tile holding a Secret Seashell: up to 81; 18 apple slots)
 #define T_SHELL 0x87
 #define T_SINKING_SWORD 0x194
 #define T_HEART_PIECE 0xb0
@@ -57,7 +57,7 @@ int digs_pool_index(Cpu *c, const char *str);
 
 typedef struct {
     char name[48], level[32], room[32], model[64], mname[48], entry[48], flag[32];
-    int index, flag_idx, dig, land, hole, owned, shell;  // owned: a 'shell' row
+    int index, flag_idx, dig, land, hole, owned, shell, apple;  // owned: a 'shell' row; apple: an apple tree slot
     float x, y, z, scale, turn;
     uint64_t key;         // a bomb hole's actor (its level key)
     float hx, hz;         // ... where it stands (its spawn), 0: not seen
@@ -110,40 +110,44 @@ static int load_locked(void) {
     const char *dir = rando_seed_dir();
     if (!dir) return __atomic_store_n(&g_n, 0, __ATOMIC_RELEASE), 0;
     char path[512], line[1024];
-    snprintf(path, sizeof path, "%s/shell_spots.tsv", dir);
-    FILE *f = fopen(path, "r");
-    if (!f) return __atomic_store_n(&g_n, 0, __ATOMIC_RELEASE), 0;
-    while (fgets(line, sizeof line, f) && n < MAXSPOTS) {
-        if (line[0] == '#') continue;
-        char *col[17], *save = NULL;
-        int nc = 0;
-        for (char *t = strtok_r(line, "\t\n", &save); t && nc < 17; t = strtok_r(NULL, "\t\n", &save)) col[nc++] = t;
-        if (nc < 16) continue;
-        Spot *s = &g_spots[n++];
-        strlcpy(s->name, col[0], sizeof s->name);
-        s->index = atoi(col[1]);
-        s->dig = !strcmp(col[2], "dig");
-        s->hole = !strcmp(col[2], "hole");
-        s->land = s->hole || !strcmp(col[2], "land");
-        s->owned = !strcmp(col[2], "shell");
-        strlcpy(s->level, col[3], sizeof s->level);
-        strlcpy(s->room, col[4], sizeof s->room);
-        s->x = (float)atof(col[5]), s->y = (float)atof(col[6]), s->z = (float)atof(col[7]);
-        strlcpy(s->model, col[8], sizeof s->model);
-        strlcpy(s->mname, col[9], sizeof s->mname);
-        strlcpy(s->entry, col[10], sizeof s->entry);
-        strlcpy(s->flag, col[11], sizeof s->flag);
-        s->flag_idx = atoi(col[12]);
-        s->shell = atoi(col[13]);
-        s->scale = (float)atof(col[14]), s->turn = (float)atof(col[15]);
-        s->key = nc > 16 ? strtoull(col[16], NULL, 16) : 0;
-        s->hole_k = -1;
-        for (int k = 0; k < 5; k++) s->pool[k] = -1;
-        s->fly_t = -1;
+    // (apple_trees.tsv: Applesanity's tree slots, the same columns - kind "apple", flown out by apple_trees.c)
+    for (int file = 0; file < 2; file++) {
+        snprintf(path, sizeof path, "%s/%s", dir, file ? "apple_trees.tsv" : "shell_spots.tsv");
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        while (fgets(line, sizeof line, f) && n < MAXSPOTS) {
+            if (line[0] == '#') continue;
+            char *col[17], *save = NULL;
+            int nc = 0;
+            for (char *t = strtok_r(line, "\t\n", &save); t && nc < 17; t = strtok_r(NULL, "\t\n", &save)) col[nc++] = t;
+            if (nc < 16) continue;
+            Spot *s = &g_spots[n++];
+            strlcpy(s->name, col[0], sizeof s->name);
+            s->index = atoi(col[1]);
+            s->dig = !strcmp(col[2], "dig");
+            s->hole = !strcmp(col[2], "hole");
+            s->apple = !strcmp(col[2], "apple");
+            s->land = s->hole || s->apple || !strcmp(col[2], "land");
+            s->owned = !strcmp(col[2], "shell");
+            strlcpy(s->level, col[3], sizeof s->level);
+            strlcpy(s->room, col[4], sizeof s->room);
+            s->x = (float)atof(col[5]), s->y = (float)atof(col[6]), s->z = (float)atof(col[7]);
+            strlcpy(s->model, col[8], sizeof s->model);
+            strlcpy(s->mname, col[9], sizeof s->mname);
+            strlcpy(s->entry, col[10], sizeof s->entry);
+            strlcpy(s->flag, col[11], sizeof s->flag);
+            s->flag_idx = atoi(col[12]);
+            s->shell = atoi(col[13]);
+            s->scale = (float)atof(col[14]), s->turn = (float)atof(col[15]);
+            s->key = nc > 16 && s->hole ? strtoull(col[16], NULL, 16) : 0;
+            s->hole_k = -1;
+            for (int k = 0; k < 5; k++) s->pool[k] = -1;
+            s->fly_t = -1;
+        }
+        if (n == MAXSPOTS && fgets(line, sizeof line, f)) LOG("[shells] warning: more than %d rows, the rest ignored\n", MAXSPOTS);
+        fclose(f);
+        LOG("[shells] %d spots hold the seed's items (%s)\n", n, path);
     }
-    if (n == MAXSPOTS && fgets(line, sizeof line, f)) LOG("[shells] warning: more than %d rows, the rest ignored\n", MAXSPOTS);
-    fclose(f);
-    LOG("[shells] %d Secret Seashell spots hold the seed's items (%s)\n", n, path);
     __atomic_store_n(&g_n, n, __ATOMIC_RELEASE);
     return n;
 }
@@ -443,6 +447,33 @@ static void hole_beacons(const char *lv) {
             break;
         }
     }
+}
+
+// Applesanity (apple_trees.c): a tree slot's item flies out from `from` (its apple in the crown) to its tile
+static Spot *apple_spot(const char *name) {
+    for (int i = 0; load() > 0 && i < g_n; i++)
+        if (g_spots[i].apple && !strcmp(g_spots[i].name, name)) return &g_spots[i];
+    return NULL;
+}
+
+bool shell_spot_launch(const char *name, const float from[3], uint32_t zone) {
+    Spot *s = apple_spot(name);
+    if (!s || !g_pool_ready || flags_ext_get(s->flag_idx)) return false;
+    memcpy(s->from, from, sizeof s->from);
+    s->v0[0] = s->v0[1] = s->v0[2] = 0;  // (fly_start: the shell's own upward speed)
+    s->zone = zone;
+    s->droom = 0;  // (spawned into the landing tile's screen: the tree's)
+    s->dropped = true;
+    s->fly_queued = true;
+    LOG("[shells] %s: the apple tree drops its item (%s) from (%.2f, %.2f, %.2f)\n", name, s->mname, from[0], from[1],
+        from[2]);
+    return true;
+}
+
+// the slot's item is out: about to fly, or its actor still there
+bool shell_spot_out(const char *name) {
+    Spot *s = apple_spot(name);
+    return s && (s->fly_queued || (s->item && digs_actor_alive(s->item)));
 }
 
 // game main thread, once per frame (runtime/hle/input.c)

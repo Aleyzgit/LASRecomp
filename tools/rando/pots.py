@@ -75,7 +75,8 @@ REFILLS = ('pot-arrows', 'pot-bombs', 'pot-powder')
 # Their pots aren't checks at all (vanilla contents, no gold): a check there could be lost for good (user 2026-10-18)
 MISSABLE_ROOMS = ('Lv07EagleTower_02E', 'Lv07EagleTower_06E')
 REFILL_INDEX = 80
-QUICK = ('pot-heart',) + REFILLS  # picked up like rupees: no item-get animation
+QUICK = ('pot-heart', 'apple', 'green-apple') + REFILLS  # picked up like rupees: no item-get animation (apples:
+# Applesanity's filler, apple_trees.py)
 # traps among the pot filler, by LAS's trap setting (fraction of the pot count; never the Zol trap - it needs a chest)
 POT_TRAPS = {'none': 0.0, 'few': 0.02, 'several': 0.06, 'many': 0.12, 'trapsanity': 0.25}
 FLAG_BASE = 1240  # first GlobalFlags index we may use (vanilla <= 1118, LAS adds ~100 after it)
