@@ -31,8 +31,8 @@ int doorjump_cross_doors(const char *level, int *col, int *row, char *side, int 
                          int max);
 }
 
-// GA_PLAYER_STATUS_PTR: PlayerStatus*: current level name at +0
-#define DUNGEON_RECORDS (GA_LIVE_SAVE + 0xE0)  // live save: 0x10-byte records (+1 bit 1 = Map)
+// GA(PLAYER_STATUS_PTR): PlayerStatus*: current level name at +0
+#define DUNGEON_RECORDS (GA(LIVE_SAVE) + 0xE0)  // live save: 0x10-byte records (+1 bit 1 = Map)
 
 // The page and its panes are guest memory the game frees when the page closes (or the pause menu turns to another
 // page), so only the game thread (the page's update) reads them: dgnmap_snapshot copies the view into g_dv, and the
@@ -76,7 +76,7 @@ extern "C" bool chaos_dgnmap_shown(void) {
 extern "C" uint64_t chaos_dgnmap_obj(void) { return g_dm_obj; }  // (LARECOMP_PANE_SCAN)
 
 static const char *current_level(void) {
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     return ps ? (const char *)(uintptr_t)ps : "";
 }
 

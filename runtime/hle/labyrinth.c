@@ -31,7 +31,7 @@ extern bool doorjump_player_xz(uint64_t frame, float *x, float *z);
 bool flags_ext_get(int idx);
 void flags_put(int idx, bool on);
 
-#define RECORDS (GA_LIVE_SAVE + 0xE0)
+#define RECORDS (GA(LIVE_SAVE) + 0xE0)
 static const int kRec[9] = {18, 0, 2, 4, 6, 8, 10, 12, 14};  // wing 0 (Color Dungeon), wings 1-8
 enum { FOUND_FLAG = 4084, FOUND_BITS = 8, DOOR_FLAG = 4092, DOOR_BITS = 4 };
 
@@ -169,7 +169,7 @@ void labyrinth_game_tick(uint64_t frame) {
     // ---- the door Link came in by: arrived in a wing from the Field, he stands at one door's spot
     static char prev[40];
     static int pending;  // frames left to find where he arrived
-    uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+    uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
     const char *lv = ps ? (const char *)(uintptr_t)ps : "";
     if (strcmp(prev, lv)) {
         if (!strcmp(prev, "Field") && wing_level(lv)) pending = 600;

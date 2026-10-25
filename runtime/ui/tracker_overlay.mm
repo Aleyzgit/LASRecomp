@@ -46,7 +46,7 @@ bool triforce_counts(int *have, int *needed);         // runtime/hle/triforce.c
 void labyrinth_keys(int *held, int *found);           // runtime/hle/labyrinth.c
 }
 
-#define SAVE GA_LIVE_SAVE
+#define SAVE GA(LIVE_SAVE)
 #define EVENT_FLAGS (SAVE + 0x5DC0)
 
 // The page object and its panes are guest memory the game frees when the page closes or the pause menu turns to
@@ -1461,7 +1461,7 @@ extern "C" void tracker_overlay_draw(ImVec2 display, ImFont *font) {
     int cur = find_target(ui.sel_type, ui.sel_id);
     if (cur < 0 && !targets.empty()) {
         ImVec2 want = ui_pt(8, 8);
-        uint64_t ps = LD64(GA_PLAYER_STATUS_PTR);
+        uint64_t ps = LD64(GA(PLAYER_STATUS_PTR));
         if (ps && !strcmp((const char *)(uintptr_t)ps, "Field")) {
             const char *r = (const char *)(uintptr_t)(ps + 0x40);
             if (isdigit((unsigned char)r[0]) && isdigit((unsigned char)r[1]) && r[2] >= 'A' && r[2] <= 'P')
