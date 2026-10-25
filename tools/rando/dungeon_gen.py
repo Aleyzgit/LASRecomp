@@ -844,10 +844,10 @@ _grid_cache = {}
 
 
 def landing_depth(romfs, room, side, slot, min_tile):
-    """(depth, floor height): how far past the edge Link lands at a doorway (Chaos jumps) and the floor there - the
-    centre of the first tile inward from the edge,
-    along the doorway's line, that is floor - no collision, no deep water / lava / pit / crumbling floor (Turtle Rock
-    07D: lava right inside its west doorway) - starting at `min_tile` (1 = past a door of the room's own)."""
+    """(depth, floor height, lateral): how far past the edge Link lands at a doorway (Chaos jumps), the floor there and
+    how far along the edge from the doorway's centre (0, or half a tile: see below) - the first tile inward from the
+    edge, along the doorway's line, that is floor - no collision, no deep water / lava / pit / crumbling floor (Turtle
+    Rock 07D: lava right inside its west doorway) - starting at `min_tile` (1 = past a door of the room's own)."""
     import struct
     from RandomizerCore.Tools import leb
     if room not in _grid_cache:
@@ -859,26 +859,39 @@ def landing_depth(romfs, room, side, slot, min_tile):
     def tile(row, col):
         o = 0x10 * (row * 10 + col)
         return raw[o:o + 3], struct.unpack_from('<f', raw, o + 12)[0]
-    def free(i):
-        row, col = {'N': (i, along), 'S': (7 - i, along), 'W': (min(along, 7), i), 'E': (min(along, 7), 9 - i)}[side]
+    def free(i, a=along, pit_only=False):
+        row, col = {'N': (i, a), 'S': (7 - i, a), 'W': (min(a, 7), i), 'E': (min(a, 7), 9 - i)}[side]
         t, h = tile(min(row, 7), min(col, 9))
         solid = bool(t[0] & 2) and not t[2] & 8
         # bit 0: a hole under the tile - a pit, or a floor that crumbles once stood on (Turtle Rock 03G's tiles,
         # ObjDungeonCollapse...: Link landed on one inside its west doorway, it gave way and he fell - seed
         # 52YTE-YT280-5000H-4MG2E-G1000-0001V Tail Cave 07F E -> 06F W)
         hazard = (t[2] & 4 and h < -0.3) or h < -1.0 or t[0] & 1
-        return not solid and not hazard, h
+        return not hazard and (pit_only or not solid), h
+    # Link lands on the doorway's centre line (slot * 0.75, runtime/hle/doorjump.c). A two-tile doorway's centre (even
+    # slot) is the edge between tiles along-1 and along: he stands on both, and a pit in the other half (along-1)
+    # pulls him in (#383: Turtle Rock 06B's south doorway, a pit column on its left - seed WildTarin613, Catfish 04G E
+    # -> 07D S). There he lands half a tile over, on tile along's centre (the row's 10th column); with no landing on
+    # tile along at all, on tile along-1's.
+    even = not isinstance(slot, str) and slot % 2 == 0 and 0 < along < (10 if side in 'NS' else 8)
+
+    def centre(i):  # (the other half may be a wall or block: the game's collision just nudges him)
+        return not even or free(i, along - 1, True)[0]
     # never on the doorway tile itself (the game walks a Link who stands there on through the doorway - straight
     # back into the jump: DevChaos1 Color Dungeon 07H -> 08H), and only where he can walk on inward
-    for i in range(max(min_tile, 1), 5):
-        ok, h = free(i)
-        if ok and free(i + 1)[0]:
-            return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2)
-    for i in range(max(min_tile, 1), 5):
-        ok, h = free(i)
-        if ok:
-            return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2)
-    return 2.2, 0.0
+    first = max(min_tile, 1)
+    for walk_on in (True, False):
+        for i in range(first, 5):
+            ok, h = free(i)
+            if ok and (not walk_on or free(i + 1)[0]):
+                lat = 0.0 if centre(i) and (not walk_on or centre(i + 1)) else 0.75
+                return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2), lat
+    for walk_on in (True, False) if even else ():
+        for i in range(first, 5):
+            ok, h = free(i, along - 1)
+            if ok and (not walk_on or free(i + 1, along - 1)[0]):
+                return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2), -0.75
+    return 2.2, 0.0, 0.0
 
 
 def dead_ends(cat, level, layout):
@@ -1018,8 +1031,9 @@ def _jump_row(cat, level, layout, romfs, x, y):
     # the room's own door in that doorway: arrive past it (it may still be shut)
     own = any(not d[2].endswith('(mirror)') and d[0] == y[2] and abs(d[3] - y[3]) <= 1
               for d in cat[layout[y[1]]]['doors'] if len(d) > 3)
-    depth, height = landing_depth(romfs, layout[y[1]], y[2], y[3], 1 if own else 0)
-    return (level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth, height)
+    depth, height, lateral = landing_depth(romfs, layout[y[1]], y[2], y[3], 1 if own else 0)
+    row = (level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth, height)
+    return row + (lateral,) if lateral else row  # (10th column only where Link lands off the doorway's centre)
 
 
 def _madness_rows(level, layout, order, by_comp, rng, romfs, cat):

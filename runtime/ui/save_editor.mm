@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "imgui.h"
 #include "osk.h"
@@ -22,8 +23,11 @@ extern "C" {
 #include "../hle.h"
 }
 
-// GA(LIVE_SAVE): main + 0x1CBB220
-static uint8_t *S(void) { return (uint8_t *)(uintptr_t)GA(LIVE_SAVE); }
+// GA(LIVE_SAVE): main + 0x1CBB220. g_snap: a copy taken when the menu opens (the sections' changed dots read it)
+enum { SAVE_SIZE = 0x5EE0 };
+static uint8_t g_snap[SAVE_SIZE];
+static bool g_snap_ok, g_use_snap;
+static uint8_t *S(void) { return g_use_snap ? g_snap : (uint8_t *)(uintptr_t)GA(LIVE_SAVE); }
 template <typename T> static T &F(uint32_t off) { return *(T *)(S() + off); }
 
 enum : uint32_t {
@@ -54,7 +58,10 @@ static void sync_header(void) {
 static char g_name[32];
 
 extern "C" void save_editor_on_open(void) {
+    g_snap_ok = false;
     if (!loaded()) return;
+    memcpy(g_snap, S(), SAVE_SIZE);
+    g_snap_ok = true;
     const uint16_t *u = (const uint16_t *)(S() + NAME);
     int n = 0;
     for (int i = 0; i < 8 && u[i]; i++) {  // UTF-16 -> UTF-8 (BMP)
@@ -129,14 +136,8 @@ static void max_out(void) {
     F<int16_t>(HP) = (int16_t)max_hp();
 }
 
-extern "C" void save_editor_draw(float scale) {
-    if (!loaded()) {
-        ImGui::TextDisabled("Load a save file first: the editor changes the save that's currently being played.");
-        return;
-    }
-    opt_begin("##save", scale);
-
-    opt_section("Quick");
+// ---- the sections' rows (each its own function: the right column shows one)
+static void sec_quick(void) {
     if (opt_button("Max out everything", "Every heart, item, upgrade, song, instrument and dungeon key, full ammo, "
                                          "999 rupees, all 50 Secret Seashells and 5 Golden Leaves.\n\n"
                                          "The hearts on the HUD update after the next screen change."))
@@ -147,8 +148,9 @@ extern "C" void save_editor_draw(float scale) {
         if (F<uint32_t>(ITEMS) & (1u << 3)) F<uint8_t>(ARROWS) = (F<uint8_t>(UPGRADES) & 0x20) ? 60 : 30;
         if (F<uint32_t>(ITEMS) & (1u << 8)) F<uint8_t>(POWDER) = (F<uint8_t>(UPGRADES) & 0x08) ? 40 : 20;
     }
+}
 
-    opt_section("Player");
+static void sec_player(void) {
     if (opt_text("Name", g_name, 9 * 3, NULL, "The save file's name (up to 8 letters).")) write_name(g_name);
     int containers = __builtin_popcount(F<uint16_t>(CONTAINERS) & 0x1FF);
     if (opt_int("Heart Containers", &containers, 0, 9, 1, 0, "%d / 9",
@@ -183,8 +185,9 @@ extern "C" void save_editor_draw(float scale) {
                                                    "halves the damage he takes."))
             F<uint8_t>(UPGRADES) = (uint8_t)((F<uint8_t>(UPGRADES) & 0x3F) | (t << 6));
     }
+}
 
-    opt_section("Equipment");
+static void sec_equipment(void) {
     static const char *const sword[] = {"None", "Sword", "Level 2"};
     static const char *const shield[] = {"None", "Shield", "Mirror Shield"};
     static const char *const bracelet[] = {"None", "Power Bracelet", "Level 2"};
@@ -208,8 +211,9 @@ extern "C" void save_editor_draw(float scale) {
         {"Seashell Sensor", SENSOR, 0, 8, "The Seashell Sensor: chimes near hidden Secret Seashells."},
     };
     bit_rows(items, sizeof items / sizeof items[0]);
+}
 
-    opt_section("Ammo");
+static void sec_ammo(void) {
     static const Bit ups[] = {
         {"Bomb bag upgrade", UPGRADES, 4, 8, "Carry up to 60 bombs instead of 30."},
         {"Quiver upgrade", UPGRADES, 5, 8, "Carry up to 60 arrows instead of 30."},
@@ -219,24 +223,27 @@ extern "C" void save_editor_draw(float scale) {
     ammo("Bombs", BOMBS, 4, 30, "Bombs carried.");
     ammo("Arrows", ARROWS, 5, 30, "Arrows carried.");
     ammo("Magic Powder", POWDER, 3, 20, "Magic Powder carried.");
+}
 
-    opt_section("Ocarina songs");
+static void sec_songs(void) {
     static const Bit songs[] = {
         {"Ballad of the Wind Fish", SONGS, 0, 8, "Marin's song."},
         {"Manbo's Mambo", SONGS, 1, 8, "Warps to Manbo's Pond or a warp point."},
         {"Frog's Song of Soul", SONGS, 2, 8, "Brings some things back to life."},
     };
     bit_rows(songs, 3);
+}
 
-    opt_section("Bottles");
+static void sec_bottles(void) {
     static const Bit bottles[] = {
         {"Bottle 1", ITEMS, 13, 32, "An empty bottle."}, {"Fairy in bottle 1", FAIRIES, 0, 8, "A fairy in bottle 1."},
         {"Bottle 2", ITEMS, 14, 32, "An empty bottle."}, {"Fairy in bottle 2", FAIRIES, 1, 8, "A fairy in bottle 2."},
         {"Bottle 3", ITEMS, 15, 32, "An empty bottle."}, {"Fairy in bottle 3", FAIRIES, 2, 8, "A fairy in bottle 3."},
     };
     bit_rows(bottles, 6);
+}
 
-    opt_section("Instruments of the Sirens");
+static void sec_instruments(void) {
     if (opt_button("All instruments", "Gives all eight instruments.")) F<uint32_t>(KEYITEMS) |= 0x7F80;
     static const Bit inst[] = {
         {"Full Moon Cello", KEYITEMS, 7, 32, "Tail Cave's instrument."},
@@ -249,8 +256,9 @@ extern "C" void save_editor_draw(float scale) {
         {"Thunder Drum", KEYITEMS, 14, 32, "Turtle Rock's instrument."},
     };
     bit_rows(inst, 8);
+}
 
-    opt_section("Dungeon keys");
+static void sec_keys(void) {
     static const Bit keys[] = {
         {"Tail Key", KEYITEMS, 2, 32, "Opens Tail Cave."},
         {"Slime Key", KEYITEMS, 3, 32, "Opens Key Cavern."},
@@ -259,8 +267,9 @@ extern "C" void save_editor_draw(float scale) {
         {"Bird Key", KEYITEMS, 6, 32, "Opens Eagle's Tower."},
     };
     bit_rows(keys, 5);
+}
 
-    opt_section("Trading quest");
+static void sec_trade(void) {
     {
         static const char *const trade[] = {"None", "Yoshi Doll", "Ribbon", "Dog Food", "Bananas", "Stick", "Honeycomb",
                                             "Pineapple", "Hibiscus", "Goat's Letter", "Broom", "Fishing Hook", "Necklace",
@@ -269,18 +278,18 @@ extern "C" void save_editor_draw(float scale) {
         if (t > 14) t = 0;
         if (opt_choice("Trade item", &t, trade, 15, 0, "The trading quest item Link is carrying.")) F<uint8_t>(TRADE) = (uint8_t)t;
     }
+}
 
-    if (rando_seed_dir()) {  // randomizer seeds: companions are items (runtime/hle/pets.c)
-        opt_section("Companions");
-        static const struct { int c; const char *name; } comps[] = {{1, "BowWow"}, {2, "Marin"}, {4, "Flying Rooster"}, {3, "Ghost"}};
-        for (const auto &k : comps) {
-            bool on = pets_owned(k.c);
-            if (opt_toggle(k.name, &on, false, "In this seed companions are items: owning one lets it follow Link."))
-                pets_give(k.c, on);
-        }
+static void sec_companions(void) {
+    static const struct { int c; const char *name; } comps[] = {{1, "BowWow"}, {2, "Marin"}, {4, "Flying Rooster"}, {3, "Ghost"}};
+    for (const auto &k : comps) {
+        bool on = pets_owned(k.c);
+        if (opt_toggle(k.name, &on, false, "In this seed companions are items: owning one lets it follow Link."))
+            pets_give(k.c, on);
     }
+}
 
-    opt_section("Give any item");
+static void sec_give(void) {
     {   // the game's own AddItem (same path as an item pickup / Inventory.AddItemByKey event)
         static int item = 0, count = 1, index = -1;
         int n = (int)(sizeof kItemNames / sizeof kItemNames[0]);
@@ -291,7 +300,88 @@ extern "C" void save_editor_draw(float scale) {
                 "an index.", "Any");
         if (opt_button("Give", "Gives the item above.")) give_item_request(item, count, index);
     }
-    opt_end();
+}
+
+// The tab, in two columns (as the Controls tab's Configure inputs): the sections on the left, a gold dot on each one
+// changed since the menu opened; the chosen section's rows on the right, the selected row's description under them.
+enum { SEC_QUICK, SEC_PLAYER, SEC_EQUIPMENT, SEC_AMMO, SEC_SONGS, SEC_BOTTLES, SEC_INSTRUMENTS, SEC_KEYS, SEC_TRADE,
+       SEC_COMPANIONS, SEC_GIVE, N_SEC };
+static const char *const k_sec_name[N_SEC] = {"Quick", "Player", "Equipment", "Ammo", "Ocarina songs", "Bottles",
+                                              "Instruments of the Sirens", "Dungeon keys", "Trading quest", "Companions",
+                                              "Give any item"};
+static void (*const k_sec_rows[N_SEC])(void) = {sec_quick, sec_player, sec_equipment, sec_ammo, sec_songs, sec_bottles,
+                                                sec_instruments, sec_keys, sec_trade, sec_companions, sec_give};
+static bool sec_shown(int c) { return c != SEC_COMPANIONS || rando_seed_dir(); }  // (randomizer seeds: companions are items)
+
+static int g_sec = SEC_QUICK;
+static bool g_in_right;            // the cursor is in the right column (last frame)
+static int g_last_frame = -10;     // (a frame without this tab: the cursor starts over)
+static int g_back_frame = -10;     // the frame B went back to the sections (the menu mustn't close on it)
+enum { FOCUS_NONE, FOCUS_SEC, FOCUS_RIGHT };
+static int g_focus;
+extern "C" bool save_editor_took_back(void) { return g_back_frame == ImGui::GetFrameCount(); }
+
+extern "C" void save_editor_draw(float scale) {
+    if (!loaded()) {
+        ImGui::TextDisabled("Load a save file first: the editor changes the save that's currently being played.");
+        return;
+    }
+    int frame = ImGui::GetFrameCount();
+    if (frame - g_last_frame > 1) g_focus = FOCUS_NONE, g_in_right = false;  // (back on the tab)
+    g_last_frame = frame;
+    static int hook_frames = -1;  // (test) LARECOMP_SAVE_SEC=<section name>[:right]: that section shown (right: cursor on it)
+    if (hook_frames < 0) {
+        hook_frames = 0;
+        if (const char *h = getenv("LARECOMP_SAVE_SEC")) {
+            for (int c = 0; c < N_SEC; c++)
+                if (!strncasecmp(h, k_sec_name[c], strlen(k_sec_name[c]))) g_sec = c;
+            hook_frames = strstr(h, ":right") ? 10 : 0;
+        }
+    }
+    if (hook_frames > 0) hook_frames--, g_focus = FOCUS_RIGHT;
+    if (!sec_shown(g_sec)) g_sec = SEC_QUICK;
+    // B / Esc in the right column (and Left on a row that doesn't step with it): back to the section
+    if (g_in_right && !ui_text_busy() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) &&
+        (opt_pressed_back() || (opt_pressed_left() && !opt_focused_lr())))
+        g_back_frame = frame, g_focus = FOCUS_SEC;
+
+    // which sections changed since the menu opened: their rows' values, read from the save then from the copy
+    bool changed[N_SEC] = {};
+    if (g_snap_ok)
+        for (int c = 0; c < N_SEC; c++) {
+            if (!sec_shown(c)) continue;
+            uint32_t now, before;
+            opt_count_begin();
+            k_sec_rows[c]();
+            opt_count_end(&now);
+            g_use_snap = true;
+            opt_count_begin();
+            k_sec_rows[c]();
+            opt_count_end(&before);
+            g_use_snap = false;
+            changed[c] = now != before;
+        }
+
+    opt_begin("##save", scale);
+    opt_compact();
+    for (int c = 0; c < N_SEC; c++) {
+        if (!sec_shown(c)) continue;
+        if (g_in_right && c == g_sec) opt_mark_next();
+        bool open = opt_link(k_sec_name[c], NULL, NULL, changed[c]);
+        bool clicked = ImGui::IsItemClicked();
+        if (c == g_sec && g_focus == FOCUS_SEC) g_focus = FOCUS_NONE, opt_focus_item();
+        if ((opt_item_nav_focused() && g_sec != c) || open) g_sec = c;  // (moving down the list shows each)
+        if (open && !clicked) g_focus = FOCUS_RIGHT;  // (A / Right: the cursor goes to its rows)
+    }
+    opt_split();
+    opt_section(k_sec_name[g_sec]);
+    opt_list_begin();
+    if (g_focus == FOCUS_RIGHT) g_focus = FOCUS_NONE, opt_focus_next_row();
+    k_sec_rows[g_sec]();
+    opt_list_end();
+    g_in_right = opt_in_right();
+    opt_desc_text();
+    opt_split_end();
     sync_header();
 }
 
