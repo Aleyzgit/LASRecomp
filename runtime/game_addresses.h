@@ -44,6 +44,20 @@ const char *game_release_label(const char *exefs_dir, char *buf, size_t size);
 bool game_version_select(const char *game_dir, char *why, size_t why_size);
 // The selected version (NULL before game_version_select).
 const GameVersion *game_version(void);
+// The bytes of all the game's RomFS files in version v, summed (0: unknown). A copy with every file there but another
+// total has a damaged or changed file (issue #391). Only the totals ship.
+uint64_t game_romfs_bytes(const GameVersion *v);
+// File by file: some copies have files that no version has, or a damaged one, beside the game's (game_addresses/
+// romfs_files.h: hashes of the game's paths and sizes only). Begin with the copy's version (NULL: unknown version, the
+// check does nothing), pass every file found (path relative to romfs, '/' separators) and end it.
+typedef struct GameRomfsCheck GameRomfsCheck;
+GameRomfsCheck *game_romfs_check_begin(const GameVersion *v);
+// false: not one of this version's files (another name, or another size)
+bool game_romfs_check_file(GameRomfsCheck *c, const char *rel, uint64_t size);
+// How many of this version's files weren't passed (missing, or changed: another size); frees c.
+int game_romfs_check_end(GameRomfsCheck *c);
+// The table's hash of a file (tools/romfs_files.py hashes the same way).
+uint64_t game_romfs_hash(const char *rel, uint64_t size);
 
 #ifdef __cplusplus
 }
