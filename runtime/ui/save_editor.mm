@@ -18,6 +18,9 @@ extern "C" void give_item_request(int id, int count, int index);
 extern "C" bool pets_owned(int c);             // runtime/hle/pets.c
 extern "C" void pets_give(int c, bool on);
 extern "C" const char *rando_seed_dir(void);
+extern "C" const char *chaos_current_level(void);  // runtime/ui/chaos_overlay.mm
+static int current_dungeon(void);
+static int g_dungeon;  // (the Dungeon keys section's Dungeon row)
 
 extern "C" {
 #include "../hle.h"
@@ -62,6 +65,7 @@ extern "C" void save_editor_on_open(void) {
     if (!loaded()) return;
     memcpy(g_snap, S(), SAVE_SIZE);
     g_snap_ok = true;
+    if (current_dungeon() >= 0) g_dungeon = current_dungeon();
     const uint16_t *u = (const uint16_t *)(S() + NAME);
     int n = 0;
     for (int i = 0; i < 8 && u[i]; i++) {  // UTF-16 -> UTF-8 (BMP)
@@ -258,6 +262,33 @@ static void sec_instruments(void) {
     bit_rows(inst, 8);
 }
 
+// Per-dungeon records (notes/save_format.md): live save + 0xE0 + 0x10 * rec, dungeon n -> rec 2(n-1), Color Dungeon
+// -> 18 (as runtime/hle/keysanity.c); +0 small keys, +1 bits: compass 0, map 1, beak 2, Nightmare Key 3.
+static const char *const k_dungeons[] = {"Tail Cave", "Bottle Grotto", "Key Cavern", "Angler's Tunnel", "Catfish's Maw",
+                                         "Face Shrine", "Eagle's Tower", "Turtle Rock", "Color Dungeon"};
+static uint32_t dungeon_rec(int d) { return 0xE0 + 0x10 * (d == 8 ? 18 : 2 * d); }
+
+static int current_dungeon(void) {  // the dungeon Link is in: Lv01TailCave..Lv08TurtleRock 0-7, Lv10ClothesDungeon 8; else -1
+    const char *lv = chaos_current_level();
+    if (!lv || strncmp(lv, "Lv", 2) || lv[2] < '0' || lv[2] > '9' || lv[3] < '0' || lv[3] > '9') return -1;
+    int n = (lv[2] - '0') * 10 + (lv[3] - '0');
+    return n >= 1 && n <= 8 ? n - 1 : n == 10 ? 8 : -1;
+}
+
+static void dungeon_rows(int d) {
+    uint32_t r = dungeon_rec(d);
+    int keys = F<uint8_t>(r);
+    if (keys > 9) keys = 9;
+    if (opt_int("Small Keys", &keys, 0, 9, 1, 0, "%d", "Small Keys held.")) F<uint8_t>(r) = (uint8_t)keys;
+    const Bit bits[] = {
+        {"Nightmare Key", r + 1, 3, 8, "Opens the boss door."},
+        {"Dungeon Map", r + 1, 1, 8, "The dungeon map."},
+        {"Compass", r + 1, 0, 8, "The compass."},
+        {"Stone Beak", r + 1, 2, 8, "Lets the owl statues give hints."},
+    };
+    bit_rows(bits, 4);
+}
+
 static void sec_keys(void) {
     static const Bit keys[] = {
         {"Tail Key", KEYITEMS, 2, 32, "Opens Tail Cave."},
@@ -266,7 +297,19 @@ static void sec_keys(void) {
         {"Face Key", KEYITEMS, 5, 32, "Opens Face Shrine."},
         {"Bird Key", KEYITEMS, 6, 32, "Opens Eagle's Tower."},
     };
+    if (!opt_counting()) {  // (the game's own pickup, as from a chest: in the dungeon Link is in)
+        bool in = current_dungeon() >= 0;
+        if (!in) opt_disable_next();
+        if (opt_button("Give small key", "One Small Key for the dungeon Link is in.")) give_item_request(48, 1, -1);
+        if (!in) opt_disable_next();
+        if (opt_button("Give Nightmare Key", "The Nightmare Key for the dungeon Link is in.")) give_item_request(49, 1, -1);
+    }
     bit_rows(keys, 5);
+    opt_choice("Dungeon", &g_dungeon, k_dungeons, 9, 0, "The dungeon the rows below are for.");
+    if (opt_counting())  // (the changed dot: every dungeon's rows)
+        for (int i = 0; i < 9; i++) dungeon_rows(i);
+    else
+        dungeon_rows(g_dungeon);
 }
 
 static void sec_trade(void) {
@@ -291,14 +334,24 @@ static void sec_companions(void) {
 
 static void sec_give(void) {
     {   // the game's own AddItem (same path as an item pickup / Inventory.AddItemByKey event)
+        enum { N_ITEMS = sizeof kItems / sizeof kItems[0] };
+        static const char *names[N_ITEMS];
+        for (int i = 0; i < N_ITEMS; i++) names[i] = kItems[i].name;
         static int item = 0, count = 1, index = -1;
-        int n = (int)(sizeof kItemNames / sizeof kItemNames[0]);
-        opt_choice("Item", &item, kItemNames, n, -1, "The item to give, through the game's own pickup.");
+        opt_choice("Item", &item, names, N_ITEMS, -1, "The item to give, through the game's own pickup.");
         opt_int("Count", &count, 1, 99, 1, 1, "%d", "How many to give.");
         opt_int("Index", &index, -1, 99, 1, -1, "%d",
                 "Which one, for items with several: Pieces of Heart, Secret Seashells, Golden Leaves etc. each have "
-                "an index.", "Any");
-        if (opt_button("Give", "Gives the item above.")) give_item_request(item, count, index);
+                "an index.\n\nFor Small Keys, Nightmare Keys, maps, compasses and Stone Beaks: the dungeon (1-8, Color "
+                "Dungeon 9). Any: the dungeon Link is in.", "Any");
+        if (opt_button("Give", "Gives the item above.")) {
+            int id = kItems[item].id, idx = index;
+            // (dungeon items: keysanity's index, 0-7 = dungeons 1-8, 9 = Color Dungeon; runtime/hle/keysanity.c)
+            bool dungeon_item = id == 44 || id == 45 || id == 47 || id == 48 || id == 49;
+            if (dungeon_item && idx >= 1 && idx <= 8) idx--;
+            else if (dungeon_item && idx > 9) idx = -1;
+            give_item_request(id, count, idx);
+        }
     }
 }
 
