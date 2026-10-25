@@ -397,7 +397,9 @@ def main():
             sys.exit(0)
     if 'mini' in soul_kinds:  # mini-boss rooms of vanilla-layout dungeons: what lies behind needs the soul
         import dungeon_gen
-        vanilla = [lv for lv in dungeon_gen.ENTRANCES if not room_plan or lv not in room_plan[0]]
+        # (Eagle's Tower keeps LAS's own logic when it isn't shuffled: no room graph for the uncollapsed tower)
+        vanilla = [lv for lv in dungeon_gen.ENTRANCES if (not room_plan or lv not in room_plan[0])
+                   and lv != 'Lv07EagleTower']
         print('mini-boss souls on vanilla dungeons:', souls_mod.vanilla_gate(
             soul_cat, romfs, logic_defs, vanilla, {n: p['room'] for n, p in pot_locs.items() if p.get('room')}),
             'conditions', flush=True)

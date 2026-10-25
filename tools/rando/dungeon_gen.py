@@ -113,8 +113,17 @@ def on_map(romfs, level, c, r):
         y0 + MAP_CELL_H <= 259 + MAP_TOL
 
 
-# rooms tied to a room that stays by level-local flags: Bottle Grotto 07G's event box sets 31 / 32 for 06G's blocks
-STAY = {'Lv02BottleGrotto_07G'}
+# rooms tied to a room that stays by level-local flags: Bottle Grotto 07G's event box sets 31 / 32 for 06G's blocks.
+# Eagle's Tower's roof route: 02F's raised walkway runs through 03F (Nightmare door) to the roof stairs in 03G, whose
+# north door (opened by the boss) leads to the instrument in 02G - kept together where they are.
+STAY = {'Lv02BottleGrotto_07G', 'Lv07EagleTower_02F', 'Lv07EagleTower_03G', 'Lv07EagleTower_02G'}
+
+# Movable stairs and holes (levels where they are tested): rooms with stairs, holes or the landing spots of holes may
+# move inside their own level - the floor links follow them (the stairs / hole names a player start of its partner
+# room, and the starts move with their rooms: _moved_starts), room_logic.py follows them as edges (stairs both ways,
+# holes one way). Such rooms never leave their level.
+LINK_LEVELS = {'Lv07EagleTower'}
+LINK_ACTORS = ('Stairs', 'Downstairs', 'Upstairs', 'Hole', 'PlayerStart')
 
 
 def _base_tex(romfs, level, entrance):
@@ -128,12 +137,19 @@ def _base_tex(romfs, level, entrance):
     return out & (set(room_textures(romfs, entrance)) | set(_tex_cache.get(level, set())))
 
 
-def movable(v):
+def movable(v, room=None):
+    """room: its name - in LINK_LEVELS its stairs / holes / landing spots don't keep it at home."""
     if any(u in STAY for u in v.get('unit', ())):
         return False
     if BOSS_TYPES & set(v.get('types', [])):
         return False
-    return not any(k in a for a in v['actors'] for k in NOT_MOVABLE)
+    skip = LINK_ACTORS if room and rooms.level_of(room) in LINK_LEVELS else ()
+    return not any(k in a for a in v['actors'] for k in NOT_MOVABLE if k not in skip)
+
+
+def link_room(cat, room):
+    """A room of a LINK_LEVELS level that only moves thanks to them (it stays in its level)."""
+    return rooms.level_of(room) in LINK_LEVELS and not movable(cat[room]) and movable(cat[room], room)
 
 
 def cell_name(level, col, row):
@@ -178,7 +194,7 @@ def anchors_of(cat, level):
     warps, the boss / mini-boss rooms, instrument, exits, NPCs...) and every multi-cell room."""
     out = set()
     for k, v in cat.items():
-        if k.startswith(level + '_') and not movable(v):
+        if k.startswith(level + '_') and not movable(v, k):
             out |= set(v['unit'])
     # multi-cell rooms stay too (the pool is single rooms; moving units is queued): a free unit's cells were
     # unfillable holes otherwise (Key Cavern 01D above the boss area; Tail Cave 05C-06E: an exact room set can't
@@ -226,8 +242,10 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
         size = len(fixed) + len(exact)
     if size is None:
         size = len(fixed) + 10
-    pool = sorted(k for k, v in cat.items() if len(v['unit']) == 1 and movable(v) and k not in fixed
-                  and k not in exclude and not k.startswith('Lv07EagleTower') and (exact is None or k in exact))
+    # (Eagle's Tower's rooms stay in the tower: their pegs and floors are its own)
+    pool = sorted(k for k, v in cat.items() if len(v['unit']) == 1 and movable(v, k) and k not in fixed
+                  and k not in exclude and (not k.startswith('Lv07EagleTower') or level == 'Lv07EagleTower')
+                  and (exact is None or k in exact))
     base_tex = _base_tex(romfs, level, entrance) if romfs else set()
     offgrid = offgrid_rooms(romfs, cat, level) if romfs else []
     level_files = {k for k in cat if k.startswith(level + '_')}  # grid rooms with a file (side-view ones excluded)
@@ -844,7 +862,8 @@ ENTRANCES = {  # each dungeon's entrance room (its AreaLevelOpen back to the ove
     'Lv01TailCave': 'Lv01TailCave_08D', 'Lv02BottleGrotto': 'Lv02BottleGrotto_08C', 'Lv03KeyCavern': 'Lv03KeyCavern_08B',
     'Lv04AnglersTunnel': 'Lv04AnglersTunnel_08D', 'Lv05CatfishsMaw': 'Lv05CatfishsMaw_08H',
     'Lv06FaceShrine': 'Lv06FaceShrine_08D', 'Lv08TurtleRock': 'Lv08TurtleRock_08D',
-    'Lv10ClothesDungeon': 'Lv10ClothesDungeon_08C'}  # (Eagle's Tower: its own rules, notes/PLAN.md)
+    'Lv10ClothesDungeon': 'Lv10ClothesDungeon_08C',
+    'Lv07EagleTower': 'Lv07EagleTower_08B'}  # (Eagle's Tower: room shuffle starts it collapsed, eagle_tower.py)
 
 
 _grid_cache = {}
@@ -1074,7 +1093,7 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
     fixed = set()
     for lv in levels:
         fixed |= set(anchors_of(cat, lv)) | {ENTRANCES[lv]}
-    pool = {k for k, v in cat.items() if len(v['unit']) == 1 and movable(v) and k not in fixed
+    pool = {k for k, v in cat.items() if len(v['unit']) == 1 and movable(v, k) and k not in fixed
             and k.split('_')[0] in levels}
     best = None
     for rnd in range(rounds):
@@ -1106,6 +1125,8 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
             # the dungeon furthest below its share of the pool, then a random empty cell nobody's doorway faces
             for lv in sorted(levels, key=lambda lv: (sum(1 for v in out[lv].values() if v in pool) - share[lv],
                                                       rng.random())):
+                if room.startswith('Lv07EagleTower') and lv != 'Lv07EagleTower':
+                    continue  # (the tower's rooms stay in the tower)
                 L = out[lv]
                 # (the level's map texture archive has a budget: the leftover room's textures must fit too)
                 tex = _base_tex(romfs, lv, ENTRANCES[lv]).union(  # (as plan(): roofs and side-view passages too)
@@ -1221,6 +1242,23 @@ def write_all(romfs, out, layouts, jumps=None):
             f.write('dungeon generator: event flags up to %d\n' % shared.next_g)
 
 
+def _moved_starts(level, layout, starts):
+    """LINK_LEVELS: a room of the level moved to another cell takes its player starts along (stairs and holes name
+    them: the partner room's stairs / hole lead to wherever it now is). {start: new (x, y, z, rot)}."""
+    if level not in LINK_LEVELS:
+        return {}
+    out = {}
+    for cell, src in layout.items():
+        if src == cell or rooms.level_of(src) != level:
+            continue
+        sx, sz = rooms.cell_origin(src)
+        tx, tz = rooms.cell_origin(cell)
+        for name, (x, y, z, rot) in starts.items():
+            if sx <= x < sx + 15 and sz <= z < sz + 12 and name not in out:
+                out[name] = (x + tx - sx, y, z + tz - sz, rot)
+    return out
+
+
 def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False, shared_flags=None, jumps=None):
     rooms_list = []
     # camera zones use the target dungeon's own zone record (environment / lighting set / music): a zone naming
@@ -1294,6 +1332,7 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
     starts = {}
     for e in fh.get(b'tagPlayerStart').data.entries:
         starts[e.name.decode()] = struct.unpack_from('<4f', e.data, 0)
+    starts.update(_moved_starts(level, layout, starts))
     # test / warp starts: one named after each cell at its centre (warp straight into any generated room)
     for cell in layout:
         x0, z0 = rooms.cell_origin(cell)

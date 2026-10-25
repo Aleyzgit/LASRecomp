@@ -338,6 +338,29 @@ def stairs_links(romfs, level, cat=None):
     return sorted(set(links))
 
 
+def hole_links(romfs, level, cat):
+    """[(grid room, grid room it drops into)]: holes (AreaHoleLower) name a player start ('<room>' or '<room>_a'). Eagle's
+    Tower starts collapsed in room shuffle seeds (eagle_tower.py): 2F 04C's stairs lead to 04G (stairs_links finds it from
+    04G's side)."""
+    import sys
+    sys.path.insert(0, os.path.join(HERE, '..', '..', 'third_party', 'LAS-Randomizer'))
+    from RandomizerCore.Tools import leb
+    d = os.path.join(romfs, 'region_common', 'level', level)
+    out = []
+    for f in sorted(os.listdir(d)):
+        room = f[:-4]
+        if not f.endswith('.leb') or room not in cat:
+            continue
+        for a in leb.Room(open(os.path.join(d, f), 'rb').read()).actors:
+            ps = [p for p in a.parameters or () if isinstance(p, bytes) and p]  # (the first one is empty)
+            if a.name.decode(errors='ignore').startswith('AreaHoleLow') and ps:
+                t = ps[0].decode(errors='ignore')
+                t = t if t in cat else t.rsplit('_', 1)[0] if t.rsplit('_', 1)[0] in cat else None
+                if t and t != room:
+                    out.append((room, t))
+    return sorted(set(out))
+
+
 def rooms_neighbour(room, side):
     import rooms
     return rooms.neighbour(room, side)
@@ -399,11 +422,24 @@ def level_graph(cat, romfs, level, layout, jump_rows, openings):
         bl = frozenset(f'LOCK|{n}|block{b}' for b in lock_blocks(romfs, room))
         if bl:
             edges[cell] = [(t, r | bl) for t, r in edges[cell]]
+    import dungeon_gen
+    where = {room: cell for cell, room in layout.items()}  # (LINK_LEVELS: stairs / hole rooms may have moved)
     for a, b in stairs_links(romfs, level, cat):
         ca, cb = a.rsplit('_', 1)[1], b.rsplit('_', 1)[1]
-        if layout.get(ca) == a and layout.get(cb) == b:  # (stairs rooms stay home)
+        if level in dungeon_gen.LINK_LEVELS:
+            ca, cb = where.get(a), where.get(b)
+            # (Eagle's Tower 04G: the stairs arrive boxed in by orange pegs - set them with 04C's crystal switch)
+            req = frozenset({'break-crystal'}) if {a, b} == {'Lv07EagleTower_04C', 'Lv07EagleTower_04G'} else frozenset()
+            if ca and cb:
+                edges[ca].append((cb, req))
+                edges[cb].append((ca, req))
+        elif layout.get(ca) == a and layout.get(cb) == b:  # (stairs rooms stay home)
             edges[ca].append((cb, frozenset()))
             edges[cb].append((ca, frozenset()))
+    if level in dungeon_gen.LINK_LEVELS:  # holes: one way down, into the room holding the landing spot
+        for a, b in hole_links(romfs, level, cat):
+            if where.get(a) and where.get(b):
+                edges[where[a]].append((where[b], frozenset()))
     for cell, room in layout.items():  # leaving a mini-boss room (not into its own unit): its soul (EXIT_REQ)
         if EXIT_REQ.get(room):
             edges[cell] = [(t, r if EXIT_REQ.get(layout.get(t)) == EXIT_REQ[room] else r | EXIT_REQ[room])
@@ -710,6 +746,17 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             else:
                 if len(ks) < total + dungeon_items(settings):  # (room for the Nightmare Key, Map, Compass, Beak too)
                     settings['room-logic-unfillable'] = f'{level}: {len(ks)} checks for {total + dungeon_items(settings)} dungeon items'
+    # Eagle's Tower (collapsed, eagle_tower.py): the boss is on the roof, up the stairs at the end of 02F's raised
+    # walkway (hookshot / rooster) - 02F has other doorways, so the room graph would let Link past the Nightmare door.
+    # Its checks need 03F (the Nightmare door's room: 02F / 03F / 03G / 02G stay together, dungeon_gen.STAY) and the key.
+    tower = cell_expr.get(('Lv07EagleTower', '03F')) if 'Lv07EagleTower' in layouts else None
+    if tower:
+        roof = f'({tower}) & nightmare-key-D7 & (hookshot | (rooster & bad-pets))'
+        for k in ('D7-instrument', 'D7-eagle'):
+            if k in logic_defs:
+                logic_defs[k]['condition-basic'] = f'{roof} & hookshot & kill-evil-eagle'
+                for lv_ in ('advanced', 'glitched', 'hell'):
+                    logic_defs[k].pop('condition-' + lv_, None)
     return (f'{len(layouts)} dungeons, {rewritten} checks rewritten, {unused} in unused rooms (excluded), '
             f'{fallback} without a room (vanilla condition), locks {dict(sorted(lock_count.items()))}')
 
