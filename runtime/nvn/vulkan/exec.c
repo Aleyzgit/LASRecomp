@@ -2839,7 +2839,7 @@ static VkSpan rscale_dedupe(int sg, const float rs[66][4], int nt) {
 #define SNAP_HALF (8ull << 20)
 #define SNAP_RING (2 * SNAP_HALF)
 enum { RS_PROBE, RS_COPY, RS_PLACE };
-typedef struct { uint64_t addr, size, copy, pristine, hash, frame, seg_hash[3]; uint32_t gen, level, wgen, looks; uint8_t mode, gpu_parts; bool cs_bound, draw_bound; } RangeState;  // (wgen, seg_hash, looks, gpu_parts: watch_check; pristine: rs_copy_make)
+typedef struct { uint64_t addr, size, copy, pristine, hash, frame, seg_hash[3]; uint32_t gen, level, wgen, looks; uint8_t mode, gpu_parts, wclass; bool cs_bound, draw_bound; } RangeState;  // (wgen, seg_hash, looks, gpu_parts, wclass: watch_check; pristine: rs_copy_make)
 static RangeState rs_tab[512];
 static uint64_t rs_store_frame[512];  // (watch: the frame of the previous CPU write seen on a range's own pages)
 static int nrs;
@@ -3051,12 +3051,99 @@ static bool watch_on(void) {
 // A store on a shared page counts from a range's third look on, so the GPU's first writes (two frames at most with
 // the overlap) are seen first. Learning starts again when a range is bound after more than 8 frames without or on a
 // new level (snap_storage: the heap may hold something else there now) and stops after 600 looks.
+// Which storage slots each compute program stores into, as the GPU reports it (#355): the GLSL compute path looks up
+// every store's address in the dispatch's table of bound ranges (gfast, translate.c gfindw) and stamps the range it
+// lands in; gfast_flags reads the stamps back once the dispatch is done and notes them here, per program code address
+// (a program's slots keep their roles). A slot is written once a dispatch was seen storing into it, read once 8
+// dispatches covering it stored nothing there; a program without stores (no STG) writes none. Until then: unknown,
+// and the page heuristic in watch_check decides. The translator alone can't tell (store pointers are formed once and
+// reused across loops and indirect branches, some loaded from memory).
+#define CSW_MAX 128
+typedef struct { uint64_t code; uint16_t written; uint8_t seen[16]; } CsWrites;
+static CsWrites csw_tab[CSW_MAX];
+static int ncsw;
+static CsWrites *csw_of(uint64_t code, bool add) {
+    if (!code) return NULL;
+    for (int i = 0; i < ncsw; i++) if (csw_tab[i].code == code) return &csw_tab[i];
+    if (!add || ncsw == CSW_MAX) return NULL;
+    CsWrites *w = &csw_tab[ncsw++];
+    memset(w, 0, sizeof *w);
+    w->code = code;
+    return w;
+}
+// One dispatch's report: the slots its table covered and the ones it stored into
+static void csw_note(uint64_t code, uint16_t covered, uint16_t written) {
+    CsWrites *w = csw_of(code, true);
+    if (!w) return;
+    uint16_t fresh = written & ~w->written;
+    w->written |= written;
+    for (int i = 0; i < 16; i++) if ((covered >> i & 1) && w->seen[i] < 255) w->seen[i]++;
+    if (fresh) {
+        static int logged;
+        if (logged++ < 64) LOG("[snap] compute %llx stores into storage slots %#x (the GPU's report)\n", (unsigned long long)code, w->written);
+    }
+}
+// 1: the program stores into the slot, 0: it doesn't, -1: not known yet
+static int cs_slot_class(uint64_t code, bool stores, int slot) {
+    if (!stores) return 0;
+    const CsWrites *w = csw_of(code, false);
+    if (!w) return -1;
+    if (w->written >> slot & 1) return 1;
+    return w->seen[slot] >= 8 ? 0 : -1;
+}
+static int snap_slot_class = -1;  // (snap_apply: the class of the compute slot being bound; -1 unknown)
+static bool st_cs_stores;         // (the dispatch being recorded: its program stores - STG - at all)
+// wclass bits of a range: 1 bound in a slot its program stores into, 2 in a slot it doesn't, 4 in a slot not known yet
+static uint8_t wclass_bit(int cls) { return cls == 1 ? 1 : cls == 0 ? 2 : 4; }
+
+// A watched range under 256 bytes (a parameter block) on the page at plo, other than e (watch_check)
+static bool watch_small_mate(const RangeState *e, uint64_t plo) {
+    for (int k = 0; k < nrs; k++) {
+        const RangeState *o = &rs_tab[k];
+        if (o != e && o->size < 256 && o->cs_bound && o->addr < plo + WATCH_PAGE && plo < o->addr + o->size) return true;
+    }
+    return false;
+}
+// A range a program stores into (the GPU's report; wclass 1) is the GPU's output: a store on a page it shares with other
+// memory is a neighbour's - BowWow's outputs, eyes included, beside per-frame CPU data (#355). It is the CPU's when it
+// lands on a page wholly inside the range or inside its allocation - the watched ranges of 256 bytes or more around it,
+// less than 256 bytes apart, compute-bound: the light / exposure lists, one allocation the CPU memcpys (its two big
+// lists' pages) while the exposure program stores into the small ones, which share their pages with each other.
+// 1: a CPU write since `since`, 0: none seen.
+static int watch_cpu_in_allocation(const RangeState *e, uint32_t since) {
+    uint64_t lo = e->addr, hi = e->addr + e->size;
+    for (bool grew = true; grew;) {
+        grew = false;
+        for (int k = 0; k < nrs; k++) {
+            const RangeState *o = &rs_tab[k];
+            if (o->size < 256 || !o->cs_bound || o->addr >= hi + 256 || o->addr + o->size + 256 <= lo) continue;
+            if (o->addr < lo) lo = o->addr, grew = true;
+            if (o->addr + o->size > hi) hi = o->addr + o->size, grew = true;
+        }
+    }
+    for (int k = -1; k < nrs; k++) {  // (e itself, then the allocation's other ranges: a page wholly inside one of them)
+        const RangeState *o = k < 0 ? e : &rs_tab[k];
+        if (k >= 0 && (o == e || o->size < 256 || !o->cs_bound || o->addr < lo || o->addr + o->size > hi)) continue;
+        uint64_t p1 = (o->addr + WATCH_PAGE - 1) & ~(WATCH_PAGE - 1), pe = (o->addr + o->size) & ~(WATCH_PAGE - 1);
+        uint32_t g;
+        if (p1 < pe && pages_cpu_written(p1, pe - p1, since, &g) == 1) return 1;
+    }
+    return 0;
+}
 static int pages_seen_written(uint64_t addr, uint64_t size, uint32_t since);  // (the page tables below: no OS query)
 static int watch_check(RangeState *e) {
     uint32_t since = e->wgen, now = e->wgen;
     int w = pages_cpu_written(e->addr, e->size, since, &now);  // (stamps every page of the range: the parts below read the stamps)
     e->wgen = now;
-    if (w < 0 || e->size < 256) return w;
+    if (w < 0) return w;
+    if (e->wclass & 1) return w == 1 ? watch_cpu_in_allocation(e, since) : 0;  // (a program stores into it: the GPU said so)
+    if (e->size < 256) return w;
+    if (e->wclass == 2) {  // (only ever bound where its programs don't store: an input - every dirty page counts, e69a0df)
+        if (w != 1) return 0;
+        for (uint64_t plo = e->addr & ~(WATCH_PAGE - 1); plo < e->addr + e->size; plo += WATCH_PAGE)
+            if (!watch_small_mate(e, plo) && pages_seen_written(plo, WATCH_PAGE, since) == 1) return 1;
+        return 0;
+    }
     uint64_t end = e->addr + e->size, p1 = (e->addr + WATCH_PAGE - 1) & ~(WATCH_PAGE - 1), pe = end & ~(WATCH_PAGE - 1);
     uint64_t lo[3] = {e->addr, p1, pe >= p1 ? pe : end}, hi[3] = {p1 < end ? p1 : end, p1 < pe ? pe : p1, end};  // first page, inner pages, last page
     if (e->gpu_parts != 7 && e->looks < 600) {
@@ -3084,12 +3171,7 @@ static int watch_check(RangeState *e) {
         bool inner = lo[1] < hi[1];
         if ((e->gpu_parts >> i & 1) || (e->gpu_parts & 2) || (!inner && (e->gpu_parts >> (2 - i) & 1))) continue;  // (the GPU's: a store there is a neighbour's)
         uint64_t plo = lo[i] & ~(WATCH_PAGE - 1);
-        bool small_mate = false;
-        for (int k = 0; k < nrs && !small_mate; k++) {
-            const RangeState *o = &rs_tab[k];
-            if (o != e && o->size < 256 && o->cs_bound && o->addr < plo + WATCH_PAGE && plo < o->addr + o->size) small_mate = true;
-        }
-        if (!small_mate && pages_seen_written(plo, WATCH_PAGE, since) == 1) return 1;
+        if (!watch_small_mate(e, plo) && pages_seen_written(plo, WATCH_PAGE, since) == 1) return 1;
     }
     return 0;  // (only pages shared with small parameter blocks, or GPU-written parts' neighbours, were written)
 }
@@ -3143,6 +3225,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
         rs_store_frame[e - rs_tab] = 0;
         e->addr = addr, e->size = size, e->mode = RS_PROBE, e->level = rs_level_gen, e->frame = f;
         e->cs_bound = cs_slot;
+        if (cs_slot) e->wclass = wclass_bit(snap_slot_class);
         if (!cs_slot) e->mode = RS_COPY, e->draw_bound = true;  // a draw's storage read: copied for good (see above)
         else if (watch_on()) {  // a compute-only range: in place; the first CPU write its pages' tracking shows makes it a copy
             e->mode = RS_PLACE;
@@ -3163,6 +3246,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     }
     if (cs_slot) e->cs_bound = true; else e->draw_bound = true;
     if (e->frame == f) {  // (bound again this frame)
+        if (cs_slot) e->wclass |= wclass_bit(snap_slot_class);
         if (e->mode == RS_PLACE && cs_slot) return addr;
         if (!cs_slot && e->mode != RS_COPY) {  // (a draw's storage read of a range probed / settled in place this frame: copied for good)
             e->mode = RS_COPY;
@@ -3178,7 +3262,8 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
     // copied (a draw's storage read, a CPU store seen), a watched one just gets its pages armed again
     bool again = !watch_on() && e->mode == RS_PLACE && (e->level != rs_level_gen || f - e->frame > 600);
     if (e->mode == RS_PLACE && (e->level != rs_level_gen || f - e->frame > 8))  // (the watch's learning, again: the heap there may be reused)
-        e->gpu_parts = 0, e->looks = 0;
+        e->gpu_parts = 0, e->looks = 0, e->wclass = 0;
+    if (cs_slot) e->wclass |= wclass_bit(snap_slot_class);  // (how its program uses the slot: the GPU's report)
     e->level = rs_level_gen;
     e->frame = f;
     if (!cs_slot && e->mode != RS_COPY) {  // a draw reads it as storage: copied for good (see above)
@@ -3287,7 +3372,10 @@ static void snap_apply(int stage, uint32_t read_mask) {
     memcpy(sb_eff[stage], st.sbuf[stage], sizeof sb_eff[stage]);
     for (int i = 0; i < 16; i++) {
         Range *r = &sb_eff[stage][i];
-        if (r->addr && ((read_mask >> i) & 1)) r->addr = snap_storage(r->addr, r->size, stage == 5);
+        if (!r->addr || !((read_mask >> i) & 1)) continue;
+        snap_slot_class = stage == 5 ? cs_slot_class(st.program->stages[5].code_addr, st_cs_stores, i) : -1;
+        r->addr = snap_storage(r->addr, r->size, stage == 5);
+        snap_slot_class = -1;
     }
 }
 
@@ -4243,6 +4331,35 @@ static VmaAllocation gfast_mem;
 static uint32_t gmap_tab[(GMAP_MAX + 1) * 4];  // this dispatch's table (stage_set copies it into binding 20)
 static VkBufferCopy gfast_cp[GMAP_MAX];       // its copies heap -> gfast_buf (reversed after a storing dispatch)
 static int gfast_n;
+static uint16_t gfast_slots[GMAP_MAX];        // the storage slots each table range holds
+static VkBufferCopy gfast_back[GMAP_MAX];     // each range's exact bytes, gfast_buf -> heap (the copy back)
+static uint32_t gfast_stamp;                  // this dispatch's stamp (gmap[GMAP_MAX].y: translate.c gfindw)
+
+// The GPU's report of the table ranges each storing dispatch stored into (#355): the stamps gfindw leaves at
+// GFAST_FLAG_WORD are copied after the dispatch into a host-visible ring, read once the submission is done
+// (gfast_flags_poll) and noted per program and slot (csw_note: snap_storage's classes; gfast_finish's copy back).
+#define GFR_N 256
+static VkBuffer gfr_buf;
+static VmaAllocation gfr_mem;
+static uint32_t *gfr_ptr;
+static struct { uint64_t seq, code; uint32_t stamp; uint16_t slots[GMAP_MAX]; uint8_t n; bool busy; } gfr[GFR_N];
+static int gfr_next;
+static void gfast_flags_poll(void) {
+    if (!gfr_ptr) return;
+    uint64_t done = vk_completed_seq();
+    bool inv = false;
+    for (int r = 0; r < GFR_N; r++) {
+        if (!gfr[r].busy || gfr[r].seq > done) continue;
+        if (!inv) { vmaInvalidateAllocation(g_vk.vma, gfr_mem, 0, VK_WHOLE_SIZE); inv = true; }
+        uint16_t covered = 0, written = 0;
+        for (int i = 0; i < gfr[r].n; i++) {
+            covered |= gfr[r].slots[i];
+            if (gfr_ptr[r * GMAP_MAX + i] == gfr[r].stamp) written |= gfr[r].slots[i];
+        }
+        csw_note(gfr[r].code, covered, written);
+        gfr[r].busy = false;
+    }
+}
 
 static VkDescriptorBufferInfo gfast_info(void) {
     if (!gfast_buf) {
@@ -4263,34 +4380,47 @@ static void gfast_prepare(VkCommandBuffer cb) {
     if (!gc_lazy) gmem_info();  // (the heap import, made on first use)
     gfast_info();
     if (!on || (!gmem_buf && !gc_lazy)) return;
-    struct { uint64_t lo, hi; } r[16];
+    gfast_flags_poll();
+    struct { uint64_t lo, hi, xlo, xhi; uint16_t slots; } r[16];
     int n = 0;
     for (int i = 0; i < 16; i++) {  // heap offsets of the bound storage buffers, 256-aligned
         uint64_t a = sbufs(5)[i].addr, sz = sbufs(5)[i].size;  // (overlap: a snapshotted range's copy is what gets copied)
         if (!a || !sz || a < HEAP_BASE || !gmem_covers(a - HEAP_BASE, sz)) continue;
         uint64_t lo = (a - HEAP_BASE) & ~255ull, hi = (a - HEAP_BASE + sz + 255) & ~255ull, top = gc_lazy ? gmem_heap_size() : gmem_size;
         if (hi > top) hi = top;
+        uint64_t xhi = a - HEAP_BASE + sz < top ? a - HEAP_BASE + sz : top;
         int k = n++;
         while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }  // (insertion sort by start)
-        r[k].lo = lo; r[k].hi = hi;
+        r[k].lo = lo; r[k].hi = hi; r[k].xlo = a - HEAP_BASE; r[k].xhi = xhi; r[k].slots = (uint16_t)(1u << i);
     }
+    // Only overlapping ranges share a table entry: each entry's stores are reported per slot, and the copy back covers
+    // the bound bytes alone - not the memory between buffers, which the CPU may be writing meanwhile (one frame ahead
+    // with the overlap; merged gaps of up to 4 KB were copied back over its stores).
     int m = 0;
-    for (int i = 0; i < n; i++) {  // merge overlapping / nearby ranges (a small gap costs less than another table entry)
-        if (m && r[i].lo <= r[m - 1].hi + 4096) { if (r[i].hi > r[m - 1].hi) r[m - 1].hi = r[i].hi; }
-        else r[m++] = r[i];
+    for (int i = 0; i < n; i++) {
+        if (m && r[i].lo < r[m - 1].hi) {
+            if (r[i].hi > r[m - 1].hi) r[m - 1].hi = r[i].hi;
+            if (r[i].xlo < r[m - 1].xlo) r[m - 1].xlo = r[i].xlo;
+            if (r[i].xhi > r[m - 1].xhi) r[m - 1].xhi = r[i].xhi;
+            r[m - 1].slots |= r[i].slots;
+        } else r[m++] = r[i];
     }
     VkBufferCopy cp[16];
     uint64_t off = 0;
     for (int i = 0; i < m; i++) {
         uint64_t len = r[i].hi - r[i].lo;
-        if (m > GMAP_MAX || off + len > GFAST_SIZE) return;  // (too much: the heap as before)
+        if (m > GMAP_MAX || off + len > (uint64_t)GFAST_FLAG_WORD * 4) return;  // (too much: the heap as before; the flags sit above)
         cp[i] = (VkBufferCopy){r[i].lo, off, len};
+        gfast_back[i] = (VkBufferCopy){off + (r[i].xlo - r[i].lo), r[i].xlo, r[i].xhi - r[i].xlo};
+        gfast_slots[i] = r[i].slots;
         gmap_tab[i * 4 + 0] = (uint32_t)r[i].lo;
         gmap_tab[i * 4 + 1] = (uint32_t)len;
         gmap_tab[i * 4 + 2] = (uint32_t)(off >> 2);
         off += (len + 255) & ~255ull;
     }
     if (!m) return;
+    if (!++gfast_stamp) gfast_stamp = 1;
+    gmap_tab[GMAP_MAX * 4 + 1] = gfast_stamp;
     if (getenv("LARECOMP_LOG_GFAST")) {  // (debug) =<shader code address hex>: that shader's first tables
         static int nlog;
         if (st.program->stages[5].code_addr == strtoull(getenv("LARECOMP_LOG_GFAST"), NULL, 16) && nlog++ < 40) {
@@ -4307,12 +4437,27 @@ static void gfast_prepare(VkCommandBuffer cb) {
 }
 
 // After a storing dispatch: its ranges back to the heap (before anything else reads them: draws, the CPU after the fence).
+// The stamps go to the report ring first, then each range's bound bytes back to the heap.
 static void gfast_finish(VkCommandBuffer cb) {
     if (!gfast_n) return;
-    VkBufferCopy back[GMAP_MAX];
-    for (int i = 0; i < gfast_n; i++) back[i] = (VkBufferCopy){gfast_cp[i].dstOffset, gfast_cp[i].srcOffset, gfast_cp[i].size};
     vk_full_barrier(cb);
-    gmem_copy(cb, gfast_buf, back, gfast_n, true);
+    uint64_t code = st.program->stages[5].code_addr;
+    if (!gfr_buf) {
+        VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = GFR_N * GMAP_MAX * 4, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
+        VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
+                                      .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT};
+        VmaAllocationInfo info;
+        if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &gfr_buf, &gfr_mem, &info) == VK_SUCCESS) gfr_ptr = info.pMappedData;
+    }
+    int rr = gfr_next;
+    if (gfr_ptr && code && !gfr[rr].busy) {  // (the ring slot still pending: no report from this dispatch)
+        gfr_next = (gfr_next + 1) % GFR_N;
+        VkBufferCopy fc = {(uint64_t)GFAST_FLAG_WORD * 4, (uint64_t)rr * GMAP_MAX * 4, (uint64_t)gfast_n * 4};
+        rec_CmdCopyBuffer(cb, gfast_buf, gfr_buf, 1, &fc);
+        gfr[rr].seq = vk_pending_seq(), gfr[rr].code = code, gfr[rr].stamp = gfast_stamp, gfr[rr].n = (uint8_t)gfast_n, gfr[rr].busy = true;
+        memcpy(gfr[rr].slots, gfast_slots, sizeof gfast_slots);
+    }
+    gmem_copy(cb, gfast_buf, gfast_back, gfast_n, true);  // (every range: a slot written only now and then is never skipped)
     vk_full_barrier(cb);
     gfast_n = 0;
 }
@@ -5203,6 +5348,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             LOG("\n");
         }
     }
+    st_cs_stores = cp->si->uses_gmem_store;
     snap_apply(5, 0xFFFF);  // (overlap) every bound slot: the probe / copy decision per range, before gfast and the sets read the table
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();

@@ -91,7 +91,10 @@ typedef struct {
 #define GMAP_BUFFER_INDEX 20
 #define GFAST_BUFFER_INDEX 21
 #define GMAP_MAX 16  // ranges in the table (GMap { uvec4 gmap[GMAP_MAX + 1]; }: [i] = addr lo, addr hi, size, word offset;
-                     // [GMAP_MAX].x = count)
+                     // [GMAP_MAX].x = count, .y = the dispatch's stamp)
+// (GLSL compute) A store into table range i also writes the dispatch's stamp to GFast word GFAST_FLAG_WORD + i: the
+// ranges a dispatch stored into, read back by exec.c (gfast_flags) - which storage slots each program writes.
+#define GFAST_FLAG_WORD ((32u << 20) / 4 - 64u)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // (GLSL / Vulkan) The heap reaches shaders in chunks of 1 << maxwell_gmem_chunk_shift bytes in two cases:
 // - windows of one import where a storage buffer can't span the heap (issue #8) and lazy chunks aren't possible (or

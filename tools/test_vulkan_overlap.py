@@ -387,7 +387,64 @@ static void watch_tests(void) {
         got = snap_storage(V, 0x3000, true);
     }
     assert(rs_tab[vi].gpu_parts == 1 && got != V && rs_tab[vi].mode == RS_COPY);
-    puts("PASS: write watch - in place + tracked, CPU writes that keep coming make a copy for good (a single one doesn't), no demotion on level / idle, GPU writes ignored, a shared page marks both, a page shared with a small parameter block doesn't, nor a store beside a GPU output on its shared pages (#355, both Linux layouts), learning: a store between look and hash, reuse after a gap / level, per part, the lists at any page offset, a prior write is consumed, draw reads copy, other lookers");
+    // W17 (#355 round 4): the GPU's report of which slots each program stores into (gfast flags) decides before the
+    //     page heuristic. Learning: a program without stores writes nothing; a slot is written once a dispatch stored
+    //     into it, read once 8 reported dispatches covering it didn't; unknown before.
+    const uint64_t CS1 = 0x72a8da0000ull, CS2 = 0x72e8f33e00ull;
+    assert(cs_slot_class(CS1, false, 6) == 0 && cs_slot_class(CS1, true, 6) == -1);
+    csw_note(CS1, 0x00EF, 0x00C0);  // (slots 0-3, 5, 6, 7 covered; 6 and 7 stored into)
+    assert(cs_slot_class(CS1, true, 6) == 1 && cs_slot_class(CS1, true, 7) == 1 && cs_slot_class(CS1, true, 0) == -1);
+    for (int i = 0; i < 7; i++) csw_note(CS1, 0x00EF, 0x00C0);
+    assert(cs_slot_class(CS1, true, 0) == 0 && cs_slot_class(CS1, true, 5) == 0 && cs_slot_class(CS1, true, 4) == -1);
+    for (int i = 0; i < 8; i++) csw_note(CS2, 0x00EF, 0x0087);  // (64-byte slots 0, 1, 2 and the 1552-byte 7 stored; 3 the palette, 5, 6 read)
+    csw_note(CS2, 0x00EF, 0x00C7);                             // (slot 6 stored into once, later: written from then on)
+    assert(cs_slot_class(CS2, true, 3) == 0 && cs_slot_class(CS2, true, 6) == 1 && cs_slot_class(CS2, true, 0) == 1);
+    // Outputs (written slots) beside CPU-rewritten memory on every page they have - the case no page heuristic can
+    // read: small outputs (64 / 160 bytes, an eye's) and a 3104-byte one, with no GPU byte change in the test either.
+    // None is copied. A palette in a read slot on such a page is copied (no new-range delay: the class is known).
+    uint64_t Y = HEAP_BASE + 0x700000;
+    const uint64_t so[3] = {Y + 0x740, Y + 0x2800, Y + 0x4500}, sz[3] = {64, 160, 3104};
+    uint64_t PAL = Y + 0x6400;
+    frame++;
+    snap_slot_class = 1;
+    for (int i = 0; i < 3; i++) assert(snap_storage(so[i], sz[i], true) == so[i]);
+    snap_slot_class = 0;
+    assert(snap_storage(PAL, 3104, true) == PAL);
+    for (int f = 0; f < 6; f++) {
+        for (uint64_t pg = Y; pg < Y + 0x8000; pg += 4096) cpu_wrote(pg + 0x10);  // (every page of the block, outside the ranges)
+        cpu_wrote(PAL + 0x40);
+        frame++;
+        snap_slot_class = 1;
+        for (int i = 0; i < 3; i++) assert(snap_storage(so[i], sz[i], true) == so[i]);
+        snap_slot_class = 0;
+        got = snap_storage(PAL, 3104, true);
+        if (f >= 1) assert(got != PAL);  // (writes in two looks: copied)
+    }
+    snap_slot_class = -1;
+    // A written range the CPU stores into on a page wholly its own is the CPU's too: copied (with a second store)
+    uint64_t WO = HEAP_BASE + 0x720000 + 0x700;
+    frame++;
+    snap_slot_class = 1;
+    assert(snap_storage(WO, 22048, true) == WO);
+    for (int f = 0; f < 2; f++) { cpu_wrote(WO + 0x1000); frame++; got = snap_storage(WO, 22048, true); }
+    assert(got != WO);
+    // The light / exposure lists with the exposure program storing into the small lists (written slots) and the big
+    // ones read: the CPU's memcpy of the allocation copies all four, at every page offset
+    for (uint64_t off = 0; off < 0x1000; off += 0x300) {
+        uint64_t L = HEAP_BASE + 0x740000 + off / 0x300 * 0x20000 + off, R[4] = {L, L + 0x8000, L + 0x10000, L + 0x10800};
+        const uint64_t Z[4] = {32640, 32640, 2040, 2040};
+        frame++;
+        for (int i = 0; i < 4; i++) { snap_slot_class = i < 2 ? 0 : 1; assert(snap_storage(R[i], Z[i], true) == R[i]); }
+        for (int f = 0; f < 2; f++) {
+            for (uint64_t pg = L; pg < L + 0x10800 + 2040; pg += 1024) cpu_wrote(pg);
+            gpu_wrote(R[2], 2040);
+            frame++;
+            for (int i = 0; i < 4; i++) { snap_slot_class = i < 2 ? 0 : 1; snap_storage(R[i], Z[i], true); }
+        }
+        for (int i = 0; i < 4; i++) { snap_slot_class = i < 2 ? 0 : 1; assert(snap_storage(R[i], Z[i], true) != R[i]); }
+    }
+    snap_slot_class = -1;
+    puts("PASS: write watch - in place + tracked, CPU writes that keep coming make a copy for good (a single one doesn't), no demotion on level / idle, GPU writes ignored, a shared page marks both, a page shared with a small parameter block doesn't, nor a store beside a GPU output on its shared pages (#355, both Linux layouts), learning: a store between look and hash, reuse after a gap / level, per part, the GPU's slot report (outputs never copied by neighbours' stores, inputs at once, the lists), the lists at any page offset, a prior write is consumed, draw reads copy, other lookers");
 }
 
 int main(int argc, char **argv) {
