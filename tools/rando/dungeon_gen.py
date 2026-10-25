@@ -178,6 +178,20 @@ def _partners(romfs, level):
     return out
 
 
+@functools.lru_cache(None)
+def level_cells(romfs, level):
+    """{area name: camera zone id} of the level's own (vanilla) level file."""
+    fh = fixedhash.FixedHash(open(os.path.join(romfs, 'region_common', 'level', level, level + '.lvb'), 'rb').read())
+    names = [e.name.decode() for e in fh.get(b'area').data.entries]
+    out = {}
+    for z in fh.get(b'zone').data.entries:
+        n = z.data[0x9c + 6]
+        for i in z.data[0x9c + 7:0x9c + 7 + n]:
+            if i < len(names):
+                out[names[i]] = struct.unpack_from('<I', z.data, 0)[0]
+    return out
+
+
 def dead_shadow(level):
     """Cells next to (or diagonal to) a rooms.DEAD room: its own darkness lid still reaches over the cells it had
     empty around it and blacked out half of a room placed there (play test, DevEaglePlay: Eagle's Tower 04G moved to
@@ -351,9 +365,13 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
 
     near_dead = dead_shadow(level)
 
+    # LINK_LEVELS keep their own level file (write: a rebuilt one lost Eagle's Tower's shared crystal / peg state
+    # across floors - play test): only cells it has
+    own_cells = set(level_cells(romfs, level)) if romfs and level in LINK_LEVELS else None
+
     def inside(c, r):
         return 0 <= c < cols and 1 <= r <= rows and (c, r) not in taken and (c, r) not in near_dead and \
-            (not romfs or on_map(romfs, level, c, r))
+            (own_cells is None or names[(c, r)] in own_cells) and (not romfs or on_map(romfs, level, c, r))
 
     for attempt in range(tries):
         rng = random.Random(f'{seed}-{level}-{attempt}')
@@ -1225,7 +1243,8 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                 reserved = {cell_pos(n) for n in offgrid_rooms(romfs, cat, lv) if re.match(r'.*_\d\d[A-Z]$', n)}
                 free_cells = [(c, r) for c in range(grid_size(lv)[0]) for r in range(1, grid_size(lv)[1] + 1)
                               if (c, r) not in taken and (c, r) not in reserved and (c, r) not in dead_shadow(lv)
-                              and on_map(romfs, lv, c, r) and on_map(romfs, lv, c, r, room)]
+                              and on_map(romfs, lv, c, r) and on_map(romfs, lv, c, r, room)
+                              and (lv not in LINK_LEVELS or cell_name(lv, c, r) in level_cells(romfs, lv))]
                 rng.shuffle(free_cells)
                 for c, r in free_cells:
                     ok = True
@@ -1378,6 +1397,8 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
     # the wrong room / left enemies asleep)
     first_zone = max([300] + [z + 1 for z in kept_zones if z < 0x10000])
     zone_ids = {cell: first_zone + i for i, cell in enumerate(sorted(layout))}
+    if level in LINK_LEVELS:  # (its own level file, kept: each cell's own camera zone)
+        zone_ids = {cell: level_cells(romfs, level)[cell] for cell in layout}
     flags = FlagMap(reserved_local=reserved, keep_global=kept_global)
     cat = json.load(open(os.path.join(HERE, 'room_catalog.json')))
     if shared_flags is not None:  # several dungeons in one seed: global flags continue across them
@@ -1429,7 +1450,15 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
     for cell in layout:
         x0, z0 = rooms.cell_origin(cell)
         starts.setdefault(cell, (x0 + 7.5, 0.0, z0 + 6.0, 0.0))
-    lvb = level_builder.build(base, rooms_list, starts=None if all_starts else starts, static=False)
+    if level in LINK_LEVELS:
+        # its own level file with only the player starts (moved rooms took theirs along) and the map objects
+        # changed: rebuilt (areas, tree, zones), Eagle's Tower's crystal switch state no longer carried over from floor
+        # to floor - 04C's stairs reset the pegs (play test; vanilla file + new starts: fine). Its rooms only take
+        # cells it has (plan: own_cells), in their own camera zones (zone_ids).
+        lvb = level_builder.build(base, rooms_list, starts=None if all_starts else starts, static=False,
+                                  keep_level=True)
+    else:
+        lvb = level_builder.build(base, rooms_list, starts=None if all_starts else starts, static=False)
     p = os.path.join(out, 'region_common', 'level', level, level + '.lvb')
     os.makedirs(os.path.dirname(p), exist_ok=True)
     open(p, 'wb').write(lvb)

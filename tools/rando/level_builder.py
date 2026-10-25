@@ -73,8 +73,12 @@ def _bvh(items):
     return order, nodes
 
 
-def build(base, rooms, starts=None, static=True, keep_tree=False):
+def build(base, rooms, starts=None, static=True, keep_tree=False, keep_level=False):
+    """keep_level: the base level's areas, tree and zones as they are (every room in a cell it has, in its zone);
+    only the player starts and map objects follow `starts` / `static`."""
     fh = fixedhash.FixedHash(base)
+    if keep_level:
+        return _starts_only(fh, starts, static)
     area_e = fh.get(b'area').data
     node_e = fh.get(b'node').data
     zone_e = fh.get(b'zone').data
@@ -203,6 +207,10 @@ def build(base, rooms, starts=None, static=True, keep_tree=False):
                     struct.pack_into('<f', d, off, -0.5)
         e.data = bytes(d)
 
+    return _starts_only(fh, starts, static)
+
+
+def _starts_only(fh, starts, static):
     if starts is not None:
         st = fh.get(b'tagPlayerStart').data
         tmpl = st.entries[0]
