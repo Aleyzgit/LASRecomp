@@ -198,8 +198,17 @@ def pick(logic_defs, placements, settings, check, out_dir, ent, romfs, layouts=N
             bosses[a] = dict({'kind': 'boss', 'dungeon': a, 'says': says, 'loc': loc}, **({'item': it} if says == 'item' else {}))
     named = {h['loc'] for h in quests + list(bosses.values()) if h.get('says') == 'item'}
     goods = [g for g in goods if g['loc'] not in named]  # (one item, one hint)
-    for lst in (barren, needed, quests, goods):
+    for lst in (barren, needed, quests):
         rng.shuffle(lst)
+    by_item = {}  # (good items: one of each kind in turn, not four Heart Containers in a row)
+    for g in goods:
+        by_item.setdefault(g['item'], []).append(g)
+    kinds = sorted(by_item)
+    rng.shuffle(kinds)
+    for k in kinds:
+        rng.shuffle(by_item[k])
+    goods = [g for i in range(max(map(len, by_item.values()), default=0)) for k in kinds if i < len(by_item[k])
+             for g in [by_item[k][i]]]
     pools = {'barren': [{'kind': 'barren', 'area': a} for a in barren],
              'needed': [{'kind': 'needed', 'area': a} for a in needed][:3],
              'quest': quests, 'item': goods}
