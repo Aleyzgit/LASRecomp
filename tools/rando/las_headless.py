@@ -266,8 +266,9 @@ def main():
     if settings.get('rocks'):  # rocksanity: every overworld rock hides an item (tools/rando/rocks.py)
         import rocks as rocks_mod
         import random as _rnd
-        rock_locs = rocks_mod.add_to_logic(rocks_mod.scan(romfs, leb, classic_d2=settings.get('classic-d2')), logic_defs,
-                                           item_defs, settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-rocks"))
+        rocks_found = rocks_mod.scan(romfs, leb, settings.get('classic-d2'), settings.get('open-mabe'))
+        rock_locs = rocks_mod.add_to_logic(rocks_found, logic_defs, item_defs, settings.get('traps', 'none'),
+                                           _rnd.Random(f"{settings['seed']}-rocks"))
         print('rocks:', len(rock_locs), 'locations', flush=True)
 
     dig_locs, dig_tiles = {}, []

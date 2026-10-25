@@ -5,9 +5,9 @@ switch 0: the game sets it when the rock is lifted, the item then appears where 
 as for bushes), and the rock comes back gold once Link has left, until its item is taken.
 
 Left out (vanilla rocks): the 5 rocks over stairs / Manbo warp holes (their switch 0 is a real flag), the rock beside
-the Golden Leaf in Field_06I (an LAS check already), the 03E rock LAS's Classic D2 turns into a swamp flower (with that
-setting), and rocks on a pit tile (none today). The 6 rocks hiding a Secret Seashell are their seashell spot's check
-(seashell_spots.absorb, as for bushes).
+the Golden Leaf in Field_06I (an LAS check already), the 03E rock LAS's Classic D2 turns into a swamp flower and the
+10E rock LAS's open-mabe removes (with those settings), and rocks on a pit tile (none today). The 6 rocks hiding a
+Secret Seashell are their seashell spot's check (seashell_spots.absorb, as for bushes).
 
 Cave rocks (ObjCaveRock 0xf6) aren't checks: they can't be lifted, they are push blocks (checked in game 2026-10-25;
 parameters 0-3 say which ways one moves, all 0: never), pushing sets no flag, and an item hidden under one blocks Link
@@ -50,7 +50,7 @@ BORDER = {
 }
 
 
-def scan(romfs, leb, classic_d2=False):
+def scan(romfs, leb, classic_d2=False, open_mabe=False):
     """Every rock that becomes a check: dicts with level, room, key, n (index among the screen's rocks, counting every
     rock), tile, zone, shell (its Secret Seashell index or None)."""
     zones = field_regions.tile_zones(romfs)
@@ -65,8 +65,8 @@ def scan(romfs, leb, classic_d2=False):
             if a.type != ROCK_TYPE:
                 continue
             pit = (int((a.posX - ox) // 1.5), int((a.posZ - oz) // 1.5)) in holes
-            if not (a.switches[0][0] == 1 or a.key == GOLDEN_LEAF_ROCK or (classic_d2 and a.key == CLASSIC_D2_ROCK)
-                    or pit):
+            gone = (classic_d2 and a.key == CLASSIC_D2_ROCK) or (open_mabe and a.key in bushes.OPEN_MABE_REMOVED)
+            if not (a.switches[0][0] == 1 or a.key == GOLDEN_LEAF_ROCK or gone or pit):
                 tile = bushes._tile(room_name, a)
                 out.append({'level': 'Field', 'room': room_name, 'key': a.key, 'n': n, 'tile': tile,
                             'zone': zones[room_name][tile] if room_name in zones else None,
