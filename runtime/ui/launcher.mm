@@ -189,8 +189,11 @@ static bool file_exists(const std::string &p) {
 // stopped partway) and the game crashes on the first one it misses (issues #24, #35). Only the number ships.
 // Their sizes add up to game_romfs_bytes() (per version): every file there with another total is a damaged or
 // changed file (issue #391). The game still plays then; the start screen says so.
-enum { ROMFS_FILES = 3836 };
-static int count_files(const std::string &dir, int depth = 0, uint64_t *bytes = NULL) {
+// With check (base: where the path inside romfs starts), the files that aren't the game's are named in the log, the
+// first ROMFS_ODD_LOGGED of them (check->odd counts them all).
+enum { ROMFS_FILES = 3836, ROMFS_ODD_LOGGED = 20 };
+struct RomfsCheckWalk { GameRomfsCheck *check; size_t base; int odd; };
+static int count_files(const std::string &dir, int depth = 0, uint64_t *bytes = NULL, RomfsCheckWalk *check = NULL) {
     DIR *d = depth < 12 ? opendir(dir.c_str()) : NULL;
     if (!d) return 0;
     int n = 0;
@@ -199,8 +202,15 @@ static int count_files(const std::string &dir, int depth = 0, uint64_t *bytes = 
         std::string p = dir + "/" + e->d_name;
         struct stat st;
         if (stat(p.c_str(), &st) != 0) continue;
-        if (S_ISDIR(st.st_mode)) n += count_files(p, depth + 1, bytes);
-        else if (S_ISREG(st.st_mode)) { n++; if (bytes) *bytes += (uint64_t)st.st_size; }
+        if (S_ISDIR(st.st_mode)) n += count_files(p, depth + 1, bytes, check);
+        else if (S_ISREG(st.st_mode)) {
+            n++;
+            if (bytes) *bytes += (uint64_t)st.st_size;
+            if (check && !game_romfs_check_file(check->check, p.c_str() + check->base, (uint64_t)st.st_size) &&
+                check->odd++ < ROMFS_ODD_LOGGED)
+                fprintf(stderr, "[launcher] romfs: not one of the game's files: %s (%llu bytes)\n", p.c_str() + check->base,
+                        (unsigned long long)st.st_size);
+        }
     }
     closedir(d);
     return n;
@@ -235,8 +245,14 @@ static std::string check_copied_files(const std::string &root) {
     if (!file_exists(root + "/romfs/region_common")) return incomplete(0);
     if (g_romfs_count < 0) {
         g_romfs_bytes = 0;
-        g_romfs_count = count_files(root + "/romfs", 0, &g_romfs_bytes);
-        g_romfs_want = game_romfs_bytes(game_version_of(root.c_str()));
+        const GameVersion *v = game_version_of(root.c_str());
+        RomfsCheckWalk check = {game_romfs_check_begin(v), root.size() + strlen("/romfs/"), 0};
+        g_romfs_count = count_files(root + "/romfs", 0, &g_romfs_bytes, &check);
+        int missing = game_romfs_check_end(check.check);
+        if (check.odd > ROMFS_ODD_LOGGED)
+            fprintf(stderr, "[launcher] romfs: %d more files that aren't the game's\n", check.odd - ROMFS_ODD_LOGGED);
+        if (missing) fprintf(stderr, "[launcher] romfs: %d of the game's files missing or changed\n", missing);
+        g_romfs_want = game_romfs_bytes(v);
         if (g_romfs_count >= ROMFS_FILES && g_romfs_want && g_romfs_bytes != g_romfs_want)
             fprintf(stderr, "[launcher] romfs: %llu bytes in %d files, this version's are %llu: damaged or changed "
                     "game files\n", (unsigned long long)g_romfs_bytes, g_romfs_count, (unsigned long long)g_romfs_want);
