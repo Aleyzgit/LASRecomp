@@ -541,6 +541,15 @@ bool shell_spot_hanging(const char *name, float at[3]) {
     return true;
 }
 
+// the item actor hangs in an apple tree: never picked up there, only once a bonk flies it out (quick_pickup.c asks
+// before any pickup event)
+bool shell_spot_hung_actor(uint64_t actor) {
+    for (int i = 0; g_n > 0 && i < g_n; i++)
+        if (g_spots[i].hang && g_spots[i].fly_actor == actor && g_spots[i].item && digs_actor_alive(g_spots[i].item))
+            return true;
+    return false;
+}
+
 // its tree is gone (the screen went): the item goes with it
 void shell_spot_unhang(Cpu *c, const char *name) {
     Spot *s = apple_spot(name);
