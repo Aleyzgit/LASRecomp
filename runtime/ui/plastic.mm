@@ -27,7 +27,7 @@ const PlasticTheme &plastic_theme(void) {
     static bool init;
     if (!init) {
         init = true;
-        // parchment: warm paper, brown frame and text, orange selection, green action buttons, red markers
+        // parchment: warm paper, brown frame and text, orange selection, green action buttons
         t.panel = hex(0xF6EBD3, 0.98f);
         t.inset = hex(0xFBF4E4, 0.96f);
         t.frame = hex(0x8C5A2B);
@@ -39,8 +39,6 @@ const PlasticTheme &plastic_theme(void) {
         t.button = hex(0x3E8E6E);
         t.tab = hex(0xEBDAB6);
         t.tab_sel = hex(0xE07A3C);
-        t.marker = hex(0xD9462B);
-        t.bead_sel = hex(0xFFF1DA);  // (a marker on the orange row)
         t.text = hex32(0x4A3220);
         t.text_dim = hex32(0x8A7356);
         t.text_sel = hex32(0xFFFFFF);
@@ -135,13 +133,6 @@ float4 shade(float2 px, Shape s, float2 mouse, float scale, float glare, float l
         g = sdgrad(lp, hc, rc);
         u = clamp(dc / (w * 0.5), -1.0, 1.0);
         n = normalize(float3(g * u * 0.9, sqrt(max(1.0 - u * u, 0.0)) + 0.08));
-    } else if (kind == 4) {  // ---- bead: a little dome
-        float rad = min(hs.x, hs.y);
-        d = length(lp) - rad;
-        g = normalize(lp + 1e-4);
-        float2 nn = lp / rad * 0.92;
-        n = normalize(float3(nn, sqrt(max(1.0 - dot(nn, nn), 0.0)) + 0.05));
-        u = clamp(length(lp) / rad, 0.0, 1.0);
     } else {  // ---- slab / pill: a raised piece with a rounded bevel
         d = sdbox(lp, hs, r);
         g = sdgrad(lp, hs, r);
@@ -155,18 +146,12 @@ float4 shade(float2 px, Shape s, float2 mouse, float scale, float glare, float l
 
     // drop shadow (outside the piece; a ring also shades the panel just inside it)
     float2 so = float2(depth * 0.18, depth * 0.55);
-    float sh;
-    if (kind == 4) {
-        float ds = length(lp - so) - min(hs.x, hs.y);
-        sh = (1.0 - smoothstep(-depth * 0.5, depth * 1.1, ds)) * 0.55;
-    } else {
-        float ds = sdbox(lp - so, hs, r);
-        sh = (1.0 - smoothstep(-depth * 0.7, depth * 1.6, ds)) * (kind == 0 ? 0.55 : 0.42);
-        if (kind == 3) {
-            float din = sdbox(lp - so * 0.8, hs - w, max(r - w, 0.0));
-            float hole = sdbox(lp, hs - w, max(r - w, 0.0));
-            if (hole < 0.0) sh = smoothstep(-depth * 1.3, 0.0, din) * 0.45;
-        }
+    float ds = sdbox(lp - so, hs, r);
+    float sh = (1.0 - smoothstep(-depth * 0.7, depth * 1.6, ds)) * (kind == 0 ? 0.55 : 0.42);
+    if (kind == 3) {
+        float din = sdbox(lp - so * 0.8, hs - w, max(r - w, 0.0));
+        float hole = sdbox(lp, hs - w, max(r - w, 0.0));
+        if (hole < 0.0) sh = smoothstep(-depth * 1.3, 0.0, din) * 0.45;
     }
     sh *= alpha;
     if (cov <= 0.0) return float4(0.0, 0.0, 0.0, sh > 0.002 ? sh : 0.0);
@@ -193,10 +178,6 @@ float4 shade(float2 px, Shape s, float2 mouse, float scale, float glare, float l
         float d2 = sdbox(lp - sc, sb, min(r, sb.y));
         float t = clamp((lp.y + hs.y) / hs.y, 0.0, 1.0);
         sheen = (1.0 - smoothstep(-0.8 * px1, 0.8 * px1, d2)) * mix(0.50, 0.06, t) * gloss;
-    } else if (kind == 4) {
-        float2 hp = lp - float2(-0.28, -0.34) * min(hs.x, hs.y);
-        float hr = min(hs.x, hs.y) * 0.32;
-        sheen = exp(-dot(hp, hp) / (hr * hr)) * 0.85 * gloss;
     } else if (kind == 0) {  // a broad soft diagonal reflection across the slab
         float2 q = lp / hs;
         float band = dot(q, normalize(float2(0.55, 1.0)));

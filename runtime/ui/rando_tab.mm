@@ -589,7 +589,7 @@ enum { FOCUS_NONE, FOCUS_CAT, FOCUS_RIGHT, FOCUS_SEED, FOCUS_DELETE, FOCUS_CANCE
 static int g_focus;                // put the cursor on this row when it's drawn
 
 static void take_focus(int want) {
-    if (g_focus != want || opt_counting()) return;
+    if (g_focus != want) return;
     g_focus = FOCUS_NONE;
     opt_focus_item();
 }
@@ -728,8 +728,7 @@ static void rows_world(float scale) {
                    "With Houses & caves: leaving a house puts you outside a different door than the one you came in by.");
         opt_indent(-1);
         if (last) ImGui::OpenPopup("##entlast");
-        if (!opt_counting() &&
-            ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        if (ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             ImGui::TextUnformatted("With the entrance randomizer on, at least one kind of entrance must be shuffled.");
             ImGui::Spacing();
             ImGui::SetItemDefaultFocus();
@@ -988,14 +987,6 @@ extern "C" void rando_tab_draw(float scale) {
         else g_focus = FOCUS_CAT;
     }
 
-    // which categories differ from their defaults (a dot on the row)
-    bool changed[N_CAT] = {};
-    for (int c = CAT_GENERAL; c < N_CAT; c++) {
-        opt_count_begin();
-        cat_rows(c, scale);
-        changed[c] = opt_count_end() > 0;
-    }
-
     ImGui::BeginDisabled(busy);
     // (the start screen: no game loaded, nothing playing - and the seed's patches mustn't be applied yet)
     const char *active = !g_start_screen && rando_seed_dir() ? rando_seed_dir() + 6 : NULL;
@@ -1007,7 +998,7 @@ extern "C" void rando_tab_draw(float scale) {
         if (g_in_right && c == g_cat) opt_mark_next();
         char n[16];
         snprintf(n, sizeof n, "%d", (int)g_seeds.size());
-        bool open = opt_link(k_cat_name[c], NULL, c == CAT_SEEDS ? n : NULL, changed[c]);
+        bool open = opt_link(k_cat_name[c], NULL, c == CAT_SEEDS ? n : NULL);
         bool clicked = ImGui::IsItemClicked();
         if (c == g_cat) take_focus(FOCUS_CAT);
         bool pick = (opt_item_nav_focused() && g_cat != c) || open;  // (moving down the list shows each)

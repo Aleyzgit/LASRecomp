@@ -25,9 +25,6 @@ static std::string g_desc_first;  // the page's first row (shown until a row is 
 static bool g_hov_set, g_foc_set;  // (a row was hovered / selected this frame, even one without a description)
 static std::string g_left_hover, g_left_focus;  // (opt_split: the left pane's, kept for opt_desc_text)
 static bool g_left_hov_set, g_left_foc_set;
-static bool g_counting;  // (opt_count_begin: rows are only checked, not drawn)
-static int g_count;
-static uint32_t g_count_hash;
 static bool g_lr_row, g_focused_lr;  // (the row being drawn steps with left / right; the selected one does)
 static float g_row_h = 1.9f;  // (a row's height, in font sizes: opt_compact makes it lower)
 static int g_half;  // (opt_pair_next: 1 the next row is a line's left half, 2 its right half)
@@ -105,7 +102,6 @@ void opt_begin(const char *id, float scale) {
 }
 
 void opt_section(const char *title) {
-    if (g_counting) return;
     std::string t = title;
     for (char &c : t) c = (char)toupper((unsigned char)c);
     if (ImGui::GetCursorPosY() > ImGui::GetStyle().WindowPadding.y + 1) ImGui::Dummy(ImVec2(0, 10 * g_scale));
@@ -116,19 +112,9 @@ void opt_section(const char *title) {
 // arrows: ◀ value ▶ (a choice of several, or a stepper): left / right step it, and the arrows click too
 // chevron: a ">" on the right (opt_link)
 static int row(const char *label, const std::string &value, bool changed, const char *desc, bool upper = true,
-               bool arrows = false, bool chevron = false, bool dot = false) {
+               bool arrows = false, bool chevron = false) {
     bool lr = arrows || g_lr_row;
     g_lr_row = false;
-    if (g_counting) {  // (opt_count_begin: tally only)
-        if (changed && !g_next_disabled) g_count++;
-        for (const char *c = value.c_str();; c++) {
-            g_count_hash = (g_count_hash ^ (uint8_t)*c) * 0x01000193u;
-            if (!*c) break;
-        }
-        g_next_disabled = g_next_mark = g_next_warn = g_row_button = false;
-        g_half = 0;
-        return 0;
-    }
     // a label a row above already has (Save Editor: Bombs, Magic Powder under Equipment and Ammo) gets an id of its
     // own: two rows with one id share the controller's cursor - ImGui kept the later one's place, so Up / Down from
     // the first went on from the second (a row far below, or the edge of the view)
@@ -193,7 +179,7 @@ static int row(const char *label, const std::string &value, bool changed, const 
     }
 
     // the row: a plastic pill; selected (cursor or mouse), it stands up orange with white text. Actions are green
-    // buttons; a value that isn't the default gets a red bead in the pill's left end.
+    // buttons.
     ImDrawList *dl = ImGui::GetWindowDrawList();
     const PlasticTheme &pt = plastic_theme();
     float pad = 16 * g_scale, fs = ImGui::GetFontSize();
@@ -204,13 +190,7 @@ static int row(const char *label, const std::string &value, bool changed, const 
     float dep = (sel ? 7 : button ? 6 : 3.5f) * g_scale;
     plastic_add(dl, ImVec2(p.x + 3 * g_scale, p.y + 1 * g_scale), ImVec2(p.x + w - 8 * g_scale, p.y + h - 3 * g_scale),
                 h * 0.5f, col, PK_PILL, dep, sel || button ? 1.0f : 0.6f);
-    if (changed || dot) {  // the bead: the value isn't the default (a category: something in it was changed)
-        float br = fs * 0.2f;
-        ImVec2 c(p.x + 3 * g_scale + h * 0.36f, p.y + h * 0.5f - 1.5f * g_scale);
-        plastic_add(dl, ImVec2(c.x - br, c.y - br), ImVec2(c.x + br, c.y + br), br, sel ? pt.bead_sel : pt.marker, PK_BEAD,
-                    3 * g_scale, 1.0f);
-    }
-    float lpad = h * 0.66f;  // (room for the bead in the pill's rounded end)
+    float lpad = h * 0.66f;  // (the label clear of the pill's rounded end)
     std::string t = label;
     if (upper)
         for (char &c : t) c = (char)toupper((unsigned char)c);
@@ -302,7 +282,6 @@ bool opt_button(const char *label, const char *desc) {
 bool opt_radio(const char *label, bool selected, const char *desc) {
     bool off = g_next_disabled;
     bool chosen = row(label, "", false, desc) == 2;
-    if (g_counting) return false;
     ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
     float r = ImGui::GetFontSize() * 0.32f, cx = b.x - 16 * g_scale - r, cy = (a.y + b.y) * 0.5f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
@@ -327,7 +306,6 @@ bool opt_colour(const char *label, CosColour *c, int slot, const char *desc) {
     int sp = col_pick(c, slot);  // (Default: the seed's own colour, shown as such)
     if (c->pick == COL_DEFAULT && sp != COL_DEFAULT) snprintf(seed, sizeof seed, "Seed: %s", g_col_names[sp]), names[0] = seed;
     bool changed = opt_choice(label, &c->pick, names, N_COL, COL_DEFAULT, desc);
-    if (g_counting) return false;
     if (changed && c->pick == COL_CUSTOM && prev != COL_CUSTOM)  // (Custom starts from the colour it was on)
         c->rgb = prev > COL_DEFAULT && prev < COL_RANDOM ? g_col_rgb[prev] : (c->rgb ? c->rgb : 0xF2F0EA);
     if (c->pick != COL_CUSTOM) return changed;
@@ -372,8 +350,8 @@ bool opt_colour(const char *label, CosColour *c, int slot, const char *desc) {
     return changed;
 }
 
-bool opt_link(const char *label, const char *desc, const char *value, bool marked) {
-    return row(label, value ? value : "", false, desc, true, false, true, marked) == 2;
+bool opt_link(const char *label, const char *desc, const char *value) {
+    return row(label, value ? value : "", false, desc, true, false, true) == 2;
 }
 
 static ImGuiID g_text_editing;  // the text row turned into a field (one at a time)
@@ -383,7 +361,7 @@ bool opt_text(const char *label, char *buf, size_t cap, const char *hint, const 
     ImGuiID &editing = g_text_editing;
     static int focus;        // frames left to give it the keyboard focus
     ImGuiID id = ImGui::GetID(label);
-    if (editing != id || g_counting) {
+    if (editing != id) {
         if (row(label, buf[0] ? buf : (hint ? hint : ""), false, desc) == 2) editing = id, focus = 2;
         return false;
     }
@@ -511,12 +489,4 @@ bool opt_pressed_back(void) {
 bool opt_pressed_left(void) {
     return ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft) || ImGui::IsKeyPressed(ImGuiKey_GamepadLStickLeft) ||
            ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
-}
-
-void opt_count_begin(void) { g_counting = true, g_count = 0, g_count_hash = 0x811c9dc5u; }
-bool opt_counting(void) { return g_counting; }
-int opt_count_end(uint32_t *hash) {
-    g_counting = false;
-    if (hash) *hash = g_count_hash;
-    return g_count;
 }

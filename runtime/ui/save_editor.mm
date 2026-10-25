@@ -26,11 +26,8 @@ extern "C" {
 #include "../hle.h"
 }
 
-// GA(LIVE_SAVE): main + 0x1CBB220. g_snap: a copy taken when the menu opens (the sections' changed dots read it)
-enum { SAVE_SIZE = 0x5EE0 };
-static uint8_t g_snap[SAVE_SIZE];
-static bool g_snap_ok, g_use_snap;
-static uint8_t *S(void) { return g_use_snap ? g_snap : (uint8_t *)(uintptr_t)GA(LIVE_SAVE); }
+// GA(LIVE_SAVE): main + 0x1CBB220
+static uint8_t *S(void) { return (uint8_t *)(uintptr_t)GA(LIVE_SAVE); }
 template <typename T> static T &F(uint32_t off) { return *(T *)(S() + off); }
 
 enum : uint32_t {
@@ -64,10 +61,7 @@ static void sync_header(void) {
 static char g_name[32];
 
 extern "C" void save_editor_on_open(void) {
-    g_snap_ok = false;
     if (!loaded()) return;
-    memcpy(g_snap, S(), SAVE_SIZE);
-    g_snap_ok = true;
     if (current_dungeon() >= 0) g_dungeon = current_dungeon();
     const uint16_t *u = (const uint16_t *)(S() + NAME);
     int n = 0;
@@ -303,7 +297,7 @@ static void sec_keys(void) {
         {"Face Key", KEYITEMS, 5, 32, "Opens Face Shrine."},
         {"Bird Key", KEYITEMS, 6, 32, "Opens Eagle's Tower."},
     };
-    if (!opt_counting()) {  // (the game's own pickup, as from a chest: in the dungeon Link is in)
+    {   // (the game's own pickup, as from a chest: in the dungeon Link is in)
         bool in = current_dungeon() >= 0;
         if (!in) opt_disable_next();
         if (opt_button("Give small key", "One Small Key for the dungeon Link is in.")) give_item_request(48, 1, -1);
@@ -312,10 +306,7 @@ static void sec_keys(void) {
     }
     bit_rows(keys, 5);
     opt_choice("Dungeon", &g_dungeon, k_dungeons, 9, 0, "The dungeon the rows below are for.");
-    if (opt_counting())  // (the changed dot: every dungeon's rows)
-        for (int i = 0; i < 9; i++) dungeon_rows(i);
-    else
-        dungeon_rows(g_dungeon);
+    dungeon_rows(g_dungeon);
 }
 
 static void sec_trade(void) {
@@ -361,8 +352,8 @@ static void sec_give(void) {
     }
 }
 
-// The tab, in two columns (as the Controls tab's Configure inputs): the sections on the left, a gold dot on each one
-// changed since the menu opened; the chosen section's rows on the right, the selected row's description under them.
+// The tab, in two columns (as the Controls tab's Configure inputs): the sections on the left, the chosen section's rows
+// on the right, the selected row's description under them.
 enum { SEC_QUICK, SEC_PLAYER, SEC_EQUIPMENT, SEC_AMMO, SEC_SONGS, SEC_BOTTLES, SEC_INSTRUMENTS, SEC_KEYS, SEC_TRADE,
        SEC_COMPANIONS, SEC_GIVE, N_SEC };
 static const char *const k_sec_name[N_SEC] = {"Quick", "Player", "Equipment", "Ammo", "Ocarina songs", "Bottles",
@@ -404,29 +395,12 @@ extern "C" void save_editor_draw(float scale) {
         (opt_pressed_back() || (opt_pressed_left() && !opt_focused_lr())))
         g_back_frame = frame, g_focus = FOCUS_SEC;
 
-    // which sections changed since the menu opened: their rows' values, read from the save then from the copy
-    bool changed[N_SEC] = {};
-    if (g_snap_ok)
-        for (int c = 0; c < N_SEC; c++) {
-            if (!sec_shown(c)) continue;
-            uint32_t now, before;
-            opt_count_begin();
-            k_sec_rows[c]();
-            opt_count_end(&now);
-            g_use_snap = true;
-            opt_count_begin();
-            k_sec_rows[c]();
-            opt_count_end(&before);
-            g_use_snap = false;
-            changed[c] = now != before;
-        }
-
     opt_begin("##save", scale);
     opt_compact();
     for (int c = 0; c < N_SEC; c++) {
         if (!sec_shown(c)) continue;
         if (g_in_right && c == g_sec) opt_mark_next();
-        bool open = opt_link(k_sec_name[c], NULL, NULL, changed[c]);
+        bool open = opt_link(k_sec_name[c], NULL, NULL);
         bool clicked = ImGui::IsItemClicked();
         if (c == g_sec && g_focus == FOCUS_SEC) g_focus = FOCUS_NONE, opt_focus_item();
         if ((opt_item_nav_focused() && g_sec != c) || open) g_sec = c;  // (moving down the list shows each)

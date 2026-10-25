@@ -33,8 +33,8 @@ bool opt_radio(const char *label, bool selected, const char *desc);
 // e.g. a seed name); true when activated
 bool opt_action(const char *label, const char *value, const char *desc, bool upper = true, bool changed = false);
 // a row that opens more (a submenu, a list on the right): a chevron on the right; true on A / click / Right. value:
-// shown left of the chevron; marked: a red bead in the row (something under it was changed)
-bool opt_link(const char *label, const char *desc, const char *value = NULL, bool marked = false);
+// shown left of the chevron
+bool opt_link(const char *label, const char *desc, const char *value = NULL);
 // text: the value shown on the right (hint when empty); A / click turns the row into a text field (the on-screen
 // keyboard with a controller). True when Enter / the keyboard confirmed a change.
 #include <stddef.h>
@@ -98,9 +98,3 @@ bool opt_in_right(void);
 // B / Esc, and Left (d-pad, stick, arrow key), pressed this frame
 bool opt_pressed_back(void);
 bool opt_pressed_left(void);
-// Rows between these are only checked, not drawn (a category's changed marker): opt_count_end returns how many enabled
-// rows differ from their default, and (hash) a hash of every row's value. Calls of the caller's own that use the last
-// item (ImGui::IsItemFocused, popups) must be skipped while opt_counting().
-void opt_count_begin(void);
-bool opt_counting(void);
-int opt_count_end(uint32_t *hash = NULL);

@@ -6,7 +6,7 @@
 #include "imgui.h"
 
 struct PlasticTheme {
-    ImVec4 panel, inset, frame, frame_inner, row, row_sel, row_mark, row_hot, button, tab, tab_sel, marker, bead_sel;
+    ImVec4 panel, inset, frame, frame_inner, row, row_sel, row_mark, row_hot, button, tab, tab_sel;
     ImU32 text, text_dim, text_sel, text_button, section, value, value_changed, warn, title, arrow;
     float dim;    // the game behind the menu: black at this alpha
     float glare;  // over a dark scene the pieces come down by up to this much
@@ -14,7 +14,7 @@ struct PlasticTheme {
 const PlasticTheme &plastic_theme(void);
 static inline ImVec4 plastic_col(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 
-enum PlasticKind { PK_SLAB = 0, PK_INSET = 1, PK_PILL = 2, PK_RING = 3, PK_BEAD = 4 };
+enum PlasticKind { PK_SLAB = 0, PK_INSET = 1, PK_PILL = 2, PK_RING = 3 };
 // a piece at [a, b] (pixels), drawn into dl at this point of its commands (so: under what's added after it).
 // depth: the bevel's width, and the drop shadow's reach; gloss 0..1; ring: the frame's width (PK_RING)
 void plastic_add(ImDrawList *dl, ImVec2 a, ImVec2 b, float radius, ImVec4 col, int kind, float depth, float gloss,
