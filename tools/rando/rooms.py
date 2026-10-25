@@ -66,7 +66,10 @@ def _tower_positions():
 # levels whose cell names don't match their positions: {level: {'05A': (column, row), ...}} (rows from 1)
 POSITIONS = {'Lv07EagleTower': _tower_positions()}
 _NAMES = {lv: {p: n for n, p in v.items()} for lv, v in POSITIONS.items()}
-GRIDS = {'Lv07EagleTower': (10, 10)}  # columns, rows (others: dungeon_gen.COLS / ROWS, 8 x 8)
+GRIDS = {'Lv07EagleTower': (10, 10)}
+# rooms no seed reaches: Eagle's Tower's pre-collapse 3F (files 05-08 E-H) - room shuffle seeds start with the tower
+# collapsed (eagle_tower.py). Not in the catalog: kept where they are, as the side-view rooms are.
+DEAD = {f'Lv07EagleTower_{r:02d}{L}' for r in range(5, 9) for L in 'EFGH'}  # columns, rows (others: dungeon_gen.COLS / ROWS, 8 x 8)
 
 
 def cell_pos(room):
@@ -202,7 +205,7 @@ def catalog(romfs):
     for lv in DUNGEONS:
         d = os.path.join(romfs, 'region_common', 'level', lv)
         for f in sorted(os.listdir(d)):
-            if f.endswith('.leb') and re.match(rf'{lv}_\d\d[A-Z]\.leb$', f):
+            if f.endswith('.leb') and re.match(rf'{lv}_\d\d[A-Z]\.leb$', f) and f[:-4] not in DEAD:
                 rm = load_room(romfs, f[:-4])
                 if rm:
                     out[rm.name] = rm
