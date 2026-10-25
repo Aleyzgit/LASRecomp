@@ -699,6 +699,8 @@ static Frame cur_frame;
 // nothing to draw into (minimised window).
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
+    extern VkImageView g_vk_scene_view;  // (exec.c: the game image isn't drawn yet this frame)
+    g_vk_scene_view = VK_NULL_HANDLE;
     if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);

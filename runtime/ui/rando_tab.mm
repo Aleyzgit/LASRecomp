@@ -16,6 +16,7 @@
 #include "imgui_internal.h"
 #include "osk.h"
 #include "option_rows.h"
+#include "plastic.h"
 #include "seed_hash.h"
 
 extern "C" {
@@ -524,7 +525,7 @@ static void gen_overlay(float scale) {
         if (g_gen_done && ++done_frames == 30) snprintf(g_window_shot_request, sizeof g_window_shot_request, "%s_done.png", shots);
         test_play = done_frames == 60;
     }
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", g_gen_seed.c_str());
+    ImGui::TextColored(plastic_col(plastic_theme().title), "%s", g_gen_seed.c_str());
     ImGui::Separator();
     ImGui::Spacing();
     if (g_gen_pid) {  // progress bar with the current step and elapsed time
@@ -538,7 +539,7 @@ static void gen_overlay(float scale) {
         bool close = false;
         if (g_gen_failed) {
             ImGui::PushTextWrapPos(0);
-            ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_gen_status.c_str());
+            ImGui::TextColored(plastic_col(plastic_theme().warn), "%s", g_gen_status.c_str());
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
             if (ImGui::Button("Close", ImVec2(bw, 0))) close = true;
@@ -851,7 +852,7 @@ static void rows_seeds(const char *active) {
         static char rename_buf[64];
         if (!opt_text_editing("Rename")) strlcpy(rename_buf, s.name.c_str(), sizeof rename_buf);
         if (g_confirm_delete) {
-            ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Delete this seed and its save files?");
+            ImGui::TextColored(plastic_col(plastic_theme().warn), "Delete this seed and its save files?");
             ImGui::Spacing();
             opt_warn_next();
             if (opt_action("Delete seed + saves", "", NULL)) {
@@ -915,7 +916,7 @@ static void rows_seeds(const char *active) {
 static void seed_header(const char *active) {
     for (const Seed &s : g_seeds) {
         if (s.name != g_act_seed) continue;
-        ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", s.name.c_str());
+        ImGui::TextColored(plastic_col(plastic_theme().title), "%s", s.name.c_str());
         ImGui::TextDisabled("Seed ID: %s", s.id.empty() ? "-" : s.id.c_str());
         if (s.race) ImGui::TextDisabled("Race mode. Seed hash: %s", hash_names(s.id).c_str());
         if (active && s.name == active) ImGui::TextDisabled("Playing");

@@ -33,7 +33,7 @@ bool opt_radio(const char *label, bool selected, const char *desc);
 // e.g. a seed name); true when activated
 bool opt_action(const char *label, const char *value, const char *desc, bool upper = true, bool changed = false);
 // a row that opens more (a submenu, a list on the right): a chevron on the right; true on A / click / Right. value:
-// shown left of the chevron; marked: a gold dot there (something under it was changed)
+// shown left of the chevron; marked: a red bead in the row (something under it was changed)
 bool opt_link(const char *label, const char *desc, const char *value = NULL, bool marked = false);
 // text: the value shown on the right (hint when empty); A / click turns the row into a text field (the on-screen
 // keyboard with a controller). True when Enter / the keyboard confirmed a change.
@@ -43,7 +43,7 @@ bool opt_text(const char *label, char *buf, size_t cap, const char *hint, const 
 bool opt_text_editing(const char *label);
 // the next row is shown greyed out and can't be changed (e.g. forced by the seed)
 void opt_disable_next(void);
-// the next row is drawn as chosen (a dimmer gold border without the cursor: the list shown beside it)
+// the next row is drawn as chosen (pale orange without the cursor: the list shown beside it)
 void opt_mark_next(void);
 // the next row's value in red (a problem: e.g. the same button bound twice)
 void opt_warn_next(void);
