@@ -21,7 +21,7 @@ check's event flag from tracker.tsv; for items the save shows directly, owning i
 once all are.
 
     steps(logic_defs, placements, settings, check, sph, out_dir) -> number of steps (writes hint_steps.json)
-    apply(out_dir, romfs, settings) -> summary (flows, messages, item row, hints.tsv)
+    apply(out_dir, romfs, settings, ent, logic_defs) -> summary (flows, messages, item row, hints.tsv)
 """
 import glob
 import json
@@ -434,7 +434,9 @@ def door_of(loc, logic_defs, ent):
         return None
     by_id = {d['id']: d for d in doors}
     ways = sorted(d for d, t in entry.items() if t in targets)
-    return by_id[ways[0]] if ways else None
+    if not ways or ways[0] in targets:  # (its own door: where it always was)
+        return None
+    return by_id[ways[0]]
 
 
 def door_area(door, romfs):
@@ -472,8 +474,24 @@ def nearest(marks, x, z):
 
 
 def place_phrase(step, dungeon_of, entered_via):
-    """Where the check physically is, in words: entrance shuffles change the way in, never the place."""
+    """Where the check physically is, in words: entrance shuffles change the way in, never the place. A shuffled house
+    or cave is named by the door the player uses (door-name / door-area: apply())."""
     loc, region = step['loc'], step.get('region', '')
+    if step.get('door-name'):
+        where = AREA.get(step['door-area'], '')
+        where = f' in {where}' if where else ''
+        if step['door-name'] == 'a cave':
+            where = 'in a cave' + where
+        else:
+            where = f"behind the door of {step['door-name']}" + where
+        if loc.startswith('pot-'):
+            return 'in a pot, ' + where
+        who = re.sub(r' (in|on|of|at) .*$', '', PLACE[loc]) if loc in PLACE else ''
+        if not who.startswith('with '):  # (shops and games keep their name)
+            who = next((w for p, w in (('shop-', 'in the shop'), ('trendy-prize', 'at the Trendy Game'),
+                                       ('fishing-', 'at the fishing pond'), ('dampe-', "with Dampe's chambers"))
+                        if loc.startswith(p)), '')
+        return f'{who}, {where}' if who else where
     area = AREA.get(region, '')
 
     def dungeon(dn, detail=''):
@@ -544,7 +562,7 @@ BOSSES = {'moldorm', 'genie', 'slime-eye', 'angler', 'slime-eel', 'facade', 'eag
 def place_parts(step, dungeon_of, names, lang):
     """Other languages: where the check is - (the game's place name or None, our detail or None)."""
     import loc_text as lt
-    loc, region = step['loc'], step.get('region', '')
+    loc, region = step['loc'], step.get('door-area') or step.get('region', '')  # (a shuffled house: its door's area)
     area = names.place(lt.AREA_LABEL[region]) if region in lt.AREA_LABEL else None
 
     def det(key, **kw):
@@ -730,7 +748,7 @@ def _item_row(out_dir, romfs, oead_tools):
     oead_tools.writeSheet(p, sheet)
 
 
-def apply(out_dir, romfs, settings):
+def apply(out_dir, romfs, settings, ent=None, logic_defs=None):
     """After escape_bottle.apply (Tarin's flow): the hand-over, the hint messages and hints.tsv."""
     from RandomizerCore.Tools import event_tools, oead_tools
     import keysanity_text as kt
@@ -798,6 +816,10 @@ def apply(out_dir, romfs, settings):
             spot = (m.group(1), int(m.group(2))) if m else bush_tile.get(st['loc'])
             if spot and spot[1] is not None:
                 st['landmark'] = nearest(marks, *tile_xz(*spot))
+    for st in steps_:  # (entrance rando: a shuffled house or cave is where its door is)
+        door = door_of(st['loc'], logic_defs or {}, ent)
+        if door:
+            st['door-area'], st['door-name'] = door_area(door, romfs), door_name(door)
     step_names = names[:len(steps_)]
     texts = {n: hint_text(s, dungeon_of, entered_via) for n, s in zip(names, steps_)}
     texts[DONE] = DONE_TEXT

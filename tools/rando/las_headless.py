@@ -648,7 +648,7 @@ def main():
 
     import escape_bottle  # Tarin gives it with the starting items, in the game's own get-item message box
     print('escape bottle:', escape_bottle.apply(out_dir, romfs), flush=True)
-    print('hint sheet:', hint_sheet.apply(out_dir, romfs, settings), flush=True)  # (after it: Tarin's next gift)
+    print('hint sheet:', hint_sheet.apply(out_dir, romfs, settings, ent, sh.logic_defs), flush=True)  # (after it: Tarin's next gift)
     if settings.get('hints'):
         print('hints:', seed_hints.apply(out_dir, romfs, settings), flush=True)
 
