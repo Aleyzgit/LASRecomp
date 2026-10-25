@@ -69,7 +69,8 @@ _NAMES = {lv: {p: n for n, p in v.items()} for lv, v in POSITIONS.items()}
 GRIDS = {'Lv07EagleTower': (10, 10)}
 # rooms no seed reaches: Eagle's Tower's pre-collapse 3F (files 05-08 E-H) - room shuffle seeds start with the tower
 # collapsed (eagle_tower.py). Not in the catalog: kept where they are, as the side-view rooms are.
-DEAD = {f'Lv07EagleTower_{r:02d}{L}' for r in range(5, 9) for L in 'EFGH'}  # columns, rows (others: dungeon_gen.COLS / ROWS, 8 x 8)
+DEAD = {f'Lv07EagleTower_{c}' for c in ('05F', '05G', '06E', '06F', '06G', '06H', '07E', '07F', '07G', '07H', '08F',
+                                          '08G')}  # (its files; 05E is the collapse cutscene, side-view)  # columns, rows (others: dungeon_gen.COLS / ROWS, 8 x 8)
 
 
 def cell_pos(room):

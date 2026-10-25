@@ -169,6 +169,14 @@ def _partners(romfs, level):
     return out
 
 
+def dead_shadow(level):
+    """Cells next to (or diagonal to) a rooms.DEAD room: its own darkness lid still reaches over the cells it had
+    empty around it and blacked out half of a room placed there (play test, DevEaglePlay: Eagle's Tower 04G moved to
+    08E, under the pre-collapse 07E / 08F)."""
+    dead = {cell_pos(k) for k in rooms.DEAD if rooms.level_of(k) == level}
+    return {(c + dc, r + dr) for c, r in dead for dc in (-1, 0, 1) for dr in (-1, 0, 1)} - dead
+
+
 def linked_all(cat, romfs, level, layout):
     """LINK_LEVELS: every room a stairs or hole of the level leads into is in the layout. One left out keeps its
     player start at its old cell - the stairs / hole would drop Link into whatever room is there now (DevEaglePlay:
@@ -332,8 +340,11 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     # room there would share the name - the game found the side-view record, the room never activated, Link fell
     taken = {cell_pos(n) for n in offgrid if re.match(r'.*_\d\d[A-Z]$', n)}
 
+    near_dead = dead_shadow(level)
+
     def inside(c, r):
-        return 0 <= c < cols and 1 <= r <= rows and (c, r) not in taken and (not romfs or on_map(romfs, level, c, r))
+        return 0 <= c < cols and 1 <= r <= rows and (c, r) not in taken and (c, r) not in near_dead and \
+            (not romfs or on_map(romfs, level, c, r))
 
     for attempt in range(tries):
         rng = random.Random(f'{seed}-{level}-{attempt}')
@@ -1201,7 +1212,8 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                 taken = {cell_pos(k) for k in L}
                 reserved = {cell_pos(n) for n in offgrid_rooms(romfs, cat, lv) if re.match(r'.*_\d\d[A-Z]$', n)}
                 free_cells = [(c, r) for c in range(grid_size(lv)[0]) for r in range(1, grid_size(lv)[1] + 1)
-                              if (c, r) not in taken and (c, r) not in reserved and on_map(romfs, lv, c, r)]
+                              if (c, r) not in taken and (c, r) not in reserved and (c, r) not in dead_shadow(lv)
+                              and on_map(romfs, lv, c, r)]
                 rng.shuffle(free_cells)
                 for c, r in free_cells:
                     ok = True
