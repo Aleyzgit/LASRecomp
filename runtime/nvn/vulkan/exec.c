@@ -4372,30 +4372,27 @@ static VkDescriptorBufferInfo gfast_info(void) {
     return (VkDescriptorBufferInfo){gfast_buf, 0, GFAST_SIZE};
 }
 
-static void gfast_prepare(VkCommandBuffer cb) {
-    static int on = -1;
-    if (on < 0) { const char *e = getenv("LARECOMP_VK_GMEM_FAST"); on = !e || atoi(e) != 0; }
-    memset(gmap_tab, 0, sizeof gmap_tab);
-    gfast_n = 0;
-    if (!gc_lazy) gmem_info();  // (the heap import, made on first use)
-    gfast_info();
-    if (!on || (!gmem_buf && !gc_lazy)) return;
-    gfast_flags_poll();
-    struct { uint64_t lo, hi, xlo, xhi; uint16_t slots; } r[16];
+// ---- gmap_build (tools/test_vulkan_overlap.py extracts this block)
+// The fast-copy table of a dispatch's storage slots: off[i] / size[i] the heap offset and size of slot i (size 0: not
+// in the table). Each entry is one slot's range, 256-aligned for the loads (lo..hi) - overlapping ranges share one
+// entry - with the slots it holds (bit i = storage slot i, the bit gfast_flags reports) and the exact bound bytes
+// (xlo..xhi: what gets copied back, and where a store counts as the slot's - gmap[i].w, translate.c gfindw: the
+// bytes before xlo in the low 8 bits, the words up to xhi above). Only overlaps merge: the report is per slot, and
+// the copy back must not cover the memory between buffers, which the CPU may be writing meanwhile (one frame ahead
+// with the overlap; gaps of up to 4 KB merged were copied back over its stores, #355). Fills tab[] (count / stamp
+// left to the caller); returns the entries, -1 when they don't fit (GMAP_MAX, `room` bytes of gfast).
+typedef struct { uint64_t lo, hi, xlo, xhi, off; uint16_t slots; } GmapEnt;
+static int gmap_build(const uint64_t *off, const uint64_t *size, uint64_t top, uint64_t room, GmapEnt *r, uint32_t *tab, uint64_t *used) {
     int n = 0;
-    for (int i = 0; i < 16; i++) {  // heap offsets of the bound storage buffers, 256-aligned
-        uint64_t a = sbufs(5)[i].addr, sz = sbufs(5)[i].size;  // (overlap: a snapshotted range's copy is what gets copied)
-        if (!a || !sz || a < HEAP_BASE || !gmem_covers(a - HEAP_BASE, sz)) continue;
-        uint64_t lo = (a - HEAP_BASE) & ~255ull, hi = (a - HEAP_BASE + sz + 255) & ~255ull, top = gc_lazy ? gmem_heap_size() : gmem_size;
+    for (int i = 0; i < 16; i++) {
+        if (!size[i]) continue;
+        uint64_t lo = off[i] & ~255ull, hi = (off[i] + size[i] + 255) & ~255ull, xhi = off[i] + size[i];
         if (hi > top) hi = top;
-        uint64_t xhi = a - HEAP_BASE + sz < top ? a - HEAP_BASE + sz : top;
+        if (xhi > top) xhi = top;
         int k = n++;
         while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }  // (insertion sort by start)
-        r[k].lo = lo; r[k].hi = hi; r[k].xlo = a - HEAP_BASE; r[k].xhi = xhi; r[k].slots = (uint16_t)(1u << i);
+        r[k] = (GmapEnt){lo, hi, off[i], xhi, 0, (uint16_t)(1u << i)};
     }
-    // Only overlapping ranges share a table entry: each entry's stores are reported per slot, and the copy back covers
-    // the bound bytes alone - not the memory between buffers, which the CPU may be writing meanwhile (one frame ahead
-    // with the overlap; merged gaps of up to 4 KB were copied back over its stores).
     int m = 0;
     for (int i = 0; i < n; i++) {
         if (m && r[i].lo < r[m - 1].hi) {
@@ -4405,18 +4402,47 @@ static void gfast_prepare(VkCommandBuffer cb) {
             r[m - 1].slots |= r[i].slots;
         } else r[m++] = r[i];
     }
-    VkBufferCopy cp[16];
-    uint64_t off = 0;
+    if (m > GMAP_MAX) return -1;
+    uint64_t o = 0;
     for (int i = 0; i < m; i++) {
         uint64_t len = r[i].hi - r[i].lo;
-        if (m > GMAP_MAX || off + len > (uint64_t)GFAST_FLAG_WORD * 4) return;  // (too much: the heap as before; the flags sit above)
-        cp[i] = (VkBufferCopy){r[i].lo, off, len};
-        gfast_back[i] = (VkBufferCopy){off + (r[i].xlo - r[i].lo), r[i].xlo, r[i].xhi - r[i].xlo};
+        if (o + len > room) return -1;
+        r[i].off = o;
+        tab[i * 4 + 0] = (uint32_t)r[i].lo;
+        tab[i * 4 + 1] = (uint32_t)len;
+        tab[i * 4 + 2] = (uint32_t)(o >> 2);
+        tab[i * 4 + 3] = (uint32_t)(r[i].xlo - r[i].lo) | (uint32_t)((r[i].xhi - r[i].lo + 3) >> 2) << 8;
+        o += (len + 255) & ~255ull;
+    }
+    *used = o;
+    return m;
+}
+// ---- end gmap_build
+
+static void gfast_prepare(VkCommandBuffer cb) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_VK_GMEM_FAST"); on = !e || atoi(e) != 0; }
+    memset(gmap_tab, 0, sizeof gmap_tab);
+    gfast_n = 0;
+    if (!gc_lazy) gmem_info();  // (the heap import, made on first use)
+    gfast_info();
+    if (!on || (!gmem_buf && !gc_lazy)) return;
+    gfast_flags_poll();
+    uint64_t sa[16], ss[16], top = gc_lazy ? gmem_heap_size() : gmem_size;
+    for (int i = 0; i < 16; i++) {  // heap offsets of the bound storage buffers (overlap: a snapshotted range's copy)
+        uint64_t a = sbufs(5)[i].addr, sz = sbufs(5)[i].size;
+        bool use = a && sz && a >= HEAP_BASE && gmem_covers(a - HEAP_BASE, sz);
+        sa[i] = use ? a - HEAP_BASE : 0, ss[i] = use ? sz : 0;
+    }
+    GmapEnt r[16];
+    uint64_t off = 0;
+    int m = gmap_build(sa, ss, top, (uint64_t)GFAST_FLAG_WORD * 4, r, gmap_tab, &off);
+    if (m < 0) { memset(gmap_tab, 0, sizeof gmap_tab); return; }  // (too much: the heap as before; the flags sit above)
+    VkBufferCopy cp[16];
+    for (int i = 0; i < m; i++) {
+        cp[i] = (VkBufferCopy){r[i].lo, r[i].off, r[i].hi - r[i].lo};
+        gfast_back[i] = (VkBufferCopy){r[i].off + (r[i].xlo - r[i].lo), r[i].xlo, r[i].xhi - r[i].xlo};
         gfast_slots[i] = r[i].slots;
-        gmap_tab[i * 4 + 0] = (uint32_t)r[i].lo;
-        gmap_tab[i * 4 + 1] = (uint32_t)len;
-        gmap_tab[i * 4 + 2] = (uint32_t)(off >> 2);
-        off += (len + 255) & ~255ull;
     }
     if (!m) return;
     if (!++gfast_stamp) gfast_stamp = 1;
