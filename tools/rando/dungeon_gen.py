@@ -103,10 +103,19 @@ def map_shift(romfs, level, cell):
     return map_shifts(romfs).get(anim, (0.0, 0.0))
 
 
-def on_map(romfs, level, c, r):
-    """Cell (c, r) is drawn on its floor's map paper."""
+def floor_room(level, cell, room):
+    """The room whose map row (floor, map page) a cell takes: LINK_LEVELS - a room of the level moved there keeps
+    its own floor (Eagle's Tower keeps the orange / blue pegs' state per floor: 04G moved into a cell with the
+    entrance's floor showed 1F's state, not 3F's - play test, DevEaglePlay); otherwise the cell's own."""
+    if room and level in LINK_LEVELS and rooms.level_of(room) == level and room != cell:
+        return room
+    return cell
+
+
+def on_map(romfs, level, c, r, room=None):
+    """Cell (c, r) is drawn on its floor's map paper (room: the room placed there, floor_room)."""
     name = cell_name(level, c, r)
-    sx, sy = map_shift(romfs, level, name)
+    sx, sy = map_shift(romfs, level, floor_room(level, name, room))
     c, r = ord(name[-1]) - ord('A'), int(name[-3:-1])  # (the map draws a cell by its name: Eagle's Tower)
     if not (0 <= c < COLS and 1 <= r <= ROWS):
         # the map holds 8 x 8 named cells: Eagle's Tower's spare names (rows 09 / 10, columns I / J) crashed the game
@@ -504,6 +513,9 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
                     n = fits(room, c, r)
                     if n is None:
                         continue
+                    if romfs and floor_room(level, names[(c, r)], room) != names[(c, r)] and \
+                            not on_map(romfs, level, c, r, room):
+                        continue  # (on its own floor's map page it would be off the paper)
                     if romfs and len(tex | room_textures(romfs, room)) > TEXTURE_BUDGET:
                         continue
                     # grow while small (rooms opening 1-2 more doorways first), then close (rooms opening nothing
@@ -1213,7 +1225,7 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                 reserved = {cell_pos(n) for n in offgrid_rooms(romfs, cat, lv) if re.match(r'.*_\d\d[A-Z]$', n)}
                 free_cells = [(c, r) for c in range(grid_size(lv)[0]) for r in range(1, grid_size(lv)[1] + 1)
                               if (c, r) not in taken and (c, r) not in reserved and (c, r) not in dead_shadow(lv)
-                              and on_map(romfs, lv, c, r)]
+                              and on_map(romfs, lv, c, r) and on_map(romfs, lv, c, r, room)]
                 rng.shuffle(free_cells)
                 for c, r in free_cells:
                     ok = True
@@ -1300,7 +1312,8 @@ def write_all(romfs, out, layouts, jumps=None):
     with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'dungeon_map.tsv'), 'w') as f:
         for lv, L in layouts.items():
             for cell in sorted(L):
-                f.write('%s\t%s\t%g\t%g\n' % (lv, cell.rsplit('_', 1)[1], *map_shift(romfs, lv, cell)))
+                f.write('%s\t%s\t%g\t%g\n' % (lv, cell.rsplit('_', 1)[1],
+                                                *map_shift(romfs, lv, floor_room(lv, cell, L[cell]))))
     # each cell's room (level, cell, room): the check tracker places a moved room's checks in the dungeon and cell it
     # sits in now (tools/rando/tracker.py)
     with open(os.path.join(os.path.dirname(os.path.abspath(out)), 'dungeon_rooms.tsv'), 'w') as f:
@@ -1528,9 +1541,23 @@ def _dungeon_map_rooms(romfs, out, layout, entrance):
     keep = [x for x in sheet['values'] if not oead_tools.parseStruct(x)['mLeaName'].startswith(level + '_')
             or oead_tools.parseStruct(x)['mLeaName'] in names]
     sheet['values'] = keep
-    have = {oead_tools.parseStruct(x)['mLeaName'] for x in sheet['values']}
+    rows = {oead_tools.parseStruct(x)['mLeaName']: oead_tools.parseStruct(x) for x in sheet['values']}
+    if level in LINK_LEVELS:  # (a room of the level moved here keeps its own floor and map page: floor_room)
+        for i, x in enumerate(sheet['values']):
+            d = oead_tools.parseStruct(x)
+            src = floor_room(level, d['mLeaName'], layout.get(d['mLeaName']))
+            if src != d['mLeaName'] and src in rows:
+                e = dict(d)
+                e['mFloor'], e['mAnimFloorIndex'] = rows[src]['mFloor'], rows[src]['mAnimFloorIndex']
+                sheet['values'][i] = oead_tools.dictToStruct(e)
+    have = set(rows)
     for cell in sorted(names):
-        if cell not in have:
+        if cell not in have and floor_room(level, cell, layout.get(cell)) in rows:
+            e = dict(rows[floor_room(level, cell, layout.get(cell))])
+            e['mLeaName'] = cell
+            e['mIsBoss'] = False
+            sheet['values'].append(oead_tools.dictToStruct(e))
+        elif cell not in have:
             e = dict(tmpl)
             e['mLeaName'] = cell
             e['mIsBoss'] = False
