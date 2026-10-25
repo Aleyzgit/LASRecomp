@@ -87,3 +87,10 @@ bool game_version_select(const char *game_dir, char *why, size_t why_size) {
 }
 
 const GameVersion *game_version(void) { return g_version; }
+
+uint64_t game_romfs_bytes(const GameVersion *v) {
+    if (!v) return 0;
+    if (!strcmp(v->key, "v1_0_0")) return 6232003695ull;
+    if (!strcmp(v->key, "v1_0_1")) return 6232003903ull;  // (1.0.1 and 1.1.0 have the same RomFS)
+    return 0;
+}
