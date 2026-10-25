@@ -1518,7 +1518,7 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             static const char *const gl_small[] = {
                 "(%s >> (uint(ga & 3ul) * 8u)) & 0xFFu", "uint(sx8(%s >> (uint(ga & 3ul) * 8u)))",
                 "(%s >> (uint(ga & 2ul) * 8u)) & 0xFFFFu", "uint(sx16(%s >> (uint(ga & 2ul) * 8u)))"};
-            sp(&c->body, "      uint fw = ok ? gfind(uint(ga)) : 0xFFFFFFFFu;\n");
+            sp(&c->body, "      uint fw = ok ? %s(uint(ga)) : 0xFFFFFFFFu;\n", store ? "gfindw" : "gfind");  // (a store: flags its range)
             if (!store) {
                 if (size < 4) {
                     if (d != RZ) {
@@ -2055,6 +2055,10 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
            c->uses_gmem_store ? "" : "readonly ");
         sp(&s, "uint gfind(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
                "if (g >= gmap[i].x && o < gmap[i].y) return gmap[i].z + (o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
+        if (c->uses_gmem_store)  // (the stores' lookup: also flags the range with the dispatch's stamp, GFAST_FLAG_WORD)
+            sp(&s, "uint gfindw(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
+                   "if (g >= gmap[i].x && o < gmap[i].y) { gfast_.w[%uu + i] = gmap[%d].y; return gmap[i].z + (o >> 2); } } "
+                   "return 0xFFFFFFFFu; }\n", GMAP_MAX, GFAST_FLAG_WORD, GMAP_MAX);
     }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
         sp(&s, "layout(std140, set = %d, binding = 18) uniform RScale { vec4 rscale[%d]; };\n", set,
