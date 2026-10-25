@@ -19,6 +19,7 @@
 #include "../rando.h"
 #include "../ipc.h"
 #include "../platform.h"
+#include "../game_addresses.h"
 #include "../romfs_build.h"
 
 #define FS_PATH_NOT_FOUND MAKE_RESULT(2, 1)
@@ -430,6 +431,12 @@ static void rom_index(void) {
     if (ov_n) LOG("[fs] randomizer: %d romfs files replaced\n", ov_n);
     if (ov_meta) { patches[npatches++] = (Patch){ov_meta_off, ov_meta_size, ov_meta}; }
     rt_romfs_files = rom_nfiles;  // (the game's own: before a seed's added files; the crash dialog checks it)
+    rt_romfs_bytes = 0;
+    for (int i = 0; i < rom_nfiles; i++) rt_romfs_bytes += rom_files[i].size;  // (the game's sizes, not a seed's)
+    uint64_t want = game_romfs_bytes(game_version());
+    if (want && rt_romfs_bytes != want)
+        LOG("[fs] romfs: %llu bytes in %d files, this version's are %llu: damaged or changed game files\n",
+            (unsigned long long)rt_romfs_bytes, rom_nfiles, (unsigned long long)want);
     add_new_files(h, dmeta, dsz, fsz);
     qsort(rom_files, rom_nfiles, sizeof *rom_files, rom_cmp);
     free(dmeta);

@@ -44,6 +44,9 @@ const char *game_release_label(const char *exefs_dir, char *buf, size_t size);
 bool game_version_select(const char *game_dir, char *why, size_t why_size);
 // The selected version (NULL before game_version_select).
 const GameVersion *game_version(void);
+// The bytes of all the game's RomFS files in version v, summed (0: unknown). A copy with every file there but another
+// total has a damaged or changed file (issue #391). Only the totals ship.
+uint64_t game_romfs_bytes(const GameVersion *v);
 
 #ifdef __cplusplus
 }
