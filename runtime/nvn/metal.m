@@ -21,6 +21,7 @@
 #include "texpatch.h"
 #include "tex_hash.h"
 #include "screen_filter.h"
+#include "hdr.h"
 
 static id<MTLDevice> dev;
 static id<MTLCommandQueue> queue;
@@ -176,7 +177,11 @@ typedef struct {
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     bool format_views;   // allocated with MTLTextureUsagePixelFormatView (NvnTexture.format_views)
+    uint32_t wseq;       // bumped on every write (render target, copy destination, upload): HDR's float copy (below)
 } TexBackend;
+static id<MTLTexture> g_hdr_tex;  // HDR's float copy (renderer_hdr_target)
+static NvnTexture *g_hdr_owner;
+static uint32_t g_hdr_seq;
 
 // Live textures (diagnostics: the overworld slowdown at 32:9 - the same textures used 870 MB and 4x the GPU time
 // until a window resize reallocated them; user 2026-10-09). Dumped when the frame rate stays low.
@@ -508,6 +513,7 @@ void backend_texture_destroyed(NvnTexture *t) {
     renderer_texture_gone(t, NULL);  // its snapshot copy
     if (b) { reg_remove(b); release_backend_texture(t, b); free(b); }
     t->backend = NULL;
+    if (g_hdr_owner == t) g_hdr_owner = NULL;
 }
 
 static uint64_t g_frame_counter;  // presents so far (the game thread)
@@ -644,7 +650,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncode
 
 id<MTLTexture> renderer_texture(NvnTexture *t, id<MTLBlitCommandEncoder> blit, bool for_render) {
     TexBackend *b = tex_backend(t);
-    if (for_render) b->gpu_owned = true;
+    if (for_render) b->gpu_owned = true, b->wseq++;
     else if (!b->gpu_owned) upload_texture(t, b, blit);
     return b->tex;
 }
@@ -653,7 +659,28 @@ id<MTLTexture> renderer_texture(NvnTexture *t, id<MTLBlitCommandEncoder> blit, b
 void renderer_mark_gpu_owned(NvnTexture *t) {
     TexBackend *b = tex_backend(t);
     b->gpu_owned = true;
+    b->wseq++;
     if (b->scalable) { b->sx = g_rs_x; b->sy = g_rs_y; }
+}
+
+// HDR (hdr.h): the frame's final image as a float image (extended sRGB), drawn right after the game's copy into its
+// window image (renderer.m copy_texture). One for all window images: each present is committed before the next
+// frame's work on the same queue, so it reads it before the next copy writes it. Current for window image t while
+// nothing else wrote t since (g_hdr_seq: its wseq then).
+id<MTLTexture> renderer_hdr_target(NvnTexture *t, id<MTLTexture> d) {
+    TexBackend *b = tex_backend(t);
+    if (!g_hdr_tex || g_hdr_tex.width != d.width || g_hdr_tex.height != d.height) {
+        MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                                                     width:d.width height:d.height mipmapped:NO];
+        td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        td.storageMode = MTLStorageModePrivate;
+        g_hdr_tex = [dev newTextureWithDescriptor:td];
+    }
+    g_hdr_owner = t, g_hdr_seq = b->wseq;
+    return g_hdr_tex;
+}
+static bool hdr_copy_current(NvnTexture *t, TexBackend *b) {
+    return g_hdr_tex && g_hdr_owner == t && g_hdr_seq == b->wseq && g_hdr_tex.width == b->tex.width && g_hdr_tex.height == b->tex.height;
 }
 // The part of a scalable texture its contents occupy (Dynamic: the render scale over the allocation scale; 1 otherwise).
 void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy) {
@@ -669,6 +696,7 @@ void backend_pool_written(uint64_t addr, uint64_t size) { (void)addr; (void)size
 static void upload_rgba_now(NvnTexture *t, const void *rgba, uint32_t w, uint32_t h, uint32_t stride) {
     TexBackend *b = tex_backend(t);
     b->gpu_owned = true;
+    b->wseq++;
     @autoreleasepool {
         id<MTLBuffer> staging = [dev newBufferWithBytes:rgba length:(NSUInteger)stride * h options:MTLResourceStorageModeShared];
         id<MTLCommandBuffer> cb = [queue commandBuffer];
@@ -725,6 +753,7 @@ void backend_pool_pop(void *p) { objc_autoreleasePoolPop(p); }
 
 static bool upload_nv12_now(NvnTexture *t, const void *nv12, uint32_t w, uint32_t h, uint32_t stride, uint32_t uv_off) {
     TexBackend *b = tex_backend(t);
+    b->wseq++;
     MTLPixelFormat pf = b->tex.pixelFormat, raw;  // (the bytes as written, as the RGBA upload did: no sRGB encoding)
     if (!nv12_raw_format(pf, &raw)) return false;
     static id<MTLTexture> ty, tuv;
@@ -816,6 +845,49 @@ static const char *present_src =
     SCREEN_FILTER_SRC("float3")  // (the screen filter: screen_filter.h)
     "  return float4(c, 1.0); }\n";
 
+// HDR present (hdr.h): the game image arrives as extended sRGB (the window image's float copy, or the 8-bit image),
+// goes through SMAA / MetalFX like the 8-bit one, gets the screen filter, and is decoded to linear for the
+// RGBA16Float layer (1 = paper white). With an overlay up, the image stays encoded in a float image the size of the
+// drawable, the overlay is drawn on it exactly as on the SDR layer, and fs_dec decodes the result into the drawable.
+static const char *hdr_present_src =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct V { float4 pos [[position]]; float2 uv; };\n"
+    "vertex V vs(uint vid [[vertex_id]], constant float4 *pv [[buffer(0)]]) {\n"
+    "  float2 p = float2((vid << 1) & 2, vid & 2);\n"
+    "  V o; o.pos = float4(p * 2.0 - 1.0, 0, 1);\n"
+    "  float2 uv = float2(p.x, pv[0].x > 0.5 ? p.y : 1.0 - p.y); o.uv = pv[1].xy + uv * pv[1].zw; return o; }\n"
+    "static float3 dec(float3 e) { e = max(e, 0.0); return select(pow((e + 0.055) / 1.055, 2.4), e / 12.92, e <= 0.04045); }\n"
+    "static float3 enc(float3 c) { c = max(c, 0.0); return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308); }\n"
+    "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]],\n"
+    "                   constant float4 &pf [[buffer(0)]]) {\n"
+    "  float3 c = t.sample(s, in.uv).rgb;\n"
+    SCREEN_FILTER_SRC("float3")
+    "  return float4(pf.y > 0.5 ? dec(c) : c, 1.0); }\n"
+    "fragment float4 fs_dec(V in [[stage_in]], texture2d<float> t [[texture(0)]]) {\n"
+    "  return float4(dec(t.read(uint2(in.pos.xy)).rgb), 1.0); }\n"
+    "fragment float4 fs_copy(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "  return float4(t.sample(s, in.uv).rgb, 1.0); }\n"
+    "fragment float4 fs_shot(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "  return float4(enc(clamp(t.sample(s, in.uv).rgb, 0.0, 1.0)), 1.0); }\n";
+static id<MTLRenderPipelineState> hdr_pipes[4];  // fs, fs_dec, fs_copy (RGBA16Float targets), fs_shot (RGBA8Unorm)
+static id<MTLRenderPipelineState> hdr_pipe(int i) {
+    if (!hdr_pipes[i]) {
+        NSError *err = nil;
+        static id<MTLLibrary> lib;
+        if (!lib) lib = [dev newLibraryWithSource:@(hdr_present_src) options:nil error:&err];
+        if (!lib) FATAL("HDR present shader: %s\n", err.localizedDescription.UTF8String);
+        static NSString *const fn[] = {@"fs", @"fs_dec", @"fs_copy", @"fs_shot"};
+        MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
+        pd.vertexFunction = [lib newFunctionWithName:@"vs"];
+        pd.fragmentFunction = [lib newFunctionWithName:fn[i]];
+        pd.colorAttachments[0].pixelFormat = i == 3 ? MTLPixelFormatRGBA8Unorm : MTLPixelFormatRGBA16Float;
+        hdr_pipes[i] = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
+        if (!hdr_pipes[i]) FATAL("HDR present pipeline: %s\n", err.localizedDescription.UTF8String);
+    }
+    return hdr_pipes[i];
+}
+
 void backend_init(void) {
     while (!atomic_load(&ui_ready)) usleep(1000);
     queue = [dev newCommandQueue];
@@ -825,7 +897,7 @@ void backend_init(void) {
     MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
     pd.vertexFunction = [lib newFunctionWithName:@"vs"];
     pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
-    pd.colorAttachments[0].pixelFormat = layer.pixelFormat;
+    pd.colorAttachments[0].pixelFormat = MTLPixelFormatBGRA8Unorm;  // (the SDR layer; HDR: hdr_pipe)
     present_pipe = [dev newRenderPipelineStateWithDescriptor:pd error:&err];
     MTLSamplerDescriptor *sd = [MTLSamplerDescriptor new];
     sd.minFilter = sd.magFilter = MTLSamplerMinMagFilterLinear;
@@ -1186,7 +1258,8 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     }
     id<MTLRenderCommandEncoder> e = [cb renderCommandEncoderWithDescriptor:rp];
     float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
-    [e setRenderPipelineState:pipe];
+    // (an HDR window image: linear, extended -> sRGB, clipped at paper white)
+    [e setRenderPipelineState:tex.pixelFormat == MTLPixelFormatRGBA16Float ? hdr_pipe(3) : pipe];
     if (g_save_upright || strstr(path, "window")) flip = 0;  // the window image is already upright
     float pv[8] = {flip, 0, 0, 0, shot_crop[0], shot_crop[1], shot_crop[2], shot_crop[3]};
     [e setVertexBytes:pv length:sizeof pv atIndex:0];
@@ -1199,6 +1272,16 @@ void renderer_save_texture(id<MTLTexture> tex, const char *path) {
     [e endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
+    if (tex.pixelFormat == MTLPixelFormatRGBA16Float && getenv("LARECOMP_HDR_SHOT_RAW")) {  // (test: <path>.f16, the
+        NSUInteger rw = tex.width, rh = tex.height;                                          // linear values as shown)
+        uint16_t *hp = malloc(rw * rh * 8);
+        [tex getBytes:hp bytesPerRow:rw * 8 fromRegion:MTLRegionMake2D(0, 0, rw, rh) mipmapLevel:0];
+        char rp_[300];
+        snprintf(rp_, sizeof rp_, "%s.f16", path);
+        FILE *rf = fopen(rp_, "wb");
+        if (rf) { uint32_t hd[2] = {(uint32_t)rw, (uint32_t)rh}; fwrite(hd, 4, 2, rf); fwrite(hp, 8, rw * rh, rf); fclose(rf); }
+        free(hp);
+    }
     uint8_t *px = malloc(w * h * 4);
     [dst getBytes:px bytesPerRow:w * 4 fromRegion:MTLRegionMake2D(0, 0, w, h) mipmapLevel:0];
     CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
@@ -1264,8 +1347,24 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         if (!drawable) return;  // (timed out: this frame isn't shown; the window keeps the last one)
         __atomic_add_fetch(&g_presents_inflight, 1, __ATOMIC_RELAXED);
         id<MTLCommandBuffer> cb = [queue commandBuffer];
+        // HDR layer (hdr.h): the game image is presented from its float copy; with an overlay up, game + overlay go to
+        // a float image first (target) and are decoded into the drawable after the overlay
+        bool hdr = drawable.texture.pixelFormat == MTLPixelFormatRGBA16Float;
+        bool hdr_menu = hdr && menu_render_wanted();
+        id<MTLTexture> target = drawable.texture;
+        if (hdr_menu) {
+            static id<MTLTexture> comp;
+            if (!comp || comp.width != target.width || comp.height != target.height) {
+                MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                             width:target.width height:target.height mipmapped:NO];
+                td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+                td.storageMode = MTLStorageModePrivate;
+                comp = [dev newTextureWithDescriptor:td];
+            }
+            target = comp;
+        }
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
-        rp.colorAttachments[0].texture = drawable.texture;
+        rp.colorAttachments[0].texture = target;
         rp.colorAttachments[0].loadAction = MTLLoadActionClear;
         rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
@@ -1304,8 +1403,35 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         extern void renderer_set_alloc_scale(float ax, float ay);
         renderer_set_alloc_scale((float)os.ax, (float)os.ay);
         renderer_set_scale((float)sx, (float)sy);
+        float pair_pv[8] = {0}, pair_vp[4] = {0}, pair_fx = 1, pair_fy = 1;  // (LARECOMP_HDR_PAIR, below)
         if (b && b->tex) {
             id<MTLTexture> src = raw_view(b->tex);
+            if (hdr) {  // the float copy; none this frame (a movie, a frame drawn otherwise): the 8-bit image, copied into it
+                if (!hdr_copy_current(t, b)) {
+                    id<MTLTexture> h = renderer_hdr_target(t, b->tex);
+                    [enc endEncoding];
+                    MTLRenderPassDescriptor *rc = [MTLRenderPassDescriptor renderPassDescriptor];
+                    rc.colorAttachments[0].texture = h;
+                    rc.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+                    rc.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    id<MTLRenderCommandEncoder> ce = [cb renderCommandEncoderWithDescriptor:rc];
+                    float cpv[8] = {0, 0, 0, 0, 0, 0, 1, 1};
+                    [ce setRenderPipelineState:hdr_pipe(2)];
+                    [ce setVertexBytes:cpv length:sizeof cpv atIndex:0];
+                    [ce setFragmentTexture:src atIndex:0];
+                    [ce setFragmentSamplerState:present_sampler atIndex:0];
+                    [ce drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                    [ce endEncoding];
+                    MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
+                    rp2.colorAttachments[0].texture = target;
+                    rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
+                    rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    enc = [cb renderCommandEncoderWithDescriptor:rp2];
+                    static int n;
+                    if (n++ < 5) LOG("[hdr] frame %llu: no float copy, presenting the 8-bit image\n", (unsigned long long)frame);
+                }
+                src = g_hdr_tex;
+            }
             // Dynamic: the image occupies the top-left part of the texture (its contents' scale over the allocation's)
             extern void renderer_texture_fraction(NvnTexture *t, float *fx, float *fy);
             float fx, fy;
@@ -1316,7 +1442,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 [enc endEncoding];
                 src = smaa_encode(cb, src, fx, fy);
                 MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
-                rp2.colorAttachments[0].texture = drawable.texture;
+                rp2.colorAttachments[0].texture = target;
                 rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
                 rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
                 enc = [cb renderCommandEncoderWithDescriptor:rp2];
@@ -1330,7 +1456,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 [enc endEncoding];
                 up = metalfx_encode(cb, src, fx, fy);  // (the scaler maps the content part to its whole output)
                 MTLRenderPassDescriptor *rp2 = [MTLRenderPassDescriptor renderPassDescriptor];
-                rp2.colorAttachments[0].texture = drawable.texture;
+                rp2.colorAttachments[0].texture = target;
                 rp2.colorAttachments[0].loadAction = MTLLoadActionLoad;
                 rp2.colorAttachments[0].storeAction = MTLStoreActionStore;
                 enc = [cb renderCommandEncoderWithDescriptor:rp2];
@@ -1340,11 +1466,14 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             if (!up) { crop[0] *= fx; crop[1] *= fy; crop[2] *= fx; crop[3] *= fy; }  // (sampled directly: the content part)
             float flip = renderer_origin_lower_left() ? 1.0f : 0.0f;
             [enc setViewport:(MTLViewport){vx, vy, vw, vh, 0, 1}];
-            [enc setRenderPipelineState:present_pipe];
+            [enc setRenderPipelineState:hdr ? hdr_pipe(0) : present_pipe];
             float pv[8] = {flip, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
             [enc setVertexBytes:pv length:sizeof pv atIndex:0];
             float pf[4];
             screen_filter_params(pf);
+            pf[1] = hdr && !hdr_menu;  // (HDR: decode to linear, unless the overlay is drawn on it first)
+            memcpy(pair_pv, pv, sizeof pv);
+            pair_vp[0] = (float)vx, pair_vp[1] = (float)vy, pair_vp[2] = (float)vw, pair_vp[3] = (float)vh, pair_fx = fx, pair_fy = fy;
             [enc setFragmentBytes:pf length:sizeof pf atIndex:0];
             [enc setFragmentTexture:src atIndex:0];
             [enc setFragmentSamplerState:present_sampler atIndex:0];
@@ -1354,7 +1483,21 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
         static long menu_at = -1;  // test hook: open the menu at this frame (LARECOMP_MENU_AT)
         if (menu_at < 0) menu_at = getenv("LARECOMP_MENU_AT") ? atol(getenv("LARECOMP_MENU_AT")) : 0;
         if (menu_at && (long)frame + 1 == menu_at) { extern void menu_test_open(void); menu_test_open(); }
-        menu_render(dev, cb, drawable.texture);
+        if (!hdr) menu_render(dev, cb, drawable.texture);
+        else if (hdr_menu) {  // (HDR without an overlay: none this frame - it never draws onto the linear drawable)
+            menu_render(dev, cb, target);
+            MTLRenderPassDescriptor *rd = [MTLRenderPassDescriptor renderPassDescriptor];
+            rd.colorAttachments[0].texture = drawable.texture;
+            rd.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+            rd.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> de = [cb renderCommandEncoderWithDescriptor:rd];
+            float dpv[8] = {0, 0, 0, 0, 0, 0, 1, 1};
+            [de setRenderPipelineState:hdr_pipe(1)];
+            [de setVertexBytes:dpv length:sizeof dpv atIndex:0];
+            [de setFragmentTexture:target atIndex:0];
+            [de drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [de endEncoding];
+        }
         static long win_shot = -1;  // LARECOMP_WINDOW_SHOT=<frame>: save the final window image (game + menu)
         if (win_shot < 0) win_shot = getenv("LARECOMP_WINDOW_SHOT") ? atol(getenv("LARECOMP_WINDOW_SHOT")) : 0;
         id<MTLTexture> shot_tex = nil;
@@ -1367,6 +1510,33 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             id<MTLBlitCommandEncoder> bl = [cb blitCommandEncoder];
             [bl copyFromTexture:drawable.texture toTexture:shot_tex];
             [bl endEncoding];
+        }
+        // LARECOMP_HDR_PAIR=1 (test): with an HDR window shot, the same frame through the SDR present too (SMAA as
+        // set, no MetalFX, no overlay) -> <shot>.sdr.png
+        id<MTLTexture> pair_tex = nil;
+        if (shot_tex && hdr && b && b->tex && getenv("LARECOMP_HDR_PAIR")) {
+            id<MTLTexture> s8 = raw_view(b->tex);
+            if (g_settings.antialias == AA_SMAA) s8 = smaa_encode(cb, s8, pair_fx, pair_fy);
+            MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                         width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
+            td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+            pair_tex = [dev newTextureWithDescriptor:td];
+            MTLRenderPassDescriptor *pp = [MTLRenderPassDescriptor renderPassDescriptor];
+            pp.colorAttachments[0].texture = pair_tex;
+            pp.colorAttachments[0].loadAction = MTLLoadActionClear;
+            pp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
+            pp.colorAttachments[0].storeAction = MTLStoreActionStore;
+            id<MTLRenderCommandEncoder> pe = [cb renderCommandEncoderWithDescriptor:pp];
+            [pe setViewport:(MTLViewport){pair_vp[0], pair_vp[1], pair_vp[2], pair_vp[3], 0, 1}];
+            [pe setRenderPipelineState:present_pipe];
+            [pe setVertexBytes:pair_pv length:sizeof pair_pv atIndex:0];
+            float pf[4];
+            screen_filter_params(pf);
+            [pe setFragmentBytes:pf length:sizeof pf atIndex:0];
+            [pe setFragmentTexture:s8 atIndex:0];
+            [pe setFragmentSamplerState:present_sampler atIndex:0];
+            [pe drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+            [pe endEncoding];
         }
         // The GPU clock and the game's 30 fps mode (macOS). The system runs the GPU at the lowest clock that meets the
         // presentation deadline it can infer. A plain present carries none, so once a 5120x1440 frame misses 60 and
@@ -1393,7 +1563,7 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
                 if (e && sscanf(e, "%ld,%ld,%ld", &af_from, &af_every, &af_count) == 3) mkdir("build/aframes", 0755);
                 else af_from = -1;
             }
-            if (af_from >= 0 && (long)frame >= af_from && af_every > 0 && ((long)frame - af_from) % af_every == 0 && ((long)frame - af_from) / af_every < af_count) {
+            if (af_from >= 0 && !hdr && (long)frame >= af_from && af_every > 0 && ((long)frame - af_from) % af_every == 0 && ((long)frame - af_from) / af_every < af_count) {
                 MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:drawable.texture.pixelFormat
                                              width:drawable.texture.width height:drawable.texture.height mipmapped:NO];
                 td.usage = MTLTextureUsageShaderRead;
@@ -1447,6 +1617,11 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
             [cb waitUntilCompleted];
             // LARECOMP_SHOT_PATH: where (parallel test runs each write their own; default build/window.png)
             g_save_upright = true;
+            if (pair_tex) {
+                char pp[300];
+                snprintf(pp, sizeof pp, "%s.sdr.png", g_window_shot_request[0] ? g_window_shot_request : "build/window.png");
+                renderer_save_texture(pair_tex, pp);
+            }
             if (g_window_shot_request[0]) {
                 renderer_save_texture(shot_tex, g_window_shot_request);
                 g_window_shot_request[0] = 0;
@@ -1495,6 +1670,15 @@ void backend_present_now(NvnTexture *t, uint64_t frame) {
     prev_present = now;
     if (now - last_fps_time >= fps_iv) {
         extern const char *game_level_name(void);
+        static int win_gpu = -1;  // LARECOMP_LOG_WIN_GPU=1 (test): GPU ms per frame, the game's and the window image's
+        if (win_gpu < 0) win_gpu = getenv("LARECOMP_LOG_WIN_GPU") != NULL;
+        if (win_gpu && last_fps_time > 0) {
+            extern uint64_t g_gpu_total_ns, g_gpu_win_ns;
+            static uint64_t g0, w0;
+            uint64_t g1 = __atomic_load_n(&g_gpu_total_ns, __ATOMIC_RELAXED), w1 = __atomic_load_n(&g_gpu_win_ns, __ATOMIC_RELAXED);
+            if (g0 && frames) LOG("[gpu] frame %llu game %.3f window %.3f ms/frame\n", (unsigned long long)frame, (g1 - g0) / 1e6 / frames, (w1 - w0) / 1e6 / frames);
+            g0 = g1, w0 = w1;
+        }
         if (last_fps_time > 0) LOG("[metal] t=%.1f frame %llu %.1f fps max %.0fms level %s (%s)\n", now, (unsigned long long)frame,
                                    frames / (now - last_fps_time), max_gap * 1000.0, game_level_name(), renderer_stats());
         {   // (diagnostics) frame rate low for two periods in a row: what's allocated (at most once a minute)
@@ -1617,7 +1801,7 @@ int ui_run(void) {
     ui_window_init();
     atomic_store(&ui_ready, true);
     for (;;) {
-        if (rt_reboot_requested()) return rt_reboot_requested();  // (runtime/main.c tears the game down)
+        if (rt_reboot_requested()) { hdr_ui_leave((__bridge void *)layer); return rt_reboot_requested(); }  // (runtime/main.c tears the game down)
         SDL_Event e;
         while (SDL_WaitEventTimeout(&e, 16)) {
             input_rumble_poll();
@@ -1630,6 +1814,7 @@ int ui_run(void) {
         menu_apply_window_requests(window);
         input_rumble_poll();
         input_led_poll();
+        hdr_ui_update(window, (__bridge void *)layer);  // (HDR layer while the game runs, if chosen)
         int w, h;
         SDL_GetWindowSizeInPixels(window, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);

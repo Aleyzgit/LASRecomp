@@ -19,6 +19,9 @@ bool menu_is_open(void);
 // Main thread: apply window requests (fullscreen) made from the menu.
 void menu_apply_window_requests(void *sdl_window);
 
+// Render thread: whether menu_render will draw anything this frame (the menu or an overlay)
+bool menu_render_wanted(void);
+
 #if defined(__APPLE__) && defined(__OBJC__)
 // Render thread: draw the overlay into the drawable after the game image (no-op while closed).
 void menu_render(id<MTLDevice> dev, id<MTLCommandBuffer> cb, id<MTLTexture> target);

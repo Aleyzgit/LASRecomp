@@ -33,6 +33,8 @@ typedef struct {
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)
     bool upscaler_auto;  // never chosen: the default for this GPU (settings_resolve_defaults); saved as "auto"
     int antialias;       // AA_*: anti-aliasing of the game image before it is scaled to the window
+    bool hdr;            // HDR output (macOS, displays with headroom; runtime/nvn/hdr.m)
+    int hdr_peak;        // its peak brightness, percent of the display's headroom (100: the display's maximum)
     float volume;        // master volume, 1 = 100%
     bool reverb;         // room reverb effect
     bool movie_audio;

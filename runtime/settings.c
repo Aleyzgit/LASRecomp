@@ -41,6 +41,7 @@ Settings g_settings = {
     .walk_speed_dungeons = false,
     .upscaler = UPSCALE_SHARP,  // (MetalFX on macOS, AMD FSR 1 on Windows)
     .upscaler_auto = true,
+    .hdr_peak = 100,
     .res_auto = true,
     .livesplit_host = "localhost:16834",
 #ifndef __APPLE__
@@ -167,6 +168,8 @@ void settings_load(void) {
             if (!g_settings.upscaler_auto) g_settings.upscaler = !strcmp(val, "bilinear") ? UPSCALE_BILINEAR : UPSCALE_SHARP;
             else g_settings.upscaler = g_default_upscaler;
         }
+        else if (!strcmp(key, "hdr")) g_settings.hdr = atoi(val) != 0;
+        else if (!strcmp(key, "hdr_peak")) g_settings.hdr_peak = atoi(val);
         else if (!strcmp(key, "antialias")) g_settings.antialias = !strcmp(val, "off") ? AA_OFF : AA_SMAA;  // ("fxaa": SMAA now)
         else if (!strcmp(key, "inv_keys")) g_settings.inv_keys = atoi(val) != 0;
         else if (!strcmp(key, "dpad_move")) g_settings.dpad_move = atoi(val) != 0;
@@ -233,6 +236,7 @@ void settings_load(void) {
     if (g_settings.volume < 0) g_settings.volume = 0;
     if (g_settings.volume > 2) g_settings.volume = 2;
     if (g_settings.rumble_strength < 25 || g_settings.rumble_strength > 100) g_settings.rumble_strength = 100;
+    if (g_settings.hdr_peak < 10 || g_settings.hdr_peak > 100) g_settings.hdr_peak = 100;
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
@@ -249,6 +253,7 @@ void settings_save(void) {
     fprintf(f, "upscaler = %s\n", g_settings.upscaler_auto ? "auto" : g_settings.upscaler == UPSCALE_METALFX ? "metalfx" :
                                    g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" : "bilinear");
     fprintf(f, "antialias = %s\n", g_settings.antialias == AA_SMAA ? "smaa" : "off");
+    fprintf(f, "hdr = %d\nhdr_peak = %d\n", g_settings.hdr, g_settings.hdr_peak);
     fprintf(f, "resolution = %s\n", g_settings.res_auto ? "auto" : res_name(g_settings.res_mode));
     fprintf(f, "inv_keys = %d\n", g_settings.inv_keys);
     fprintf(f, "dpad_move = %d\n", g_settings.dpad_move);

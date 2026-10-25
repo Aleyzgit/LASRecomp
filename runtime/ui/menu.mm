@@ -32,6 +32,9 @@ extern "C" {
 #include "../hle.h"
 #include "../settings.h"
 #include "menu.h"
+#ifdef __APPLE__
+#include "../nvn/hdr.h"
+#endif
 void input_reset(void);
 void save_editor_draw(float scale);  // save_editor.mm
 extern "C" int game_in_play(void);  // hle/warp.c
@@ -416,6 +419,15 @@ static void tab_display(void) {
         g_want_fullscreen_apply.store(true);
     }
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
+#ifdef __APPLE__
+    if (hdr_display_capable()) {  // (only on a display with HDR headroom: runtime/nvn/hdr.m)
+        opt_toggle("HDR", &g_settings.hdr, false, "Brighter highlights on HDR displays.");
+        if (!g_settings.hdr) opt_disable_next();
+        opt_indent(1);
+        opt_int("Peak brightness", &g_settings.hdr_peak, 10, 100, 10, 100, "%d%%", "How bright the highlights get.");
+        opt_indent(-1);
+    }
+#endif
 
     opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)
@@ -895,6 +907,13 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
 // pickup card).
 static bool render_needed(bool open, bool kbd, bool inv, bool trk, bool trkd, bool chaos, bool race, bool flyin) {
     return open || kbd || g_settings.show_fps || inv || trk || trkd || chaos || race || flyin;
+}
+
+bool menu_render_wanted(void) {
+    bool open = g_open.load();
+    return render_needed(open, g_kbd.load() == 1, !open && inventory_overlay_wanted(), !open && tracker_overlay_wanted(),
+                         !open && tracker_dungeon_wanted(), !open && chaos_overlay_wanted(), race_overlay_wanted(),
+                         pickup_flyin_wanted() && !open);
 }
 
 #ifdef __APPLE__

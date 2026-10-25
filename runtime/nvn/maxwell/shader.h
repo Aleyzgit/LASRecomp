@@ -76,6 +76,7 @@ typedef struct {
                             // (c0 0x110 + 16 * i vertex, 0x510 + 16 * i fragment): the slots it actually uses
     bool uses_rscale;       // reads the resolution-scale table (fragment/compute buffer 18): float4 [0] = render
                             // target scale, [1 + i] = allocation scale of texture i
+    bool hdr_tonemap;       // (MSL) the game's tonemap: takes the HDR parameters, float4 at HDR_BUFFER_INDEX (hdr.c)
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
     char error[256];        // set when translation fails
@@ -87,6 +88,7 @@ typedef struct {
 // and the slot of each texture from a table of uints at SMAP_BUFFER_INDEX (fragment, compute; [i] = texture i's slot).
 #define MSL_MAX_SAMPLERS 16
 #define SMAP_BUFFER_INDEX 22
+#define HDR_BUFFER_INDEX 23
 // (GLSL compute, Vulkan) the fast copy of a dispatch's storage buffers: its address table and its data
 #define GMAP_BUFFER_INDEX 20
 #define GFAST_BUFFER_INDEX 21

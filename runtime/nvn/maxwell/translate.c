@@ -119,6 +119,7 @@ typedef struct {
     bool glsl;               // emit Vulkan GLSL: dialect-specific constructs here, the rest via glsl_rewrite()
     bool uses_gmem_store;    // STG present: the gmem buffer is not readonly
     uint32_t cbuf_need[18];  // highest constant vec4 index + 1 per cbuf (array size of the GLSL block)
+    bool hdr_tonemap;        // (MSL) the game's tonemap shader: HDR output hook (hdr_tonemap_sig)
 } Ctx;
 
 static uint64_t bits(uint64_t w, int lo, int n) { return (w >> lo) & ((n == 64) ? ~0ull : ((1ull << n) - 1)); }
@@ -903,6 +904,24 @@ static void light_tiles_fix(Ctx *c, const uint64_t *code, size_t end, uint32_t p
     cbuf_ref(c, 4, 0x1c4, NULL, h);  // target height
     cbuf_ref(c, 4, 0x1c0, NULL, w);  // target width
     sp(&c->body, "    r%d = as_type<uint>(as_type<float>(r%d) * (as_type<float>(%s) * as_type<float>(%s) / as_type<float>(%s)));\n", d, d, a, h, w);  // (GLSL: as_type is rewritten)
+}
+
+// HDR output (Mac, Video tab "HDR"; runtime/nvn/hdr.m): the game's tonemap, Hejl's filmic curve on the scene
+// (scene * exposure cb5[0] - 0.004, constants 6.2 / 0.06 in cb1, then pow 2.2 and saturate). With HDR on (hdrp[0].x =
+// peak > 1, in paper-white units) its scene input is read again (as at pc 0x30: the uv of the two IPAs) and the output
+// is the same curve, rolled off to the peak above a knee instead. Off: the shader's own result, one uniform test more.
+static bool hdr_tonemap_sig(const uint64_t *code, size_t end) {
+    static const uint64_t sig[][2] = {{0x08, 0x5c9807800ff70003ull}, {0x10, 0xe003ff880ff7ff04ull},
+                                      {0x28, 0xe003ff884ff7ff05ull},
+                                      {0x18, 0x0103b83126f7f007ull}, {0x30, 0xc0fa0087a0370400ull},
+                                      {0x38, 0x0103fd9999a7f00bull}, {0x48, 0x49a2039400070000ull},
+                                      {0x98, 0x49a0058400070006ull}, {0x170, 0x1e2400ccccd70100ull},
+                                      {0x198, 0x5084000000270000ull}, {0x1b8, 0x5084000000270202ull},
+                                      {0x1d0, 0x5084000000270601ull}, {0x1d8, 0xe30000000007000full}};
+    if (end <= 0x1d8 / 8) return false;
+    for (size_t i = 0; i < sizeof sig / sizeof sig[0]; i++)
+        if (code[sig[i][0] / 8] != sig[i][1]) return false;
+    return true;
 }
 
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
@@ -2283,6 +2302,8 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     static int annotate = -1;
     if (annotate < 0) annotate = getenv("LARECOMP_SAVE_MSL") != NULL;
     c->branchy = any_branch;
+    c->hdr_tonemap = stage == STAGE_FRAGMENT && !c->glsl && !dbg && hdr_tonemap_sig((const uint64_t *)code, end);
+    info->hdr_tonemap = c->hdr_tonemap;
     for (size_t i = 0; i < end && !c->fail; i++) {
         if (i % 4 == 0) continue;
         uint32_t pc = (uint32_t)(i * 8);
@@ -2378,6 +2399,10 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
         sp(&args, ", constant float4 *ltint [[buffer(19)]]");
         info->uses_tint = true;
     }
+    static int hdr_probe = -1;  // LARECOMP_HDR_PROBE=1 (test): the tonemap's input range -> buffer 24 (hdr.m)
+    if (hdr_probe < 0) hdr_probe = getenv("LARECOMP_HDR_PROBE") != NULL;
+    if (c->hdr_tonemap) sp(&args, ", constant float4 *hdrp [[buffer(%d)]]%s", HDR_BUFFER_INDEX,
+                           hdr_probe ? ", device atomic_uint *hdrst [[buffer(24)]]" : "");
     // Metal has 16 sampler slots a stage (textures: 31). Up to 16 textures, texture i samples with sampler i. With more
     // (issue #215: a cave floor's fragment shader with 17), the samplers come as one array of the 16 slots and a table
     // (buffer SMAP_BUFFER_INDEX) names each texture's slot: the renderer puts each distinct sampler state the draw uses
@@ -2449,6 +2474,29 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
                 }
                 r++;
             }
+        }
+        if (c->hdr_tonemap) {  // x: the curve's input, l: the game's output (unclamped: always < 1)
+            sp(&s, "  if (hdrp[0].x > 1.0f || hdrp[0].w > 0.0f) {\n"
+                   "    float3 hdr_in = t0.sample(s0, uvs(float2(in.v0[0] * in.pos.w, in.v0[1] * in.pos.w), rscale[1]), level(0)).rgb;\n"
+                   "    float3 hx = max(fma(hdr_in, float3(as_type<float>(cb5[0][0])), float3(-0.004f)), float3(0.0f));\n"
+                   "    float hA = as_type<float>(cb1[0][0]), hB = as_type<float>(cb1[0][1]);\n"
+                   "    float3 hl = exp2(log2(hx * fma(hx, float3(hA), float3(0.5f)) / (hx * fma(hx, float3(hA), float3(1.7f)) + hB)) * 2.2f);\n");
+            // above the knee (input hdrp[0].y), t stops above it: + (peak - 1) * t^2 / (t^2 + hdrp[0].z) - the game's
+            // curve and its slope at the knee, the rest of the headroom used more the further above, the peak far up.
+            // peak = 1: the game's curve.
+            sp(&s, "    if (hdrp[0].x > 1.0f) {\n"
+                   "      float3 ht = max(log2(max(hx, float3(1e-6f)) / hdrp[0].y), float3(0.0f));\n"
+                   "      o.c0.rgb = hl + (hdrp[0].x - 1.0f) * (ht * ht / (ht * ht + hdrp[0].z));\n"
+                   "    }\n");
+            if (hdr_probe)
+                sp(&s, "    if (hdrp[0].w > 0.0f && ((uint(in.pos.x) | uint(in.pos.y)) & 1u) == 0u) {\n"
+                       "      float hm = max(hx.r, max(hx.g, hx.b));\n"
+                       "      int hb = clamp(int(floor((log2(max(hm, 1e-6f)) + 10.0f) * 4.0f)), 0, 63);\n"
+                       "      atomic_fetch_add_explicit(&hdrst[hb], 1u, memory_order_relaxed);\n"
+                       "      atomic_fetch_max_explicit(&hdrst[64], as_type<uint>(hm), memory_order_relaxed);\n"
+                       "      atomic_fetch_max_explicit(&hdrst[65], as_type<uint>(max(hdr_in.r, max(hdr_in.g, hdr_in.b))), memory_order_relaxed);\n"
+                       "    }\n");
+            sp(&s, "  }\n");
         }
         if (tint)
             sp(&s, "  if (ltint[0].w > 0.0f) { float3 g = o.c0.rgb; float l = dot(g, float3(0.299f, 0.587f, 0.114f));\n"

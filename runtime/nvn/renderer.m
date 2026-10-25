@@ -15,6 +15,7 @@
 #include "nvn.h"
 #include "renderer.h"
 #include "pace.h"
+#include "hdr.h"
 #include "shader_prep.h"
 #include "recolour.h"
 #include "slowframe.h"
@@ -3534,6 +3535,16 @@ static void draw(CmdRec *r, bool indexed) {
         if (draw_heart) { extern void texpatch_heart_tint(int kind, float tint[8]); texpatch_heart_tint(draw_heart, tint); }
         [enc setFragmentBytes:tint length:sizeof tint atIndex:19];
     }
+    if (pr->fi->hdr_tonemap) {  // the game's tonemap: HDR parameters (runtime/nvn/hdr.m)
+        float hp[4];
+        hdr_tonemap_params(hp);
+        [enc setFragmentBytes:hp length:sizeof hp atIndex:HDR_BUFFER_INDEX];
+        if (hdr_probe_on()) {
+            [enc setFragmentBuffer:(__bridge id<MTLBuffer>)hdr_probe_buffer((__bridge void *)dev) offset:0 atIndex:24];
+            Range e = st.ubuf[1][5 - cbuf_base];  // (cb5[0]: the exposure)
+            if (e.addr) hdr_probe_note(*(const float *)(uintptr_t)e.addr);
+        }
+    }
     for (int s = 0; s < 12; s++) {
         if (!(used_streams & (1u << s))) continue;
         Range v = st.vbuf[s];
@@ -3656,6 +3667,10 @@ static const char *copy_src =
     "  o.uv = r.xy + p * r.zw; return o; }\n"
     "fragment float4 fs(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  return t.sample(s, in.uv); }\n"
+    // (HDR, hdr.h: the frame's final image as extended sRGB - the 8-bit copy's encoding, unclamped above 1)
+    "fragment float4 fs_hdr(V in [[stage_in]], texture2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
+    "  float3 c = max(t.sample(s, in.uv).rgb, 0.0);\n"
+    "  return float4(select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308), 1.0); }\n"
     "struct D { float d [[depth(any)]]; };\n"
     "fragment D fs_depth(V in [[stage_in]], depth2d<float> t [[texture(0)]], sampler s [[sampler(0)]]) {\n"
     "  D o; o.d = t.sample(s, in.uv); return o; }\n";
@@ -3735,7 +3750,7 @@ static id<MTLTexture> copy_raw_view(id<MTLTexture> t) {
 }
 
 static void draw_copy(id<MTLTexture> s, int sx0, int sy0, int sw, int sh, id<MTLTexture> d, int dx0, int dy0, int dw, int dh,
-                      bool linear) {
+                      bool linear, bool hdr) {
     static int raw = -1;  // LARECOMP_COPY_RAW_SRGB: copies move values unchanged (no sRGB decode/encode on either side)
     if (raw < 0) raw = getenv("LARECOMP_COPY_RAW_SRGB") != NULL;
     if (raw) { s = copy_raw_view(s); d = copy_raw_view(d); }
@@ -3744,14 +3759,14 @@ static void draw_copy(id<MTLTexture> s, int sx0, int sy0, int sw, int sh, id<MTL
     rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
     id<MTLRenderCommandEncoder> e = [cb() renderCommandEncoderWithDescriptor:rp];
-    NSString *key = [NSString stringWithFormat:@"copy %lu", (unsigned long)d.pixelFormat];
+    NSString *key = [NSString stringWithFormat:@"copy%s %lu", hdr ? "hdr" : "", (unsigned long)d.pixelFormat];
     id<MTLRenderPipelineState> pipe = cache[key];
     if (!pipe) {
         static id<MTLLibrary> lib;
         if (!lib) lib = TIMED_COMPILE([dev newLibraryWithSource:@(copy_src) options:nil error:nil]);
         MTLRenderPipelineDescriptor *pd = [MTLRenderPipelineDescriptor new];
         pd.vertexFunction = [lib newFunctionWithName:@"vs"];
-        pd.fragmentFunction = [lib newFunctionWithName:@"fs"];
+        pd.fragmentFunction = [lib newFunctionWithName:hdr ? @"fs_hdr" : @"fs"];
         pd.colorAttachments[0].pixelFormat = d.pixelFormat;
         pipe = TIMED_COMPILE([dev newRenderPipelineStateWithDescriptor:pd error:nil]);
         cache[key] = pipe;
@@ -3801,7 +3816,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         td.storageMode = MTLStorageModePrivate;
         id<MTLTexture> small = [dev newTextureWithDescriptor:td];
-        draw_copy(tex, 0, 0, (int)lroundf(t->width * tsx), (int)lroundf(t->height * tsy), small, 0, 0, t->width, t->height, true);
+        draw_copy(tex, 0, 0, (int)lroundf(t->width * tsx), (int)lroundf(t->height * tsy), small, 0, 0, t->width, t->height, true, false);
         tex = small;
     }
     id<MTLBlitCommandEncoder> b = [cb() blitCommandEncoder];
@@ -3827,8 +3842,8 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     id<MTLTexture> d = view_texture(dt, &dst->view, dst->has_view, true, nil);
     // a full copy into a swapchain image: the source is the frame's final framebuffer (UI is drawn there)
     extern void renderer_texture_mark_presented(NvnTexture *t);
-    if (renderer_texture_presented(dt) && st_->width == dt->width && st_->height == dt->height)
-        renderer_texture_mark_presented(st_);
+    bool final = renderer_texture_presented(dt) && st_->width == dt->width && st_->height == dt->height;
+    if (final) renderer_texture_mark_presented(st_);
     extern bool renderer_texture_first_write(NvnTexture *t);
     renderer_texture_first_write(dt);  // a copy fills the image: no clear afterwards this frame
     extern bool renderer_texture_level_fresh(NvnTexture *t);
@@ -3933,7 +3948,11 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
         [b endEncoding];
         return;
     }
-    draw_copy(s, sx0, sy0, sw, sh, d, dx0, dy0, dw, dh, flags & 1);
+    draw_copy(s, sx0, sy0, sw, sh, d, dx0, dy0, dw, dh, flags & 1, false);
+    if (final && hdr_live()) {  // HDR: the same image, unclamped, for the present (hdr.h)
+        extern id<MTLTexture> renderer_hdr_target(NvnTexture *t, id<MTLTexture> d);
+        draw_copy(s, sx0, sy0, sw, sh, renderer_hdr_target(dt, d), dx0, dy0, dw, dh, flags & 1, true);
+    }
 }
 
 // ------------------------------------------------------------------ executor

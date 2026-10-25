@@ -28,6 +28,7 @@
 #include "pad_nav.h"
 #ifdef __APPLE__
 #include "imgui_impl_metal.h"
+#include "../nvn/hdr.h"
 #else
 #include "imgui_impl_vulkan.h"
 #endif
@@ -1591,6 +1592,7 @@ extern "C" void launcher_run(const char *root) {
         was_busy = busy;
 
 #ifdef __APPLE__
+        hdr_poll(win);  // (the Video tab shows HDR for a display that has headroom)
         int w, h;
         SDL_GetWindowSizeInPixels(win, &w, &h);
         layer.drawableSize = CGSizeMake(w, h);
