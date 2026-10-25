@@ -5,8 +5,9 @@ An apple tree is an ObjTree with parameter 1 set (1: ItemDrop AppleLow, 2: Apple
 that row 3 times and hangs up to 3 apples in its crown; dashing into it (Pegasus Boots) knocks them down. With
 Applesanity both rows give a red apple every roll (they are only used by these trees), so a tree always hangs 3. The
 runtime (runtime/hle/apple_trees.c) takes away the apples of slots already found, so the apples left show the checks
-left. On a bonk each falling apple becomes its slot's item (a SinkingSword item actor, runtime/hle/shell_spots.c), which
-flies out to its own free tile beside the tree on that tree's screen. Picking it up runs its entry in SinkingSword.bfevfl
+left, and each apple is swapped for its slot's item model hanging in the crown (a trap shows a random real item of
+the seed). On a bonk each hanging item (a SinkingSword item actor, runtime/hle/shell_spots.c) flies out to its own
+free tile beside the tree on that tree's screen. Picking it up runs its entry in SinkingSword.bfevfl
 and sets the slot's flag.
 
 Logic: the region of the tile Link dashes from (reviewed in game, STAND) and boots. The landing tiles are kept in that
@@ -127,6 +128,12 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
     flow = event_tools.readFlow(path('event/SinkingSword.bfevfl'))
     rows = ['# location\tindex\tkind\tlevel\troom\tx\ty\tz\tmodel\tname\tentry\tflag\tflag index\tshell\tscale\tturn'
             '\ttree\tslot  (tools/rando/apple_trees.py)\n']
+    # a trap looks like a random real item of the seed (the item hangs in the tree for all to see)
+    import random
+    looks = sorted({(d['model-path'], d['model-name']) for it, d in mods.item_defs.items()
+                    if it in set(v for v in mods.placements.values() if isinstance(v, str))
+                    and d.get('model-path') and not d.get('item-key', '').endswith('Trap')})
+    looks_rng = random.Random(f'{mods.seed}-apple-looks')
     checks, spoiler, tails = [], [], {}
     for n, (name, (t, k)) in enumerate(sorted(locs.items())):
         flag = f'LARApple{t["room"][-3:]}{k + 1}'
@@ -134,6 +141,8 @@ def apply(locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, da
         sheet['values'].append({'symbol': flag, 'index': index})
         checks.append(f'{name}\t{index}\n')
         item_key, item_index, model_path, model_name = mods.getItemInfo(name, mods.trap_models)
+        if item_key.endswith('Trap') and looks:
+            model_path, model_name = looks_rng.choice(looks)
         quick = item_key[:3] == 'Rup' or mods.placements[name] in pots.QUICK
         tail_key = (item_key, item_index, quick)
         if tail_key not in tails:  # (one chain per item, shared: SinkingSword.bfevfl's buffer is small - pots.py)

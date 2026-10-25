@@ -72,6 +72,8 @@ typedef struct {
     bool fly_queued;      // launched: spawned at `from` on the next tick
     int fly_t;            // -1: not flying; else ticks since it came down (the settle hop)
     bool landed;
+    bool hang;            // Applesanity: the item hangs in its tree's crown at hang_at (apple_trees.c)
+    float hang_at[3];
     float fp[3], fv[3];   // its position, velocity (units/tick)
     uint64_t fly_actor;  // the item actor (while s->item is alive)
     uint64_t motion;      // its physics motion (fly_motion)
@@ -456,9 +458,64 @@ static Spot *apple_spot(const char *name) {
     return NULL;
 }
 
-bool shell_spot_launch(const char *name, const float from[3], uint32_t zone) {
+static void hang_drop(Cpu *c, Spot *s) {  // (the hanging item goes: a bonk, or its tree went)
+    if (s->hang && s->item && digs_actor_alive(s->item)) {
+        uint64_t saved[31], sp = c->sp;
+        memcpy(saved, c->x, sizeof saved);
+        c->x[0] = s->fly_actor;
+        guest_call(c, GA(ACTOR_KILL));
+        memcpy(c->x, saved, sizeof saved);
+        c->sp = sp;
+    }
+    if (s->hang && s->item) digs_drop_ref(c, &s->item);
+    s->hang = false;
+}
+
+// the slot's item hangs in the crown where its apple was (instead of the apple). false: not yet (the tree's screen
+// isn't loaded, or the strings aren't in)
+bool shell_spot_hang(Cpu *c, const char *name, const float at[3], uint32_t zone) {
     Spot *s = apple_spot(name);
     if (!s || !g_pool_ready || flags_ext_get(s->flag_idx)) return false;
+    if (s->hang && s->item && digs_actor_alive(s->item)) return true;
+    extern uint64_t digs_last_actor;
+    const char *strs[5] = {s->model, s->mname, s->entry, s->flag, s->shell ? "true" : "false"};
+    bool up;
+    if (s->item) digs_drop_ref(c, &s->item);
+    if (!digs_spawn_item(c, s->room, 0x7d00000000000000ull | (uint64_t)s->index, zone ? zone : g_zone, at,
+                         s->scale * 0.8f, s->turn, strs, &s->item, &up) || !up || !digs_last_actor)
+        return false;
+    s->hang = true;
+    memcpy(s->hang_at, at, sizeof s->hang_at);
+    s->fly_actor = digs_last_actor;
+    s->motion = 0;
+    LOG("[shells] %s: item %s hangs in the apple tree at (%.2f, %.2f, %.2f)\n", name, s->mname, at[0], at[1], at[2]);
+    return true;
+}
+
+// a hanging item stays at its spot (its physics body held there, a slow bob)
+static void hang_step(Spot *s, uint64_t frame) {
+    if (!s->item || !digs_actor_alive(s->item)) { s->hang = false; return; }
+    float y = s->hang_at[1] + 0.04f * sinf((float)frame * 0.05f + (float)s->index);
+    uint64_t m = s->motion;
+    if (m) {
+        const float *f = (const float *)(uintptr_t)(m + 0xa0);
+        float at[3] = {f[0], f[1], f[2]};
+        m = fly_motion(s->fly_actor, at) == m ? m : 0;
+    } else {
+        float at[3] = {s->hang_at[0], s->hang_at[1] + 0.25f, s->hang_at[2]};
+        m = fly_motion(s->fly_actor, at);
+    }
+    s->motion = m;
+    if (!m) return;
+    float *f = (float *)(uintptr_t)(m + 0xa0), off = f[9];
+    f[0] = s->hang_at[0], f[1] = y + off, f[2] = s->hang_at[2];
+    f[12] = f[13] = f[14] = 0;
+}
+
+bool shell_spot_launch(Cpu *c, const char *name, const float from[3], uint32_t zone) {
+    Spot *s = apple_spot(name);
+    if (!s || !g_pool_ready || flags_ext_get(s->flag_idx)) return false;
+    hang_drop(c, s);
     memcpy(s->from, from, sizeof s->from);
     s->v0[0] = s->v0[1] = s->v0[2] = 0;  // (fly_start: the shell's own upward speed)
     s->zone = zone;
@@ -470,10 +527,24 @@ bool shell_spot_launch(const char *name, const float from[3], uint32_t zone) {
     return true;
 }
 
-// the slot's item is out: about to fly, or its actor still there
+// the slot's item is out: about to fly, or its actor lying there (not hanging in the tree)
 bool shell_spot_out(const char *name) {
     Spot *s = apple_spot(name);
-    return s && (s->fly_queued || (s->item && digs_actor_alive(s->item)));
+    return s && !s->hang && (s->fly_queued || (s->item && digs_actor_alive(s->item)));
+}
+
+// the hanging item (if any): where it is, false: none
+bool shell_spot_hanging(const char *name, float at[3]) {
+    Spot *s = apple_spot(name);
+    if (!s || !s->hang || !s->item || !digs_actor_alive(s->item)) return false;
+    memcpy(at, s->hang_at, sizeof s->hang_at);
+    return true;
+}
+
+// its tree is gone (the screen went): the item goes with it
+void shell_spot_unhang(Cpu *c, const char *name) {
+    Spot *s = apple_spot(name);
+    if (s) hang_drop(c, s);
 }
 
 // game main thread, once per frame (runtime/hle/input.c)
@@ -506,6 +577,7 @@ void shell_spots_tick(Cpu *c, uint64_t frame) {
             g_spots[i].fly_t = -1;
             g_spots[i].hole_k = -1;
             g_spots[i].droom = 0;
+            g_spots[i].hang = false;
             if (g_spots[i].room_ref) digs_drop_ref(c, &g_spots[i].room_ref);
             if (g_spots[i].item && !digs_actor_alive(g_spots[i].item)) digs_drop_ref(c, &g_spots[i].item);
         }
@@ -535,6 +607,7 @@ void shell_spots_tick(Cpu *c, uint64_t frame) {
         Spot *s = &g_spots[i];
         if (s->fly_queued && !strcmp(lv, s->level)) fly_start(c, s, frame);
         else if (s->fly_t >= 0) fly_step(s);
+        else if (s->hang) hang_step(s, frame);
     }
     for (int i = 0; i < g_n; i++) {
         Spot *s = &g_spots[i];

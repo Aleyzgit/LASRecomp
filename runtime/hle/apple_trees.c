@@ -7,8 +7,10 @@
 // the tree loads again (its screen streams out and back in: a new tree, 3 new apples).
 //   - a slot already found, or whose item still lies out there, has its apple taken away as soon as it hangs there:
 //     the apples left are the checks left, a finished tree is bare (the bonk skips a dead apple)
-//   - on a bonk (+0x528 goes 0 -> 1) each falling apple of an open slot is taken away and its item flies out from where
-//     the apple was to its own tile (shell_spots.c: the same fly-out as a Shellsanity tree, the rows are its spots)
+//   - an open slot's apple is swapped for its item, hanging where the apple was (shell_spots.c holds it there): the
+//     tree shows what it holds (a trap shows another item's look: apple_trees.py)
+//   - on a bonk (+0x528 goes 0 -> 1) each hanging item flies out from the crown to its own tile (shell_spots.c: the
+//     same fly-out as a Shellsanity tree, the rows are its spots)
 // apple_trees.tsv: shell_spots.tsv's columns (kind "apple") + tree actor key (hex), slot.
 #include "../game_addresses.h"
 #include <math.h>
@@ -25,10 +27,14 @@
 #define MAXROWS 24
 #define MAXTREES 8
 #define DEAD (1u << 30)  // actor +0x40: killed
+#define HANG_UP 2.0f     // a hanging item's height at least: this above its apple's spawn (0.5 above the ground)
 
 bool flags_ext_get(int idx);
-bool shell_spot_launch(const char *name, const float from[3], uint32_t zone);
+bool shell_spot_launch(Cpu *c, const char *name, const float from[3], uint32_t zone);
 bool shell_spot_out(const char *name);
+bool shell_spot_hang(Cpu *c, const char *name, const float at[3], uint32_t zone);
+bool shell_spot_hanging(const char *name, float at[3]);
+void shell_spot_unhang(Cpu *c, const char *name);
 
 typedef struct {
     char name[48];
@@ -45,7 +51,7 @@ static int g_nrows = -1, g_ntrees;
 static pthread_mutex_t g_load_lock = PTHREAD_MUTEX_INITIALIZER;
 
 // where apples were just made (the factory, any thread) and their zone: a tree's items go into the same one
-static struct { float x, z; uint32_t zone; } g_made[8];
+static struct { float x, y, z; uint32_t zone; } g_made[32];
 static unsigned g_made_n;
 
 RT_ON_RESET(apple_trees_reset) {
@@ -99,15 +105,26 @@ static int load(void) {
 bool rt_apple_skip(uint32_t type, uint64_t info) {
     if ((type != T_APPLE && type != T_GREEN_APPLE) || LD64(info) || load() <= 0) return false;
     const float *p = (const float *)(uintptr_t)(info + 0x180);
-    unsigned i = __atomic_fetch_add(&g_made_n, 1, __ATOMIC_RELAXED) % 8;
-    g_made[i].x = p[0], g_made[i].z = p[2], g_made[i].zone = LD32(info + 0xc);
+    unsigned i = __atomic_fetch_add(&g_made_n, 1, __ATOMIC_RELAXED) % 32;
+    g_made[i].x = p[0], g_made[i].y = p[1], g_made[i].z = p[2], g_made[i].zone = LD32(info + 0xc);
     return false;
 }
 
 static uint32_t zone_near(const float at[3]) {
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 32; i++)
         if (g_made[i].zone && fabsf(g_made[i].x - at[0]) < 3 && fabsf(g_made[i].z - at[2]) < 3) return g_made[i].zone;
     return 0;
+}
+
+// an apple already up in the crown (it is made at the tree's foot, 0.5 up, then moved up): above where it was made.
+// *foot: that spot's height
+static bool in_crown(const float at[3], float *foot) {
+    for (int i = 0; i < 32; i++)
+        if (g_made[i].zone && fabsf(g_made[i].x - at[0]) < 3 && fabsf(g_made[i].z - at[2]) < 3) {
+            *foot = g_made[i].y;
+            return at[1] > g_made[i].y + 0.4f;
+        }
+    return false;
 }
 
 static bool live(uint64_t a) { return a && !(LD32(a + 0x40) & DEAD); }
@@ -164,7 +181,9 @@ void apple_trees_tick(Cpu *c, uint64_t frame) {
     for (int t = 0; t < g_ntrees; t++) {
         Tree *tr = &g_trees[t];
         uint64_t tree = found[t];
-        if (tree != tr->actor) {  // (a new tree: new apples, not dropped yet)
+        if (tree != tr->actor) {  // (a new tree: new apples, not dropped yet; the old one's hanging items go)
+            for (int k = 0; k < 3; k++)
+                if (tr->row[k] >= 0) shell_spot_unhang(c, g_rows[tr->row[k]].name);
             tr->actor = tree;
             tr->dropped = tree ? LD8(tree + 0x528) : 0;
         }
@@ -176,16 +195,30 @@ void apple_trees_tick(Cpu *c, uint64_t frame) {
         for (int k = 0; k < 3; k++) {
             uint64_t a = LD64(tree + 0x4f8 + 0x10 * k);
             const Row *r = tr->row[k] >= 0 ? &g_rows[tr->row[k]] : NULL;
-            if (!r || !live(a)) continue;
+            if (!r) continue;
+            float at[3];
+            if (bonk && shell_spot_hanging(r->name, at)) {  // (its item falls out of the crown)
+                shell_spot_launch(c, r->name, at, zone_near(at));
+                continue;
+            }
+            if (!live(a)) continue;
             if (flags_ext_get(r->flag_idx) || shell_spot_out(r->name)) {  // (found, or its item still out)
                 kill(c, a);
                 LOG("[apples] %s: %s - its apple taken away\n", r->name,
                     flags_ext_get(r->flag_idx) ? "found" : "item still out");
                 continue;
             }
-            float at[3];
-            if (!bonk || !apple_pos(a, at)) continue;
-            if (shell_spot_launch(r->name, at, zone_near(at))) kill(c, a);  // (else the apple just falls)
+            if (!apple_pos(a, at)) continue;
+            if (bonk) {  // (no item hanging yet: it flies out from the falling apple)
+                if (shell_spot_launch(c, r->name, at, zone_near(at))) kill(c, a);
+            } else {
+                // the item hangs where the apple was, but out of Link's reach: Link walking under the crown picked
+                // up one hung at the low apple's height (1.3 above the ground)
+                float foot;
+                if (!in_crown(at, &foot)) continue;
+                if (at[1] < foot + HANG_UP) at[1] = foot + HANG_UP;
+                if (shell_spot_hang(c, r->name, at, zone_near(at))) kill(c, a);
+            }
         }
     }
 }
