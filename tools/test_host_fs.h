@@ -42,6 +42,7 @@ static ssize_t test_write(int fd, const void *p, size_t n, off_t off) {
 #undef fsync
 const char *g_romfs_dir;
 int rt_romfs_files;
+uint64_t rt_romfs_bytes;
 const char *rando_seed_dir(void) { return NULL; }
 bool romfs_layout(const char *p, RomfsLayout *l, char *why, size_t n) { abort(); }
 bool rando_romfs_override(const char *p, char *out, size_t n) { abort(); }
@@ -62,6 +63,8 @@ static GameAddrs test_ga = {  // the 1.0.0 table, with the live save in host mem
 #undef GA_ADDR
 };
 const GameAddrs *g_ga = &test_ga;
+const GameVersion *game_version(void) { return NULL; }
+uint64_t game_romfs_bytes(const GameVersion *v) { return 0; }
 __attribute__((constructor)) static void test_ga_init(void) { test_ga.LIVE_SAVE = (uintptr_t)live_save; }
 #include "../runtime/hle/flags_ext.c"
 Service *service_new(const char *name, ServiceHandler handler, void *state) {
