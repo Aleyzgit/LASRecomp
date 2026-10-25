@@ -12,6 +12,8 @@ Logic (LAS logic.yml vocabulary; everything also needs LAS's `break-pot` = brace
   dungeons        conservative: the dungeon region AND every LAS location condition in that dungeon, i.e. the pot
                   counts as reachable only once the whole dungeon is (all keys, boss, every item check). Per-room
                   logic would be more generous; this never puts progression somewhere the player can't get to.
+                  Owl statues count without their Stone Beak: it only lets Link read them (it put every dungeon
+                  pot behind its Stone Beak, which also made the beaks hint-sheet steps).
 """
 import copy
 import glob
@@ -132,9 +134,15 @@ def add_to_logic(pots, logic_defs, item_defs, entrance_data, traps='none', rng=N
     for k, v in logic_defs.items():
         if v.get('type') == 'item' and v.get('region') and v.get('spoiler-region'):
             spoiler_of.setdefault(v['region'], v['spoiler-region'])
+    def check_cond(v):  # (an owl statue's Stone Beak only lets Link read it - it gates no way to a pot: its reach stays)
+        c = v.get('condition-basic')
+        if v.get('subtype') == 'dungeon-statue':
+            c = re.sub(r'\s*&\s*stone-beak-D\d\b|\bstone-beak-D\d\s*&\s*', '', c)
+        return c
+
     dungeon_cond = {}
     for level, (prefix, region, _) in DUNGEONS.items():
-        conds = [v.get('condition-basic') for k, v in logic_defs.items()
+        conds = [check_cond(v) for k, v in logic_defs.items()
                  if v.get('type') == 'item' and k.startswith(prefix + '-') and v.get('condition-basic')]
         dungeon_cond[level] = _and(*sorted(set(conds)))
     locs, absorbed = {}, 0
