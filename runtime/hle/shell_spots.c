@@ -471,9 +471,11 @@ static void hang_drop(Cpu *c, Spot *s) {  // (the hanging item goes: a bonk, or 
     s->hang = false;
 }
 
+#define HANG_SCALE 1.15f  // (of its size on the ground: it has to read from the game's camera)
+
 // the slot's item hangs in the crown where its apple was (instead of the apple). false: not yet (the tree's screen
 // isn't loaded, or the strings aren't in)
-bool shell_spot_hang(Cpu *c, const char *name, const float at[3], uint32_t zone) {
+bool shell_spot_hang(Cpu *c, const char *name, const float at[3], uint32_t zone, uint64_t room, uint64_t rctrl) {
     Spot *s = apple_spot(name);
     if (!s || !g_pool_ready || flags_ext_get(s->flag_idx)) return false;
     if (s->hang && s->item && digs_actor_alive(s->item)) return true;
@@ -481,9 +483,14 @@ bool shell_spot_hang(Cpu *c, const char *name, const float at[3], uint32_t zone)
     const char *strs[5] = {s->model, s->mname, s->entry, s->flag, s->shell ? "true" : "false"};
     bool up;
     if (s->item) digs_drop_ref(c, &s->item);
-    if (!digs_spawn_item(c, s->room, 0x7d00000000000000ull | (uint64_t)s->index, zone ? zone : g_zone, at,
-                         s->scale * 0.8f, s->turn, strs, &s->item, &up) || !up || !digs_last_actor)
-        return false;
+    // into the tree's own room (where its apples were made: drawn wherever Link is), else its screen by name
+    bool ok = room && digs_spawn_item_into(c, room, rctrl, 0x7d00000000000000ull | (uint64_t)s->index,
+                                           zone ? zone : g_zone, at, s->scale * HANG_SCALE, s->turn, strs, &s->item,
+                                           &up) && up && digs_last_actor;
+    if (!ok)
+        ok = digs_spawn_item(c, s->room, 0x7d00000000000000ull | (uint64_t)s->index, zone ? zone : g_zone, at,
+                             s->scale * HANG_SCALE, s->turn, strs, &s->item, &up) && up && digs_last_actor;
+    if (!ok) return false;
     s->hang = true;
     memcpy(s->hang_at, at, sizeof s->hang_at);
     s->fly_actor = digs_last_actor;
@@ -512,14 +519,16 @@ static void hang_step(Spot *s, uint64_t frame) {
     f[12] = f[13] = f[14] = 0;
 }
 
-bool shell_spot_launch(Cpu *c, const char *name, const float from[3], uint32_t zone) {
+bool shell_spot_launch(Cpu *c, const char *name, const float from[3], uint32_t zone, uint64_t room, uint64_t rctrl) {
     Spot *s = apple_spot(name);
     if (!s || !g_pool_ready || flags_ext_get(s->flag_idx)) return false;
     hang_drop(c, s);
     memcpy(s->from, from, sizeof s->from);
     s->v0[0] = s->v0[1] = s->v0[2] = 0;  // (fly_start: the shell's own upward speed)
     s->zone = zone;
-    s->droom = 0;  // (spawned into the landing tile's screen: the tree's)
+    if (s->room_ref) digs_drop_ref(c, &s->room_ref);
+    s->droom = room && rctrl && digs_actor_alive(rctrl) ? room : 0;  // (the tree's room; else the landing tile's screen)
+    if (s->droom) digs_hold_weak(&s->room_ref, rctrl);
     s->dropped = true;
     s->fly_queued = true;
     LOG("[shells] %s: the apple tree drops its item (%s) from (%.2f, %.2f, %.2f)\n", name, s->mname, from[0], from[1],
