@@ -9,7 +9,7 @@ the logic thinks is open too early - the circular dig-spot gates of #81 / #144. 
 runtime/ui/rando_tab.mm (seed_id_encode, request.json in start_generation): keep the two in step.
 
 usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir] [--stealing M] [--shopsanity N]
-                     [--souls] [--rooms N ...] [--triforce N] [--miniboss-freq F] [--entrances T] [--full]
+                     [--souls] [--rooms N ...] [--triforce N] [--miniboss-freq F] [--entrances T] [--rocks] [--full]
        (default: the fixed seed IDs below + 40 random option mixes with digsanity on, every logic level)
 --miniboss-freq F: every random mix randomizes enemies with mini-boss frequency F (0 - 3: Normal, 2x, 3x, All), enemy
 mode Seeded or Random; --full: each seed is also generated in full (game files, enemies and all) and must finish -
@@ -43,7 +43,7 @@ FLAGS = ['bomb_bag', 'powder_bag', 'environments', 'pets_in_dungeons', 'skip_sto
          'randomize_enemies', 'randomize_music', 'open_mabe', 'fast_songs', 'boss_cutscenes', 'spoiler', 'decoupled',
          'pots', 'no_buffs', 'bushes', 'pet_rooster', 'pet_ghost', 'pet_marin', 'trendsanity', 'boss_souls',
          'hookshot_any', 'digs', 'miniboss_souls', 'no_start_sword', 'no_start_shield', 'no_start_ocarina',
-         'tunic_upgrades', 'shellsanity']
+         'tunic_upgrades', 'shellsanity', 'race', 'random_cosmetics', 'rocks']
 ROOM_IDS = {'off': 0, 'coupled': 2, 'decoupled': 3}  # room_shuffle in the ID (1: the retired Coherent)
 BITS = 150  # (v5: 30 characters; v4 IDs had 125 - decode reads both)
 TIMEOUT = 900  # (seconds per seed)
@@ -139,7 +139,8 @@ def request(sid, o, logic='basic'):
         'pet-rooster': o['pet_rooster'], 'pet-ghost': o['pet_ghost'], 'open-desert': not o['pet_marin'],
         'triforce-hunt': o.get('triforce_needed', 0), 'triforce-extra': o.get('triforce_extra', 0) * 25,
         'include': [f'{s}-seashell-reward' for s in shells],
-        'exclude': [f'{s}-seashell-reward' for s in shells[o['seashells']:]]}
+        'exclude': [f'{s}-seashell-reward' for s in shells[o['seashells']:]],
+        **({'rocks': True} if o.get('rocks') else {})}  # (only when on: seeds without it stay as they were)
 
 
 def stealing(o):
@@ -277,8 +278,17 @@ def walk_conditions(romfs):
     from RandomizerCore.Tools import leb
     import field_reach
     tr = field_reach.tile_regions(romfs, leb)
-    return {name: {(r, field_reach.OUTER.get(r, r)) for r in tr[t]}
-            for name, t in field_reach.location_tiles(romfs, leb).items() if t in tr}
+    out = {name: {(r, field_reach.OUTER.get(r, r)) for r in tr[t]}
+           for name, t in field_reach.location_tiles(romfs, leb).items() if t in tr}
+    import rocks  # (a rock's own tile is solid: the tiles Link lifts it from)
+    for r in rocks.scan(romfs, leb):
+        gx, gz = field_reach.global_tile(r['room'], r['tile'])
+        near = set()
+        for x, z in ((gx + 1, gz), (gx - 1, gz), (gx, gz + 1), (gx, gz - 1)):
+            near |= tr.get((f'Field_{z // 8 + 1:02d}{chr(65 + x // 10)}', (z % 8) * 10 + x % 10), set())
+        if near:
+            out[rocks.location_name(r)] = {(x, field_reach.OUTER.get(x, x)) for x in near}
+    return out
 
 
 def main():
@@ -298,6 +308,7 @@ def main():
     ap.add_argument('--entrances', type=int, choices=[0, 1, 2], help='every random mix with this entrance tier '
                     '(off / dungeons / + houses, caves & connector caves), bushsanity on')
     ap.add_argument('--full', action='store_true', help='also generate each seed in full (game files)')
+    ap.add_argument('--rocks', action='store_true', help='every random mix with Rocks on')
     ap.add_argument('--souls', action='store_true', help='every random mix with boss and mini-boss souls on')
     ap.add_argument('--triforce', type=int, metavar='N', help='every random mix a Triforce hunt for N pieces '
                     '(extra pieces cycled: none / +25%% / +50%%)')
@@ -320,6 +331,8 @@ def main():
                      enemy_mode=int(rng.random() < 0.5))
         if args.souls:
             o['boss_souls'] = o['miniboss_souls'] = True
+        if args.rocks:
+            o['rocks'] = True
         if args.entrances is not None:
             o['entrances'], o['bushes'] = args.entrances, True
         if args.triforce:

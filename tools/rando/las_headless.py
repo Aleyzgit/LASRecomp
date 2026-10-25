@@ -262,6 +262,14 @@ def main():
                                             settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-bushes"))
         print('bushes:', len(bush_locs), 'locations', flush=True)
 
+    rock_locs = {}
+    if settings.get('rocks'):  # rocksanity: every overworld rock hides an item (tools/rando/rocks.py)
+        import rocks as rocks_mod
+        import random as _rnd
+        rock_locs = rocks_mod.add_to_logic(rocks_mod.scan(romfs, leb, classic_d2=settings.get('classic-d2')), logic_defs,
+                                           item_defs, settings.get('traps', 'none'), _rnd.Random(f"{settings['seed']}-rocks"))
+        print('rocks:', len(rock_locs), 'locations', flush=True)
+
     dig_locs, dig_tiles = {}, []
     if settings.get('digs'):  # digsanity: every diggable overworld tile is a check (tools/rando/digs.py)
         import digs as digs_mod
@@ -326,8 +334,8 @@ def main():
         def with_caves(cv):
             lg = copy.deepcopy(logic_defs)
             n = el.apply_connector_logic(lg, ed, *cv, cextra) if cv[0] else 0
-            # a bush / dig tile in a pocket (its door's screen, or its tiles on the screens beside it) needs it
-            for name, b in list(bush_locs.items()) + list(dig_locs.items()):
+            # a bush / dig / rock tile in a pocket (its door's screen, or its tiles on the screens beside it) needs it
+            for name, b in list(bush_locs.items()) + list(dig_locs.items()) + list(rock_locs.items()):
                 pk = cv[0] and name in lg and pocket_at(b['room'], b.get('tile'))
                 if pk:
                     lg[name]['condition-basic'] = el._and(lg[name].get('condition-basic'), pk)
@@ -536,7 +544,7 @@ def main():
                        'access': {k: 1 for k, v in settings.items() if v is True}}, f)
         sys.exit(0)
 
-    if pot_locs or bush_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
+    if pot_locs or bush_locs or dig_locs or rock_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
         import pots as _pots
         print('pot refills marked:', _pots.mark_refills(result['placements']), flush=True)
     pl = result['placements']
@@ -604,6 +612,15 @@ def main():
             f.write('Bushes:\n' + '\n'.join(lines) + '\n')
         print('bushes placed:', len(lines), flush=True)
         print('bushes.tsv:', bushes_mod.write_tsv(out_dir, leb), flush=True)
+    if rock_locs:
+        from RandomizerCore.Tools import event_tools, oead_tools
+        from RandomizerCore.Randomizers import item_get, data as las_data
+        stage('Hiding items under rocks', 0.945)
+        lines = rocks_mod.apply(rock_locs, mods, out_dir, romfs, leb, event_tools, oead_tools, item_get, las_data)
+        with open(os.path.join(out_dir, f'rocks_{settings["seed"]}.txt'), 'w') as f:
+            f.write('Rocks:\n' + '\n'.join(lines) + '\n')
+        print('rocks placed:', len(lines), flush=True)
+        print('rocks.tsv:', rocks_mod.write_tsv(out_dir, leb), flush=True)
     if ent:
         lvl_out = os.path.join(out_dir, 'romfs', 'region_common', 'level')
 
@@ -688,7 +705,7 @@ def main():
                                                    bool(settings.get('enemy-minibosses')),
                                                    (settings['miniboss-marker-flag'], miniboss_guard.ANYWHERE)
                                                    if 'miniboss-marker-flag' in settings else None), flush=True)
-    if pot_locs or bush_locs or dig_locs:  # (after every flow edit) refills at real checks are refills, not the item
+    if pot_locs or bush_locs or dig_locs or rock_locs:  # (after every flow edit) refills at real checks are refills, not the item
         import refill_gets
         print('refill gets:', refill_gets.apply(out_dir, romfs, settings), flush=True)
     import bomb_bag_text  # (after every flow edit, digs too) found bombs: "You found your Bomb Bag!"
