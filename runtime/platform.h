@@ -30,6 +30,14 @@ bool plat_reset_guest(uint64_t lo, uint64_t hi);
 int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page);
 #ifdef __linux__
 void plat_write_tracking_off(const char *why);  // tracking off from now on (unless LARECOMP_WRITE_TRACKING=1)
+// Tracking of [lo, hi) by mprotect + SIGSEGV instead (memory the kernel's can't watch: the heap as driver memory);
+// LARECOMP_SOFT_WRITE_TRACKING=0: off
+void plat_soft_write_tracking(uint64_t lo, uint64_t hi);
+// The OS is about to write [addr, addr+size) (a file read into guest memory): pages soft tracking protected are opened
+// and count as written first (a write by the OS on a protected page would fail instead of faulting)
+void plat_os_write(uint64_t addr, uint64_t size);
+#else
+static inline void plat_os_write(uint64_t addr, uint64_t size) { (void)addr, (void)size; }
 #endif
 enum { PLAT_PROT_NONE = 0, PLAT_PROT_READ = 1, PLAT_PROT_RW = 3 };
 int plat_protect(uint64_t addr, uint64_t size, int prot);  // 0 on success
