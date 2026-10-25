@@ -305,7 +305,10 @@ bool opt_colour(const char *label, CosColour *c, int slot, const char *desc) {
     for (int i = 0; i < N_COL; i++) names[i] = g_col_names[i];
     char seed[48];
     int sp = col_pick(c, slot);  // (Default: the seed's own colour, shown as such)
-    if (c->pick == COL_DEFAULT && sp != COL_DEFAULT) snprintf(seed, sizeof seed, "Seed: %s", g_col_names[sp]), names[0] = seed;
+    uint32_t srgb = 0;  // (the seed's own colours are any colour: shown as #RRGGBB)
+    if (sp == COL_CUSTOM && col_seed_rgb(c, slot, &srgb)) snprintf(seed, sizeof seed, "Seed: #%06X", (unsigned)srgb);
+    else if (c->pick == COL_DEFAULT && sp != COL_DEFAULT) snprintf(seed, sizeof seed, "Seed: %s", g_col_names[sp]);
+    if (c->pick == COL_DEFAULT && sp != COL_DEFAULT) names[0] = seed;
     bool changed = opt_choice(label, &c->pick, names, N_COL, COL_DEFAULT, desc);
     if (g_counting) return false;
     if (changed && c->pick == COL_CUSTOM && prev != COL_CUSTOM)  // (Custom starts from the colour it was on)
