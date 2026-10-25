@@ -844,11 +844,8 @@ static void cat_rows(int c, float scale) {
 }
 
 // ---- the options picked, read-only (Generate seed under the cursor): the new seed's name and ID, then each category's
-// options that aren't their default (LARECOMP_RANDO_SUMMARY_ALL=1, test: every option), in two columns when one is too
-// long for the pane
+// options that aren't their default, in two columns when one is too long for the pane
 static void seed_summary(float scale) {
-    static int all = -1;
-    if (all < 0) all = getenv("LARECOMP_RANDO_SUMMARY_ALL") != NULL;
     const PlasticTheme &pt = plastic_theme();
     struct Item { bool head; std::string a, b; };
     std::vector<Item> items;
@@ -860,7 +857,7 @@ static void seed_summary(float scale) {
         opt_collect_end();
         bool head = false;
         for (const OptLine &l : v) {
-            if (!all && !l.changed) continue;
+            if (!l.changed) continue;
             if (!head) items.push_back({true, k_cat_name[c], ""}), head = true;
             items.push_back({false, l.label, l.value}), shown++;
         }
@@ -910,11 +907,8 @@ static void seed_summary(float scale) {
         y += lh;
         ymax = fmaxf(ymax, y);
     }
-    if (!all) {
-        const char *rest = shown ? "Everything else is the default." : "Every option is the default.";
-        dl->AddText(ImVec2(p.x, ymax + gap), pt.text_dim, rest);
-        ymax += gap + lh;
-    }
+    dl->AddText(ImVec2(p.x, ymax + gap), pt.text_dim, shown ? "Everything else is the default." : "Every option is the default.");
+    ymax += gap + lh;
     ImGui::Dummy(ImVec2(W, ymax - ImGui::GetCursorScreenPos().y));
     ImGui::SetWindowFontScale(1.0f);
 }
@@ -1114,10 +1108,7 @@ extern "C" void rando_tab_draw(float scale) {
     }
     if (opt_action("Generate seed", "", "Makes a seed with these options. It shows up under Seeds, ready to play."))
         start_generation();
-    // (under the cursor: the right column sums up the options instead; LARECOMP_RANDO_SUMMARY=1, test: always)
-    static int summary_test = -1;
-    if (summary_test < 0) summary_test = getenv("LARECOMP_RANDO_SUMMARY") != NULL;
-    bool summary = ImGui::IsItemHovered() || opt_item_nav_focused() || summary_test;
+    bool summary = ImGui::IsItemHovered() || opt_item_nav_focused();  // (this row only: the right column sums up the options)
     if (!g_gen_status.empty() && !busy) {  // (e.g. a rename that failed)
         opt_disable_next();
         opt_action(g_gen_status.c_str(), "", g_gen_status.c_str(), false);
