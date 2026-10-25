@@ -130,6 +130,7 @@ float4 shade(float2 px, Shape s, float2 mouse, float scale, float glare, float l
         float2 hc = hs - w * 0.5;
         float rc = max(r - w * 0.5, 0.0);
         float dc = sdbox(lp, hc, rc);
+        if (dc < -w * 0.5 - depth * 2.0 - 2.0) return float4(0.0, 0.0, 0.0, 0.0);  // (inside the hole, past its shadow)
         d = abs(dc) - w * 0.5;
         g = sdgrad(lp, hc, rc);
         u = clamp(dc / (w * 0.5), -1.0, 1.0);

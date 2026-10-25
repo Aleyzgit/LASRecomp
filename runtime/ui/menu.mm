@@ -367,7 +367,7 @@ static void style_init(void) {
     c[ImGuiCol_SliderGrab] = t.frame;
     c[ImGuiCol_SliderGrabActive] = t.row_sel;
     c[ImGuiCol_PlotHistogram] = c[ImGuiCol_PlotHistogramHovered] = t.row_sel;
-    c[ImGuiCol_NavCursor] = t.row_sel;
+    c[ImGuiCol_NavCursor] = clear;  // (the pieces show the cursor themselves)
     c[ImGuiCol_Separator] = ImVec4(t.frame.x, t.frame.y, t.frame.z, 0.45f);
     c[ImGuiCol_ScrollbarBg] = ImVec4(t.frame.x, t.frame.y, t.frame.z, 0.10f);
     c[ImGuiCol_ScrollbarGrab] = ImVec4(t.frame_inner.x, t.frame_inner.y, t.frame_inner.z, 0.85f);
