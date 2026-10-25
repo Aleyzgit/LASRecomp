@@ -401,9 +401,7 @@ def landmarks(romfs, leb):
     out = []
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'entrance_data.yml')) as f:
         for d in yaml.safe_load(f)['doors']:
-            lv = d.get('dest_level') or ''
-            name = DOOR_NAME.get(lv) or DOOR_NAME.get(re.sub(r'\d+(_.*)?$', '', lv)) or 'a cave'
-            out.append((name, d['pos_xz'][0], d['pos_xz'][1]))
+            out.append((door_name(d), d['pos_xz'][0], d['pos_xz'][1]))
     for f in sorted(glob.glob(os.path.join(romfs, 'region_common', 'level', 'Field', 'Field_*.leb'))):
         with open(f, 'rb') as fh:
             room = leb.Room(fh.read())
@@ -412,6 +410,43 @@ def landmarks(romfs, leb):
                 if a.name.startswith(k):
                     out.append((name, a.posX, a.posZ))
     return out
+
+
+def door_name(door):
+    """What a door looks like from outside: the building it was in vanilla ('the Trendy Game')."""
+    lv = door.get('dest_level') or ''
+    return DOOR_NAME.get(lv) or DOOR_NAME.get(re.sub(r'\d+(_.*)?$', '', lv)) or 'a cave'
+
+
+def door_of(loc, logic_defs, ent):
+    """Entrance rando (ent = las_headless's (doors, entry, exit)): the door the player walks through to reach a check
+    in a shuffled interior or connector cave (entrance_data door dict), else None. Interiors and caves keep their
+    vanilla area in the logic's spoiler-region; their door is what says where they are now."""
+    if not ent:
+        return None
+    doors, entry, _ = ent
+    region = (logic_defs.get(loc) or {}).get('region') or ''
+    if region.startswith('inside-'):
+        targets = {region[7:]}
+    elif region.startswith('conn-'):
+        targets = {d['id'] for d in doors if d.get('connector') and f"conn-{d['connector']}-{d['node']}" == region}
+    else:
+        return None
+    by_id = {d['id']: d for d in doors}
+    ways = sorted(d for d, t in entry.items() if t in targets)
+    return by_id[ways[0]] if ways else None
+
+
+def door_area(door, romfs):
+    """The area (AREA key) a door stands in: its spot's place on the Field, else its region's."""
+    import field_regions
+    room = door['field_room']
+    x, z = door['pos_xz']
+    col, row = ord(room[-1]) - 65, int(room[-3:-1])
+    tx = min(9, max(0, int((x - col * 15) / 1.5)))
+    tz = min(7, max(0, int((z - (row - 1) * 12) / 1.5)))
+    zones = field_regions.tile_zones(romfs).get(room)
+    return field_regions.area_of(door.get('outer_region'), zones[tz * 10 + tx] if zones else None)
 
 
 def tile_xz(room, tile):

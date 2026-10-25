@@ -9,7 +9,7 @@ the logic thinks is open too early - the circular dig-spot gates of #81 / #144. 
 runtime/ui/rando_tab.mm (seed_id_encode, request.json in start_generation): keep the two in step.
 
 usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir] [--stealing M] [--shopsanity N]
-                     [--souls] [--rooms N ...] [--triforce N] [--miniboss-freq F] [--entrances T] [--full]
+                     [--souls] [--rooms N ...] [--triforce N] [--miniboss-freq F] [--entrances T] [--hints] [--full]
        (default: the fixed seed IDs below + 40 random option mixes with digsanity on, every logic level)
 --miniboss-freq F: every random mix randomizes enemies with mini-boss frequency F (0 - 3: Normal, 2x, 3x, All), enemy
 mode Seeded or Random; --full: each seed is also generated in full (game files, enemies and all) and must finish -
@@ -43,7 +43,7 @@ FLAGS = ['bomb_bag', 'powder_bag', 'environments', 'pets_in_dungeons', 'skip_sto
          'randomize_enemies', 'randomize_music', 'open_mabe', 'fast_songs', 'boss_cutscenes', 'spoiler', 'decoupled',
          'pots', 'no_buffs', 'bushes', 'pet_rooster', 'pet_ghost', 'pet_marin', 'trendsanity', 'boss_souls',
          'hookshot_any', 'digs', 'miniboss_souls', 'no_start_sword', 'no_start_shield', 'no_start_ocarina',
-         'tunic_upgrades', 'shellsanity']
+         'tunic_upgrades', 'shellsanity', 'race', 'random_cosmetics', 'hints']
 ROOM_IDS = {'off': 0, 'coupled': 2, 'decoupled': 3}  # room_shuffle in the ID (1: the retired Coherent)
 BITS = 150  # (v5: 30 characters; v4 IDs had 125 - decode reads both)
 TIMEOUT = 900  # (seconds per seed)
@@ -139,7 +139,8 @@ def request(sid, o, logic='basic'):
         'pet-rooster': o['pet_rooster'], 'pet-ghost': o['pet_ghost'], 'open-desert': not o['pet_marin'],
         'triforce-hunt': o.get('triforce_needed', 0), 'triforce-extra': o.get('triforce_extra', 0) * 25,
         'include': [f'{s}-seashell-reward' for s in shells],
-        'exclude': [f'{s}-seashell-reward' for s in shells[o['seashells']:]]}
+        'exclude': [f'{s}-seashell-reward' for s in shells[o['seashells']:]],
+        **({'hints': True} if o.get('hints') else {})}  # (only when on: seeds without it stay as they were)
 
 
 def stealing(o):
@@ -301,6 +302,7 @@ def main():
     ap.add_argument('--souls', action='store_true', help='every random mix with boss and mini-boss souls on')
     ap.add_argument('--triforce', type=int, metavar='N', help='every random mix a Triforce hunt for N pieces '
                     '(extra pieces cycled: none / +25%% / +50%%)')
+    ap.add_argument('--hints', action='store_true', help='every random mix with Hints on (seed_hints.py)')
     ap.add_argument('--rooms', choices=list(ROOM_IDS), action='append',
                     help='dungeon room shuffle of the random mixes (repeat: cycled)')
     args = ap.parse_args()
@@ -318,6 +320,8 @@ def main():
         if args.miniboss_freq is not None:
             o.update(randomize_enemies=True, enemy_minibosses=True, miniboss_freq=args.miniboss_freq,
                      enemy_mode=int(rng.random() < 0.5))
+        if args.hints:
+            o['hints'] = True
         if args.souls:
             o['boss_souls'] = o['miniboss_souls'] = True
         if args.entrances is not None:
