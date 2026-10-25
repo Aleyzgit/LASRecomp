@@ -345,8 +345,14 @@ static void style_init(void) {
     c[ImGuiCol_NavCursor] = gold;
     c[ImGuiCol_Separator] = ImVec4(0.30f, 0.36f, 0.30f, 1);
     c[ImGuiCol_TitleBg] = c[ImGuiCol_TitleBgActive] = c[ImGuiCol_WindowBg];
-    // parchment (plastic.h): the pieces are the backgrounds - ImGui's own fills go clear or take the theme's colours
-    // (frames, buttons and windows are pieces too while plastic_widgets is on: their colours here only tell them apart)
+}
+
+// The menus' parchment colours (plastic.h) over that, only while a menu is drawn: the overlays over the game (FPS
+// counter, run timer, trackers, cards) keep the look above. The pieces are the backgrounds - ImGui's own fills go clear
+// or take the theme's colours (frames, buttons and windows are pieces too while plastic_widgets is on: their colours
+// here only tell them apart).
+static void style_parchment(ImGuiStyle &s) {
+    ImVec4 *c = s.Colors;
     const PlasticTheme &t = plastic_theme();
     ImVec4 clear(0, 0, 0, 0), text = plastic_col(t.text);
     c[ImGuiCol_WindowBg] = c[ImGuiCol_ChildBg] = clear;
@@ -947,6 +953,7 @@ static ImGuiStyle g_style_saved;
 void menu_style_begin(float scale) {
     g_style_saved = ImGui::GetStyle();
     style_init();
+    style_parchment(ImGui::GetStyle());
     ImGui::GetStyle().ScaleAllSizes(scale);
 }
 void menu_style_end(void) { ImGui::GetStyle() = g_style_saved; }
@@ -956,6 +963,7 @@ void menu_tabs_draw(float scale, ImFont *font, ImFont *font_big, bool in_game, v
     g_font = font, g_font_big = font_big;
     ImGuiStyle saved = ImGui::GetStyle();  // the menu's look (the start screen has its own style)
     style_init();
+    style_parchment(ImGui::GetStyle());
     ImGui::GetStyle().ScaleAllSizes(scale);
     tabs_body(scale, in_game, prelaunch);
     ImGui::GetStyle() = saved;
@@ -1055,14 +1063,19 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     rp.colorAttachments[0].storeAction = MTLStoreActionStore;
 #endif
     // spacing/rounding follow the output size too (style tuned for 1080 p)
-    static ImGuiStyle base;
+    // (the overlays' style, and the menu's: the parchment colours only while the menu / name entry is drawn)
+    static ImGuiStyle base, ov_style, menu_style;
     static float style_scale = -1;
     if (style_scale < 0) base = ImGui::GetStyle();
     if (fabsf(style_scale - scale) > 0.01f) {
-        ImGui::GetStyle() = base;
-        ImGui::GetStyle().ScaleAllSizes(scale);
+        ov_style = base;
+        ov_style.ScaleAllSizes(scale);
+        menu_style = base;
+        style_parchment(menu_style);
+        menu_style.ScaleAllSizes(scale);
         style_scale = scale;
     }
+    ImGui::GetStyle() = ov_style;
 #ifdef __APPLE__
     ImGui_ImplMetal_NewFrame(rp);
 #else
@@ -1088,7 +1101,10 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         inventory_overlay_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     }
 
-    if (open || kbd) plastic_widgets(true);  // (the menu's windows, popups and buttons as plastic pieces)
+    if (open || kbd) {  // (the menu's colours; its windows, popups and buttons as plastic pieces)
+        ImGui::GetStyle() = menu_style;
+        plastic_widgets(true);
+    }
     if (open) {
         // dim the game behind the menu
         ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize,
@@ -1128,6 +1144,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 
     if (kbd) keyboard_draw(io, scale);
     plastic_widgets(false);
+    ImGui::GetStyle() = ov_style;
     ImGui::Render();
     g_text_busy = open && ui_text_busy();
     // the pieces (and, the menu open over the game, the small copy of the game image they read): only with the menu or

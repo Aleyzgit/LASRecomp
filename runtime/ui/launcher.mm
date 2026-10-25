@@ -2136,14 +2136,10 @@ extern "C" void launcher_run(const char *root) {
             ImGui::End();
             ImGui::PopStyleColor();
             if (waiting) draw_busy_overlay(ds, "", false, true);
-            if (osk_is_open()) {  // (a text field activated with the controller: as the menu's keyboard)
-                menu_style_begin(ds.y / 1080.0f);
-                plastic_widgets(true);
-                pieces = true;
-            }
+            bool osk_up = osk_is_open();  // (a text field activated with the controller: as the menu's keyboard)
+            if (osk_up) menu_style_begin(ds.y / 1080.0f), plastic_widgets(true), pieces = true;
             osk_draw(g_font_menu, s * 0.7f);
-            plastic_widgets(false);
-            if (pieces && osk_is_open()) menu_style_end();
+            if (osk_up) plastic_widgets(false), menu_style_end();
             typed_before = ui_text_busy();
 
             ImGui::Render();
