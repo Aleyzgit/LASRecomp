@@ -19,6 +19,24 @@ native Windows, macOS and Linux application.
 > - Linux aarch64 (ARM) - **experimental**: built but untested on real hardware; reports welcome
 >   ([docs/linux.md](docs/linux.md) lists what to include)
 
+## System requirements
+
+These are the minimums during the beta and may change as development continues.
+
+**macOS:** any Apple Silicon Mac (M1 or newer) on macOS 15 or newer. Intel Macs aren't supported.
+
+**Windows and Linux:**
+
+| | Minimum |
+|---|---|
+| OS | Windows 10 or 11 (64-bit), or 64-bit Linux from about 2022 or newer (including the Steam Deck) |
+| CPU | x86-64 with AVX2 and FMA: Intel 4th gen (Haswell) or newer, or AMD Ryzen |
+| GPU | Vulkan 1.3 with an up-to-date driver, about as fast as a Switch or faster. For example: NVIDIA GTX 900 series or newer, AMD Radeon RX 400 series or Ryzen integrated graphics or newer, Intel Iris Xe or newer |
+| RAM | 8 GB (16 GB recommended) |
+| Disk | About 12 GB free for setup |
+
+Not supported: Intel UHD 600-series and older Intel integrated graphics, and anything slower than a Switch. Linux on ARM (aarch64) is experimental.
+
 ![Mabe Village in a 21:9 window: the unlocked aspect ratio shows more of the island](docs/ultrawide.jpg)
 
 > [!NOTE]
