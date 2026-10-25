@@ -43,6 +43,7 @@ extern "C" void difficulty_draw(float scale);  // difficulty.mm
 void controls_tab_draw(float scale);  // controls_ui.mm
 bool controls_ui_took_back(void);
 bool rando_tab_took_back(void);  // rando_tab.mm: B went back a step in the right column
+bool save_editor_took_back(void);  // save_editor.mm (the same)
 #include "../input_bind.h"
 #include "../paths.h"
 }
@@ -1049,6 +1050,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         // B with nothing focused-deeper closes the menu (not the Esc / B that ends typing: typing is from the frame
         // before, so it's still true the frame a field lets go)
         if (!any_popup && !typing && !ui_text_busy() && !controls_ui_took_back() && !rando_tab_took_back() &&
+            !save_editor_took_back() &&
             ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
             (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             set_open(false);
