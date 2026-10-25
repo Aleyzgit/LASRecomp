@@ -939,8 +939,7 @@ extern "C" void rando_tab_draw(float scale) {
     }
     if (!g_opts.randomize_enemies) opt_disable_next();
     opt_toggle("Include bosses", &g_opts.enemy_bosses, false,
-               "Now and then an overworld enemy becomes a dungeon boss (Moldorm or Facade), with its own intro when you "
-               "walk up to it.");
+               "Now and then an overworld enemy becomes a dungeon boss (Moldorm or Facade).");
     opt_indent(-1);
     opt_toggle("Boss souls", &g_opts.boss_souls, false,
                "Each dungeon boss (and the Color Dungeon's) has a soul hidden among the items. Until you find it the boss "
