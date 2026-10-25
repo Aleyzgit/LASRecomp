@@ -155,7 +155,7 @@ static void kill(Cpu *c, uint64_t a) {
     c->pc = pc;
 }
 
-// LARECOMP_APPLE_BONK=<frame>,... (test, game v1.0.0): the tree's bonk handler, as Link dashing into it, on each
+// LARECOMP_APPLE_BONK=<frame>,... (test): the tree's bonk handler (GA(TREE_BONK)), as Link dashing into it, on each
 // loaded apple tree at those frames
 static void bonk_test(Cpu *c, uint64_t frame, uint64_t tree) {
     const char *e = ENV("LARECOMP_APPLE_BONK");
@@ -164,7 +164,7 @@ static void bonk_test(Cpu *c, uint64_t frame, uint64_t tree) {
         uint64_t saved[31], sp = c->sp, pc = c->pc;
         memcpy(saved, c->x, sizeof saved);
         c->x[0] = tree;
-        guest_call(c, 0x7000cb04e0ull);
+        guest_call(c, GA(TREE_BONK));
         memcpy(c->x, saved, sizeof saved);
         c->sp = sp;
         c->pc = pc;
