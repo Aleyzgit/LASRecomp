@@ -42,7 +42,7 @@ extern "C" void cheats_draw(float scale);  // cheats.mm
 extern "C" void difficulty_draw(float scale);  // difficulty.mm
 void controls_tab_draw(float scale);  // controls_ui.mm
 bool controls_ui_took_back(void);
-bool rando_tab_took_back(void);  // rando_tab.mm: B went back from the Triforce hunt's count
+bool rando_tab_took_back(void);  // rando_tab.mm: B went back a step in the right column
 #include "../input_bind.h"
 #include "../paths.h"
 }
