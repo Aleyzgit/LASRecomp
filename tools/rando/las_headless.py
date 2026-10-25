@@ -398,6 +398,10 @@ def main():
             soul_cat, romfs, logic_defs, vanilla, {n: p['room'] for n, p in pot_locs.items() if p.get('room')}),
             'conditions', flush=True)
 
+    if settings.get('key-rings'):  # key rings (tools/rando/key_rings.py; after the room shuffle set the key counts)
+        import key_rings
+        print('key rings:', key_rings.convert(item_defs, settings), flush=True)
+
     result = {}
     errors = []
     stage('Shuffling items', 0.04)
@@ -481,6 +485,8 @@ def main():
             if a is not None:
                 ix[src] = a
             print(f'test swap: {item} {src} -> {loc}', flush=True)
+    if settings.get('key-rings'):
+        print('key rings placed:', key_rings.mark_indexes(result['placements']), flush=True)
     with open(os.path.join(out_dir, 'logic.json'), 'w') as f:  # the seed's final logic (tracker: tools/rando/tracker.py)
         json.dump({k: {kk: vv for kk, vv in v.items() if kk in ('type', 'subtype', 'region', 'content') or kk.startswith('condition-')}
                    for k, v in sh.logic_defs.items() if not v.get('_check_only')}, f)
@@ -533,7 +539,8 @@ def main():
     if os.environ.get('LARECOMP_CHECK_ONLY'):  # (test: tools/rando/seed_sweep.py - placements + logic, no game files)
         with open(os.path.join(out_dir, 'placements.json'), 'w') as f:
             json.dump({'placements': {k: v for k, v in pl.items() if isinstance(v, str)},
-                       'access': {k: 1 for k, v in settings.items() if v is True}}, f)
+                       'access': {k: 1 for k, v in settings.items() if v is True},
+                       **({'key-ring-sizes': settings['key-ring-sizes']} if 'key-ring-sizes' in settings else {})}, f)
         sys.exit(0)
 
     if pot_locs or bush_locs or dig_locs:  # bomb / powder / arrow refills anywhere: only once owned, else a blue rupee (runtime)
@@ -547,6 +554,9 @@ def main():
         print('pets placed:', pets_mod.mark_indexes(result['placements'], logic_defs), flush=True)
     from RandomizerCore.Randomizers import item_get as _item_get
     _item_get.GHOST_PET = 'ghost' in pets
+    if settings.get('chest-looks'):  # chest colour shows what's inside (tools/rando/chest_looks.py)
+        import chest_looks
+        print('chest looks:', chest_looks.install(result['placements'], item_defs, sh.logic_defs, settings), flush=True)
     mods = ModsProcess(result['placements'], romfs, out_dir, item_defs, settings['seed'], result['randstate'])
     last = [0]
 
@@ -697,6 +707,9 @@ def main():
     print('powder bag text:', powder_bag_text.apply(out_dir, romfs, settings), flush=True)
     import silent_pickups  # (the last flow edit) minor ground items: no item-get cutscene, a sound and a card instead
     print('silent pickups: %d gives, %d native get flows' % silent_pickups.apply(out_dir, romfs), flush=True)
+    if settings.get('chest-looks'):  # (every room edit done) the recoloured chests; no chest without a model
+        print('chest looks:', chest_looks.write_models(out_dir, romfs), 'models,',
+              chest_looks.sweep(out_dir, romfs, _uw_leb), 'chests fixed', flush=True)
     import room_links  # (every room edit done: actors' links within each room must still be sound)
     problems = room_links.check(out_dir, _uw_leb, romfs)
     if problems:

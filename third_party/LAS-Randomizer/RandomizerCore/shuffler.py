@@ -6,6 +6,8 @@ import copy
 import random
 import traceback
 
+KEY_RINGS = {}  # [LAS Recomp] key rings: 'keyring-Dn' -> that dungeon's keys, counted as key-Dn (tools/rando/key_rings.py)
+
 TEST_PLACEMENTS = { # example: testing specific items in chests
     # 'woods-crossing-cave-chest': 'bottle',
     # 'woods-south-chest': 'bottle',
@@ -292,6 +294,8 @@ class ItemShuffler(QtCore.QThread):
             access[new] += 1
         else:
             access[new] = 1
+        if new in KEY_RINGS:
+            access['key-' + new[8:]] = access.get('key-' + new[8:], 0) + KEY_RINGS[new]
         return access
     
     
@@ -300,6 +304,11 @@ class ItemShuffler(QtCore.QThread):
             access[toRemove] -= 1
             if access[toRemove] == 0:
                 access.pop(toRemove)
+            if toRemove in KEY_RINGS:
+                k = 'key-' + toRemove[8:]
+                access[k] = access.get(k, 0) - KEY_RINGS[toRemove]
+                if access[k] <= 0:
+                    access.pop(k)
         return access
     
     
@@ -791,8 +800,8 @@ class ItemShuffler(QtCore.QThread):
 
             # LARecomp keysanity: these dungeon items go to the general pool (anywhere) instead of their own dungeon
             ks = self.settings.get('keysanity', 'off')
-            ks_free = {'keys': ('key-',), 'keys+nk': ('key-', 'nightmare-key-'),
-                       'all': ('key-', 'nightmare-key-', 'map', 'compass', 'stone-beak')}.get(ks, ())
+            ks_free = {'keys': ('key-', 'keyring-'), 'keys+nk': ('key-', 'keyring-', 'nightmare-key-'),
+                       'all': ('key-', 'keyring-', 'nightmare-key-', 'map', 'compass', 'stone-beak')}.get(ks, ())
             if ks_free:
                 item_pool = [s for s in item_pool if not s.startswith(ks_free)]
 
@@ -888,8 +897,8 @@ class ItemShuffler(QtCore.QThread):
 
         # LAS Recomp keysanity: the freed dungeon items are progression - place them with the important items, not after
         # all the junk (last, only the leftover spots were left: long undo loops)
-        ks_free = {'keys': ('key-',), 'keys+nk': ('key-', 'nightmare-key-'),
-                   'all': ('key-', 'nightmare-key-', 'map', 'compass', 'stone-beak')}.get(
+        ks_free = {'keys': ('key-', 'keyring-'), 'keys+nk': ('key-', 'keyring-', 'nightmare-key-'),
+                   'all': ('key-', 'keyring-', 'nightmare-key-', 'map', 'compass', 'stone-beak')}.get(
                        self.settings.get('keysanity', 'off'), ())
         if ks_free:
             freed = [s for s in items if s.startswith(ks_free) and s[-2:-1] == 'D' and s[-1].isdigit()]
