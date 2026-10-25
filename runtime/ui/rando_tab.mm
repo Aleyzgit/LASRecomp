@@ -570,7 +570,6 @@ static void gen_overlay(float scale) {
 }
 
 bool spoiler_view_draw(const std::string &seed, float scale);  // spoiler_view.mm
-extern "C" void pets_ui_draw(void);  // pets_ui.mm: call a found pet
 static std::string g_spoiler_seed;  // seed whose spoiler page is open
 
 // ---- the tab, in two columns (as the Controls tab's Configure inputs): Seeds and the seed option categories on the
@@ -1060,7 +1059,6 @@ extern "C" void rando_tab_draw(float scale) {
     ImGui::BeginDisabled(busy);
     // (the start screen: no game loaded, nothing playing - and the seed's patches mustn't be applied yet)
     const char *active = !g_start_screen && rando_seed_dir() ? rando_seed_dir() + 6 : NULL;
-    if (active) pets_ui_draw();  // (in game, a seed with companions: call one - above the panes)
 
     opt_begin("##rando", scale);
     opt_compact();
