@@ -147,6 +147,21 @@ def movable(v, room=None):
     return not any(k in a for a in v['actors'] for k in NOT_MOVABLE if k not in skip)
 
 
+@functools.lru_cache(None)
+def _partners(romfs, level):
+    """LINK_LEVELS: {room: rooms its stairs join} (room_logic.stairs_links) - each pair on its own, not the one
+    passage network of other dungeons (Eagle's Tower's roof stairs in 03G led nowhere a jump was needed: its 3F strip
+    was left cut off)."""
+    import json
+    import room_logic
+    cat = json.load(open(os.path.join(HERE, 'room_catalog.json')))
+    out = {}
+    for a, b in room_logic.stairs_links(romfs, level, cat):
+        out.setdefault(a, set()).add(b)
+        out.setdefault(b, set()).add(a)
+    return out
+
+
 def link_room(cat, room):
     """A room of a LINK_LEVELS level that only moves thanks to them (it stays in its level)."""
     return rooms.level_of(room) in LINK_LEVELS and not movable(cat[room]) and movable(cat[room], room)
@@ -366,10 +381,12 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
         # stairs: the side-view passages under them join the anchors with stairs (Key Cavern's halves meet only there);
         # reaching one stairs room reaches them all (approximation: one passage network per dungeon)
         stairs = {cell_pos(k) for k in fixed if any(t in a for a in cat[k]['actors'] for t in ('Downstairs', 'Upstairs'))}
+        partners = _partners(romfs, level) if romfs and level in LINK_LEVELS else None
 
         def chaos_ok():
             # pieces joined physically (incl. the stairs network); each needs a free, unjoined doorway for a jump
             comps, stubs = [], []
+            pos_of = {k: p for p, k in placed.items()}
             left = {p for p, k in placed.items() if any(so[k].values())}  # (doorless rooms: no way in anyway)
             while left:
                 start = left.pop()
@@ -377,7 +394,9 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
                 while todo:
                     c, r = todo.pop()
                     nbrs = []
-                    if (c, r) in stairs:
+                    if partners is not None:
+                        nbrs += [pos_of[p] for p in partners.get(placed[(c, r)], ()) if p in pos_of]
+                    elif (c, r) in stairs:
                         nbrs += [st for st in stairs if st != (c, r)]
                     for s in 'NSWE':
                         n = nbr(c, r, s)
@@ -403,9 +422,15 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
             if chaos:
                 return chaos_ok()
             seen, todo = {cell_pos(entrance)}, [cell_pos(entrance)]
+            pos_of = {k: p for p, k in placed.items()}
             while todo:
                 c, r = todo.pop()
-                if (c, r) in stairs:
+                if partners is not None:
+                    for p in partners.get(placed[(c, r)], ()):
+                        if p in pos_of and pos_of[p] not in seen:
+                            seen.add(pos_of[p])
+                            todo.append(pos_of[p])
+                elif (c, r) in stairs:
                     for st in stairs - seen:
                         seen.add(st)
                         todo.append(st)
@@ -962,9 +987,16 @@ def chaos_pairs(cat, level, layout, entrance, rng, romfs_for_tiles=None, madness
             parent[p] = parent[parent[p]]
             p = parent[p]
         return p
-    st = sorted(stairs)
-    for a in st[1:]:
-        parent[find(a)] = find(st[0])
+    if level in LINK_LEVELS and romfs_for_tiles:  # (stairs pairs, wherever their rooms are)
+        pos_of = {r: cell_pos(c) for c, r in layout.items()}
+        for a, bs in _partners(romfs_for_tiles, level).items():
+            for b in bs:
+                if a in pos_of and b in pos_of:
+                    parent[find(pos_of[a])] = find(pos_of[b])
+    else:
+        st = sorted(stairs)
+        for a in st[1:]:
+            parent[find(a)] = find(st[0])
     stubs = []
     for (c, r), cell in sorted(pos.items()):
         room = layout[cell]

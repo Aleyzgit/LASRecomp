@@ -746,6 +746,11 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             else:
                 if len(ks) < total + dungeon_items(settings):  # (room for the Nightmare Key, Map, Compass, Beak too)
                     settings['room-logic-unfillable'] = f'{level}: {len(ks)} checks for {total + dungeon_items(settings)} dungeon items'
+    # a dungeon whose instrument the room graph can't reach (cut off from its entrance): never a beatable seed - the
+    # next layout instead (seen with Eagle's Tower, DevEaglePlay + dungeon items mcb: the whole tower unreachable)
+    lost = sorted(k for k in excluded if re.match(r'D\d-instrument$', k))
+    if lost and not settings.get('room-logic-unfillable'):
+        settings['room-logic-unfillable'] = 'unreachable ' + ', '.join(lost)
     # Eagle's Tower (collapsed, eagle_tower.py): the boss is on the roof, up the stairs at the end of 02F's raised
     # walkway (hookshot / rooster) - 02F has other doorways, so the room graph would let Link past the Nightmare door.
     # Its checks need 03F (the Nightmare door's room: 02F / 03F / 03G / 02G stay together, dungeon_gen.STAY) and the key.
