@@ -13,6 +13,7 @@ root = Path(__file__).resolve().parents[1]
 source = (root / 'runtime/nvn/vulkan/exec.c').read_text()
 defer = source[source.index('static uint64_t overlap_defer('):source.index('\nuint64_t renderer_fence_seq(')]
 snap = source[source.index('#define SNAP_HALF'):source.index('// (debug) LARECOMP_LOG_BINDS=1:')]
+gmap = source[source.index('// ---- gmap_build (tools/test_vulkan_overlap.py'):source.index('// ---- end gmap_build')]
 decide = source[source.index('#define VK_OVERLAP_DEFAULT'):source.index('static _Atomic uint64_t g_last_gpu_frame_ticks;')]
 assert 'VK_OVERLAP_DEFAULT 1' in decide, 'the default is on where the write watch is available (Beta 5)'
 assert 'static void snap_ring_import_tail(void);' in snap
@@ -651,14 +652,133 @@ int main(int argc, char **argv) {
     puts("PASS: snapshots - probe / in place / copy, level and idle re-probes, exclusions, the two halves and their waits, per-frame pool reads without entries, GPU writes kept across a remake, eviction, heap growth, reboot");
 }
 '''
+# gmap_build: the fast-copy table and the store report's bit mapping. A store's report bit is the TABLE ENTRY it lands
+# in (translate.c gfindw: GFast word GFAST_FLAG_WORD + entry, only inside the entry's bound bytes, gmap[i].w); the
+# entry's slot bits (bit i = storage slot i of the dispatch) turn that into storage slots (gfast_flags_poll). gfindw is
+# mirrored here in C from the same table words; tools/test_vulkan_overlap.py's 'glsl' check pins its GLSL text.
+gmap_harness = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include "shader.h"
+''' + gmap + r'''
+static uint32_t tab[(GMAP_MAX + 1) * 4];
+// gfindw (translate.c), in C: the entry whose bound bytes hold heap offset g, -1 none (also -1: inside an entry's
+// 256-byte rounding but outside its bound bytes - the load path still finds it there, the report doesn't)
+static int gfindw(uint32_t g, int n) {
+    for (int i = 0; i < n; i++) {
+        uint32_t o = g - tab[i * 4];
+        if (g >= tab[i * 4] && o < tab[i * 4 + 1]) return (o >= (tab[i * 4 + 3] & 0xFFu) && (o >> 2) < (tab[i * 4 + 3] >> 8)) ? i : -1;
+    }
+    return -1;
+}
+static uint16_t slots_of_stores(const GmapEnt *r, int n, const uint32_t *g, int ng) {  // (gfast_flags_poll's mapping)
+    uint16_t w = 0;
+    for (int k = 0; k < ng; k++) { int e = gfindw(g[k], n); if (e >= 0) w |= r[e].slots; }
+    return w;
+}
+int main(void) {
+    const uint64_t B = 0x7281000000ull;  // (heap base in the logged addresses: offsets below)
+    GmapEnt r[16];
+    uint64_t used;
+    // BowWow's skinning program 72a8da0000 as dispatched (Mac / Linux logs): slots 0-3 66144-byte, 5 the 12-byte
+    // parameters, 6-7 22048-byte outputs. One entry per slot (none overlap), each with exactly its slot's bit.
+    uint64_t off[16] = {0}, size[16] = {0};
+    const uint64_t a1[8] = {0x7287c31b00, 0x7287c21800, 0x7287c11500, 0x7287c01200, 0, 0x7282e71900, 0x7282e46100, 0x7282e50f00};
+    const uint64_t z1[8] = {66144, 66144, 66144, 66144, 0, 12, 22048, 22048};
+    for (int i = 0; i < 8; i++) if (z1[i]) off[i] = a1[i] - B, size[i] = z1[i];
+    int n = gmap_build(off, size, 1ull << 40, (uint64_t)GFAST_FLAG_WORD * 4, r, tab, &used);
+    assert(n == 7);
+    for (int e = 0; e < n; e++) {
+        int s = __builtin_ctz(r[e].slots);
+        assert(r[e].slots == (1u << s) && r[e].xlo == off[s] && r[e].xhi == off[s] + size[s]);
+        assert(tab[e * 4] == (uint32_t)r[e].lo && (tab[e * 4 + 3] & 0xFF) == off[s] - r[e].lo && (tab[e * 4 + 3] >> 8) == (off[s] + size[s] - r[e].lo + 3) / 4);
+    }
+    assert(used <= (uint64_t)GFAST_FLAG_WORD * 4);
+    // stores into the two outputs report slots 6 and 7 (0xc0) - not the entry indexes (sorted by address: 1 and 2)
+    uint32_t st1[2] = {(uint32_t)(off[6] + 16), (uint32_t)(off[7] + 22048 - 4)};
+    assert(slots_of_stores(r, n, st1, 2) == 0xc0);
+    // a store past an output's last byte, in its 256-byte rounding, or between buffers: no slot
+    uint32_t st2[2] = {(uint32_t)(off[6] + 22048), (uint32_t)(off[7] - 4)};
+    assert(slots_of_stores(r, n, st2, 2) == 0);
+    // 72e8f33e00: 64-byte slots 0, 1, 2 and 6, the 3104-byte palette in 3, 8 bytes in 5, 1552 in 7. Its stores go to
+    // slots 0-2 (Windows' report 0x7): those bits and no other - the palette (3) and slot 7 stay unreported.
+    memset(off, 0, sizeof off), memset(size, 0, sizeof size);
+    const uint64_t a2[8] = {0x7273882740, 0x7273882940, 0x7273882b40, 0x7282e7b200, 0, 0x7282e7f800, 0x7273883540, 0x7282e7d400};
+    const uint64_t z2[8] = {64, 64, 64, 3104, 0, 8, 64, 1552};
+    const uint64_t B2 = 0x7240000000ull;
+    for (int i = 0; i < 8; i++) if (z2[i]) off[i] = a2[i] - B2, size[i] = z2[i];
+    n = gmap_build(off, size, 1ull << 40, (uint64_t)GFAST_FLAG_WORD * 4, r, tab, &used);
+    assert(n == 7);
+    uint32_t st3[3] = {(uint32_t)off[0], (uint32_t)(off[1] + 60), (uint32_t)(off[2] + 32)};
+    assert(slots_of_stores(r, n, st3, 3) == 0x7);
+    uint32_t st4[2] = {(uint32_t)(off[0] + 64), (uint32_t)(off[3] - 4)};  // (just past slot 0; just before the palette)
+    assert(slots_of_stores(r, n, st4, 2) == 0);
+    // two slots bound to overlapping bytes share an entry: a store there reports both
+    memset(off, 0, sizeof off), memset(size, 0, sizeof size);
+    off[2] = 0x10000, size[2] = 2040, off[9] = 0x10000 + 0x100, size[9] = 64;
+    n = gmap_build(off, size, 1ull << 40, (uint64_t)GFAST_FLAG_WORD * 4, r, tab, &used);
+    uint32_t st5[1] = {0x10100};
+    assert(n == 1 && r[0].slots == ((1u << 2) | (1u << 9)) && slots_of_stores(r, n, st5, 1) == ((1u << 2) | (1u << 9)));
+    // too many bytes for gfast (the flags sit above): no table
+    memset(size, 0, sizeof size);
+    off[0] = 0, size[0] = (uint64_t)GFAST_FLAG_WORD * 4 + 4;
+    assert(gmap_build(off, size, 1ull << 40, (uint64_t)GFAST_FLAG_WORD * 4, r, tab, &used) == -1);
+    puts("PASS: store report bits - one table entry per slot, a store reports its storage slot (BowWow's programs: 0xc0, 0x7), not padding or gaps, shared bytes report both slots, oversize falls back");
+}
+'''
+
+# the GLSL the translator emits for a compute store: gfindw at the store, gfind at the load, and gfindw's report
+glsl_driver = r'''
+#include <stdio.h>
+#include <string.h>
+#include "shader.h"
+#define PT (7ull << 16)
+int main(void) {
+    uint64_t p[16] = {0}, m = 0;
+    const uint64_t ins[] = {
+        0x0100000000000000ull | 0x10000ull << 20 | 0xFull << 12 | PT | 2,                     // MOV32I R2, 0x10000
+        0x0100000000000000ull | 0x72ull << 20 | 0xFull << 12 | PT | 3,                        // MOV32I R3, 0x72
+        0xeed0000000000000ull | 4ull << 48 | 1ull << 45 | PT | 2ull << 8 | 4,                 // LDG.E R4, [R2]
+        0xeed0000000000000ull | 1ull << 51 | 4ull << 48 | 1ull << 45 | 16ull << 20 | PT | 2ull << 8 | 4,  // STG.E [R2+16], R4
+        0};
+    for (const uint64_t *w = ins; *w; w++) { if (m % 4 == 0) p[m++] = 0; p[m++] = *w; }
+    if (m % 4 == 0) p[m++] = 0;
+    p[m++] = 0xe30000000007000full;  // EXIT
+    while (m % 4) p[m++] = 0x50b0000000070f00ull;
+    maxwell_gmem_base = 0x7200000000ull, maxwell_gmem_size = 0x400000000ull;
+    ShaderKey key = {0};
+    key.glsl = 1;
+    ShaderInfo *s = maxwell_translate((const uint8_t *)p, m * 8, STAGE_COMPUTE, &key);
+    if (!s->msl) { printf("translation failed: %s\\n", s->error); return 1; }
+    fputs(s->msl, stdout);
+    return 0;
+}
+'''
+
 with tempfile.TemporaryDirectory(prefix='vulkan-overlap-') as temporary:
     temporary = Path(temporary)
-    for name, harness in (('defer', defer_harness), ('decide', decide_harness), ('snap', snap_harness)):
+    nvn = root / 'runtime/nvn/maxwell'
+    cc = shlex.split(os.environ.get('CC', 'clang'))
+    gl = temporary / 'glsl_store.c'
+    gl.write_text(glsl_driver)
+    glexe = temporary / ('glsl_store.exe' if os.name == 'nt' else 'glsl_store')
+    subprocess.run(cc + ['-std=gnu11', '-O1', '-w', '-I', str(nvn), str(gl), str(nvn / 'translate.c'), '-o', str(glexe), '-lm'], check=True)
+    out = subprocess.run([str(glexe)], check=True, capture_output=True, text=True, timeout=30).stdout
+    flag = f'gfast_.w[{(32 << 20) // 4 - 64}u + i] = gmap[16].y;'
+    assert 'fw = ok ? gfindw(uint(ga))' in out and 'fw = ok ? gfind(uint(ga))' in out, 'the store looks up with gfindw, the load with gfind'
+    assert ('uint gfindw(uint g) { uint n = gmap[16].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; '
+            'if (g >= gmap[i].x && o < gmap[i].y) { if (o >= (gmap[i].w & 0xFFu) && (o >> 2) < (gmap[i].w >> 8)) ' + flag) in out, \
+        'gfindw reports table entry i (only inside its bound bytes) with the stamp: the mapping gmap_build / gfast_flags_poll read'
+    print('PASS: GLSL store report - gfindw at the store, gfind at the load, entry i flagged with the stamp inside its bound bytes')
+    for name, harness in (('defer', defer_harness), ('decide', decide_harness), ('snap', snap_harness), ('gmap', gmap_harness)):
         cfile = temporary / f'{name}.c'
         cfile.write_text(harness)
         exe = temporary / (f'{name}.exe' if os.name == 'nt' else name)
         subprocess.run(shlex.split(os.environ.get('CC', 'clang')) + ['-std=gnu11', '-O1', '-Wall', '-Wno-unused-function', '-Wno-unused-variable',
-                        str(cfile), '-o', str(exe)], check=True)
+                        '-I', str(nvn), str(cfile), '-o', str(exe)], check=True)
         env = dict(os.environ)
         env.pop('LARECOMP_OVERLAP_WATCH', None)
         if name == 'decide':  # default on with tracking, off without (unless forced), =0 off

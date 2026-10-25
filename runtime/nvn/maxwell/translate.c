@@ -2055,9 +2055,11 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
            c->uses_gmem_store ? "" : "readonly ");
         sp(&s, "uint gfind(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
                "if (g >= gmap[i].x && o < gmap[i].y) return gmap[i].z + (o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
-        if (c->uses_gmem_store)  // (the stores' lookup: also flags the range with the dispatch's stamp, GFAST_FLAG_WORD)
+        if (c->uses_gmem_store)  // (the stores' lookup: a store inside entry i's bound bytes - gmap[i].w, exec.c gmap_build -
+                                 //  writes the dispatch's stamp to GFast word GFAST_FLAG_WORD + i; the padding doesn't count)
             sp(&s, "uint gfindw(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
-                   "if (g >= gmap[i].x && o < gmap[i].y) { gfast_.w[%uu + i] = gmap[%d].y; return gmap[i].z + (o >> 2); } } "
+                   "if (g >= gmap[i].x && o < gmap[i].y) { if (o >= (gmap[i].w & 0xFFu) && (o >> 2) < (gmap[i].w >> 8)) "
+                   "gfast_.w[%uu + i] = gmap[%d].y; return gmap[i].z + (o >> 2); } } "
                    "return 0xFFFFFFFFu; }\n", GMAP_MAX, GFAST_FLAG_WORD, GMAP_MAX);
     }
     if (c->uses_rscale && stage != STAGE_VERTEX) {
