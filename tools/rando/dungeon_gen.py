@@ -108,6 +108,10 @@ def on_map(romfs, level, c, r):
     name = cell_name(level, c, r)
     sx, sy = map_shift(romfs, level, name)
     c, r = ord(name[-1]) - ord('A'), int(name[-3:-1])  # (the map draws a cell by its name: Eagle's Tower)
+    if not (0 <= c < COLS and 1 <= r <= ROWS):
+        # the map holds 8 x 8 named cells: Eagle's Tower's spare names (rows 09 / 10, columns I / J) crashed the game
+        # as soon as the dungeon map opened (play test, DevEaglePlay: rooms in 09B / 10A ...)
+        return False
     x0, y0 = c * MAP_CELL_W - 326 + sx, 259 - r * MAP_CELL_H + sy
     return x0 >= -326 - MAP_TOL and x0 + MAP_CELL_W <= 326 + MAP_TOL and y0 >= -259 - MAP_TOL and \
         y0 + MAP_CELL_H <= 259 + MAP_TOL
@@ -116,7 +120,10 @@ def on_map(romfs, level, c, r):
 # rooms tied to a room that stays by level-local flags: Bottle Grotto 07G's event box sets 31 / 32 for 06G's blocks.
 # Eagle's Tower's roof route: 02F's raised walkway runs through 03F (Nightmare door) to the roof stairs in 03G, whose
 # north door (opened by the boss) leads to the instrument in 02G - kept together where they are.
-STAY = {'Lv02BottleGrotto_07G', 'Lv07EagleTower_02F', 'Lv07EagleTower_03G', 'Lv07EagleTower_02G'}
+# Its 02B (a pillar room: wide open sides, hole and 02F's landing) found no other place and was left out - 02F's hole
+# then dropped Link into whatever room had its cell: kept home too.
+STAY = {'Lv02BottleGrotto_07G', 'Lv07EagleTower_02F', 'Lv07EagleTower_03G', 'Lv07EagleTower_02G',
+        'Lv07EagleTower_02B'}
 
 # Movable stairs and holes (levels where they are tested): rooms with stairs, holes or the landing spots of holes may
 # move inside their own level - the floor links follow them (the stairs / hole names a player start of its partner
@@ -160,6 +167,18 @@ def _partners(romfs, level):
         out.setdefault(a, set()).add(b)
         out.setdefault(b, set()).add(a)
     return out
+
+
+def linked_all(cat, romfs, level, layout):
+    """LINK_LEVELS: every room a stairs or hole of the level leads into is in the layout. One left out keeps its
+    player start at its old cell - the stairs / hole would drop Link into whatever room is there now (DevEaglePlay:
+    02F's hole into 02B's spot, 02B unused)."""
+    if level not in LINK_LEVELS or not romfs:
+        return True
+    import room_logic
+    placed = set(layout.values())
+    need = set(_partners(romfs, level)) | {b for _, b in room_logic.hole_links(romfs, level, cat)}
+    return need <= placed
 
 
 def link_room(cat, room):
@@ -1212,6 +1231,8 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
         # a doorway that can't jump (wide opening, one-way door...) needs its matching neighbour, else it leads
         # into the void (user's seed De: 12 such): such a round is dropped
         if any(dead_ends(cat, lv, out[lv]) for lv in levels):
+            continue
+        if any(not linked_all(cat, romfs, lv, out[lv]) for lv in levels):
             continue
         jumps = []
         import room_logic
