@@ -822,7 +822,7 @@ extern "C" void rando_tab_draw(float scale) {
                "up buried. The first dig of a tile brings its item up; grass and bushes have to be cut first. Holes stay "
                "dug, so you can see where you've been.");
     opt_toggle("Shellsanity", &g_opts.shellsanity, false, "Every hidden Secret Seashell spot holds an item from the pool.");
-    opt_toggle("Rocks", &g_opts.rocks, false, "Every rock you can lift on the overworld hides an item from the pool.");
+    opt_toggle("Rocksanity", &g_opts.rocks, false, "Every rock you can lift on the overworld hides an item from the pool.");
     static const char *ksn[] = {"Off", "Small keys", "Small + Nightmare", "All dungeon items"};
     opt_choice("Keysanity", &g_opts.keysanity, ksn, 4, 0,
                "Dungeon keys (and with the last choice every dungeon item) can be anywhere in the world, with logic. A "
