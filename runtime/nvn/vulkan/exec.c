@@ -4338,18 +4338,18 @@ static uint32_t gfast_stamp;                  // this dispatch's stamp (gmap[GMA
 // The GPU's report of the table ranges each storing dispatch stored into (#355): the stamps gfindw leaves at
 // GFAST_FLAG_WORD are copied after the dispatch into a host-visible ring, read once the submission is done
 // (gfast_flags_poll) and noted per program and slot (csw_note: snap_storage's classes; gfast_finish's copy back).
-#define GFR_N 256
+#define GFR_N 4096  // (reports in flight: hundreds of dispatches a frame, two frames)
 static VkBuffer gfr_buf;
 static VmaAllocation gfr_mem;
 static uint32_t *gfr_ptr;
 static struct { uint64_t seq, code; uint32_t stamp; uint16_t slots[GMAP_MAX]; uint8_t n; bool busy; } gfr[GFR_N];
-static int gfr_next;
+static int gfr_next, gfr_tail;  // (allocated in submission order: read from the tail while done)
 static void gfast_flags_poll(void) {
     if (!gfr_ptr) return;
     uint64_t done = vk_completed_seq();
     bool inv = false;
-    for (int r = 0; r < GFR_N; r++) {
-        if (!gfr[r].busy || gfr[r].seq > done) continue;
+    for (; gfr[gfr_tail].busy && gfr[gfr_tail].seq <= done; gfr_tail = (gfr_tail + 1) % GFR_N) {
+        int r = gfr_tail;
         if (!inv) { vmaInvalidateAllocation(g_vk.vma, gfr_mem, 0, VK_WHOLE_SIZE); inv = true; }
         uint16_t covered = 0, written = 0;
         for (int i = 0; i < gfr[r].n; i++) {
@@ -4450,7 +4450,7 @@ static void gfast_finish(VkCommandBuffer cb) {
         if (vmaCreateBuffer(g_vk.vma, &bi, &ai, &gfr_buf, &gfr_mem, &info) == VK_SUCCESS) gfr_ptr = info.pMappedData;
     }
     int rr = gfr_next;
-    if (gfr_ptr && code && !gfr[rr].busy) {  // (the ring slot still pending: no report from this dispatch)
+    if (gfr_ptr && code && !gfr[rr].busy) {  // (the ring full of pending reports: none from this dispatch)
         gfr_next = (gfr_next + 1) % GFR_N;
         VkBufferCopy fc = {(uint64_t)GFAST_FLAG_WORD * 4, (uint64_t)rr * GMAP_MAX * 4, (uint64_t)gfast_n * 4};
         rec_CmdCopyBuffer(cb, gfast_buf, gfr_buf, 1, &fc);
