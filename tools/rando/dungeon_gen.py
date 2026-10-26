@@ -140,8 +140,14 @@ def on_map(romfs, level, c, r, room=None):
 # Ledges whose other end stays (TIED for pairs that can move): Key Cavern 02D's east-ledge chest is reached from 03D's
 # ramp up its north edge (02D is part of a fixed unit); Turtle Rock 02E's northern-ledge chest is hookshotted from the
 # strip that 03E's ramp leads up to (02E is a fixed unit). Moved, the chest was out of reach.
+# Rooms the only possible neighbour of a room that stays (a doorway that can't jump - water channel, Nightmare door,
+# wide opening - and that no other room matches): Catfish's Maw 04F under 03F's water channel, Angler's Tunnel 03G
+# above 04G, Eagle's Tower 04F under 03F, 02A beside 02B's open west side. Moved away (another dungeon took Catfish's
+# 04F under any room with a doorway at its slot), the round could never close: seed NXC11-...: Catfish's Maw plan()
+# failed 76 times.
 STAY = {'Lv02BottleGrotto_07G', 'Lv07EagleTower_02F', 'Lv07EagleTower_03G', 'Lv07EagleTower_02G',
-        'Lv07EagleTower_02B', 'Lv03KeyCavern_03D', 'Lv08TurtleRock_03E'}
+        'Lv07EagleTower_02B', 'Lv03KeyCavern_03D', 'Lv08TurtleRock_03E',
+        'Lv05CatfishsMaw_04F', 'Lv04AnglersTunnel_03G', 'Lv07EagleTower_04F', 'Lv07EagleTower_02A'}
 
 # Movable stairs and holes (levels where they are tested): rooms with stairs, holes or the landing spots of holes may
 # move inside their own level - the floor links follow them (the stairs / hole names a player start of its partner
@@ -209,16 +215,21 @@ def dead_shadow(level):
     return {(c + dc, r + dr) for c, r in dead for dc in (-1, 0, 1) for dr in (-1, 0, 1)} - dead
 
 
+def link_targets(cat, romfs, level):
+    """LINK_LEVELS: the rooms its stairs and holes lead into (none elsewhere)."""
+    if level not in LINK_LEVELS or not romfs:
+        return set()
+    import room_logic
+    return set(_partners(romfs, level)) | {b for _, b in room_logic.hole_links(romfs, level, cat)}
+
+
 def linked_all(cat, romfs, level, layout):
     """LINK_LEVELS: every room a stairs or hole of the level leads into is in the layout. One left out keeps its
     player start at its old cell - the stairs / hole would drop Link into whatever room is there now (DevEaglePlay:
     02F's hole into 02B's spot, 02B unused)."""
     if level not in LINK_LEVELS or not romfs:
         return True
-    import room_logic
-    placed = set(layout.values())
-    need = set(_partners(romfs, level)) | {b for _, b in room_logic.hole_links(romfs, level, cat)}
-    return need <= placed
+    return link_targets(cat, romfs, level) <= set(layout.values())
 
 
 def link_room(cat, room):
@@ -448,6 +459,9 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
         # reaching one stairs room reaches them all (approximation: one passage network per dungeon)
         stairs = {cell_pos(k) for k in fixed if any(t in a for a in cat[k]['actors'] for t in ('Downstairs', 'Upstairs'))}
         partners = _partners(romfs, level) if romfs and level in LINK_LEVELS else None
+        # LINK_LEVELS: every room a stairs or hole leads into has to be placed (linked_all) - left to chance, the tower
+        # often closed without 01C / 04G and the whole round was thrown away (seed NXC11-...: 238 of 320 tries)
+        must = set(link_targets(cat, romfs, level)) - fixed if partners is not None else set()
 
         def chaos_ok():
             # pieces joined physically (incl. the stairs network); each needs a free, unjoined doorway for a jump
@@ -519,8 +533,9 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
             fr = frontier()
             req = required(fr)
             left = None if exact is None else len(fixed) + len(exact) - len(used)
-            if not fr or (seal and not req and (left == 0 or (left is None and len(placed) >= size))):
-                return (exact is None or left == 0) and connected()
+            done = must <= used
+            if not fr or (done and seal and not req and (left == 0 or (left is None and len(placed) >= size))):
+                return done and (exact is None or left == 0) and connected()
             if left is not None and len(req) > left:
                 return False  # more open cells than rooms left
             budget[0] -= 1
@@ -547,7 +562,7 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
                         continue
                     # grow while small (rooms opening 1-2 more doorways first), then close (rooms opening nothing
                     # first; opening more is still allowed - exact dead ends are rare)
-                    out.append((abs(n - 1.5) if not want_close else n, rng.random(), room))
+                    out.append((room not in must, abs(n - 1.5) if not want_close else n, rng.random(), room))
                 return out
             # fewest candidates first (and give up at once when an open cell has none)
             best = None
