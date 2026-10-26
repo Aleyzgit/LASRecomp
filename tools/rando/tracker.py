@@ -418,7 +418,9 @@ def build(seed_dir, romfs):
     tsv = os.path.join(seed_dir, 'pots.tsv')
     if os.path.exists(tsv):
         by_level = {}
-        for p in pots_mod.scan(romfs, leb):
+        import eagle_tower  # (room shuffle: the tower starts collapsed - 02E's pots are checks, 06E's aren't)
+        for p in pots_mod.scan(romfs, leb, eagle_tower.MISSABLE_ROOMS_COLLAPSED if eagle_tower.collapsed(settings)
+                               else pots_mod.MISSABLE_ROOMS):
             by_level.setdefault(p['level'], []).append(p)
         names = {}
         for lv, ps in by_level.items():
