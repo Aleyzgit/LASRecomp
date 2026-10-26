@@ -508,8 +508,10 @@ def _split_rooms(out_dir, romfs, hints, leb):
 
 
 def _phone_flow(out_dir, romfs, n, event_tools, oead_tools):
-    """Telephone.bfevfl: after the call's join (Event98), before LAS's tunic swap: hint i when flags 0..i-1 are set
-    and flag i isn't; the last hint clears them, so the next call starts over."""
+    """Telephone.bfevfl: hint i when flags 0..i-1 are set and flag i isn't; the last hint clears them, so the next
+    call starts over. With LAS's tunic swap (after the call's join, Event98): just before it, shown with Dialog.Show
+    (LAS names the phone's speaker the Fairy Queen). Without it (Treat Tunics as Upgrades: the vanilla call): in place
+    of the game's own hint pick (Event218 -> Event97 JumpToAppropriateHintEntry), Ulrira speaking (Telephone.Examine)."""
     import seed_tables
     rel = 'region_common/datasheets/GlobalFlags.gsheet'
     sp = hs._src(out_dir, romfs, rel)
@@ -521,19 +523,23 @@ def _phone_flow(out_dir, romfs, n, event_tools, oead_tools):
     p = _flow_path(out_dir, romfs, 'Telephone.bfevfl')
     flow = event_tools.readFlow(p)
     fc = flow.flowchart
-    join = event_tools.findEvent(fc, 'Event98')
-    swap = join.data.nxt.v  # (LAS: subflow to its 'Telephone' entry, then Event113)
-    assert type(swap.data).__name__ == 'SubFlowEvent' and swap.data.entry_point_name == 'Telephone', 'tunic swap moved'
-    nxt = swap.name
-    for fl in flags:  # (the last hint: clear every flag, then the swap)
+    after = event_tools.findEvent(fc, 'Event98').data.nxt.v
+    if type(after.data).__name__ == 'SubFlowEvent' and after.data.entry_point_name == 'Telephone':  # (the tunic swap)
+        before, end, show = 'Event98', after.name, ('Dialog', 'Show')
+    else:
+        pick = event_tools.findEvent(fc, 'Event97')
+        assert pick.data.actor_action.v.v == 'JumpToAppropriateHintEntry', 'Telephone.bfevfl changed'
+        assert event_tools.findEvent(fc, 'Event218').data.nxt.v is pick, 'Telephone.bfevfl changed'
+        before, end, show = 'Event218', None, ('Telephone', 'Examine')
+    nxt = end
+    for fl in flags:  # (the last hint: clear every flag)
         nxt = event_tools.createActionEvent(fc, 'EventFlags', 'SetFlag', {'symbol': fl, 'value': False}, nxt)
-    # (Dialog.Show, not Telephone.Examine: LAS names the phone's speaker the Fairy Queen for its tunic swap)
-    nxt = event_tools.createActionEvent(fc, 'Dialog', 'Show', {'message': f'Telephone:{PHONE_LABEL.format(n - 1)}'}, nxt)
+    nxt = event_tools.createActionEvent(fc, *show, {'message': f'Telephone:{PHONE_LABEL.format(n - 1)}'}, nxt)
     for i in reversed(range(n - 1)):
-        give = event_tools.createActionEvent(fc, 'EventFlags', 'SetFlag', {'symbol': flags[i], 'value': True}, swap.name)
-        give = event_tools.createActionEvent(fc, 'Dialog', 'Show', {'message': f'Telephone:{PHONE_LABEL.format(i)}'}, give)
+        give = event_tools.createActionEvent(fc, 'EventFlags', 'SetFlag', {'symbol': flags[i], 'value': True}, end)
+        give = event_tools.createActionEvent(fc, *show, {'message': f'Telephone:{PHONE_LABEL.format(i)}'}, give)
         nxt = event_tools.createSwitchEvent(fc, 'EventFlags', 'CheckFlag', {'symbol': flags[i]}, {0: give, 1: nxt})
-    event_tools.insertEventAfter(fc, 'Event98', nxt)
+    event_tools.insertEventAfter(fc, before, nxt)
     event_tools.writeFlow(p, flow)
 
 
