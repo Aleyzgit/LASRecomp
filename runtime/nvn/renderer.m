@@ -2364,8 +2364,18 @@ static void snap_note_vertex_bind(uint64_t addr, uint64_t size) {  // (LARECOMP_
             n++; LOG("[snap] vertex bind %llx+%llu overlaps copied %llx+%llu (%s, frame %llu)\n", (unsigned long long)addr, (unsigned long long)size, (unsigned long long)rs_tab[i].addr, (unsigned long long)rs_tab[i].size, addr < rs_tab[i].addr ? "from outside" : "inside", (unsigned long long)renderer_exec_frame());
         }
 }
+// The table's current address for a range, read only (a replay whose draw wasn't found in the log): its copy, or the
+// original when it has none (in place, or a per-frame block copied without an entry).
+static uint64_t snap_lookup(uint64_t addr, uint64_t size) {
+    if (!snap_on()) return addr;
+    for (int i = 0; i < nrs; i++)
+        if (rs_tab[i].addr == addr && rs_tab[i].size == size) return rs_tab[i].mode != RS_PLACE && rs_tab[i].copy ? rs_tab[i].copy : addr;
+    return addr;
+}
+static uint64_t g_bound_sbuf[2][16];  // the storage addresses the current draw's stages bound (copy or original)
 // The address a binder of [addr, addr+size) uses: the original or its copy (cs_slot: bound by a compute dispatch)
 static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
+    if (g_interp_replaying) return snap_lookup(addr, size);  // (replays never create, age, release or remake entries)
     if (!snap_on() || !addr || !size || size > SNAP_RING / 8 || addr < HEAP_BASE || addr + size > snap_ring_base) return addr;
     extern int nvn_pool_flags_at(uint64_t addr);
     int pf = nvn_pool_flags_at(addr);
@@ -2473,6 +2483,7 @@ static uint64_t snap_storage(uint64_t addr, uint64_t size, bool cs_slot) {
 }
 
 static void bind_cbufs(int stage, ShaderInfo *si) {
+    for (int i = 0; i < 16; i++) g_bound_sbuf[stage][i] = st.sbuf[stage][i].addr;  // (no driver constants: read in place)
     for (int k = 0; k < 18; k++) {
         if (!(si->cbuf_mask & (1u << k))) continue;
         if (k == 0) {
@@ -2480,10 +2491,26 @@ static void bind_cbufs(int stage, ShaderInfo *si) {
             // per hardware stage at 0x110 + 0x100 * stage (vertex 0, fragment 4)
             uint32_t drv[0x800 / 4] = {0};
             uint32_t base = 0x110 + 0x100 * (stage == 1 ? 4 : 0);
+            // The storage addresses the draw reads: the real frame takes them from the snapshot table (copies of what
+            // the CPU rewrites) and logs them with the draw; a replay binds the frame's own (its copies, made when it
+            // ran) and never touches the table - running it there (a "frame" 2^40 ahead) released every copy and
+            // remade them from live memory: the in-betweens 44% darker, the beach sand teal (2026-10-26).
+            uint64_t sav[16];
+            bool reads = false;
+            for (int i = 0; i < 16; i++) { sav[i] = st.sbuf[stage][i].addr; reads |= sav[i] && (si->ssbo_read & (1u << i)); }
+            if (reads && g_interp_replaying) {
+                const uint64_t *lg = interp_cbuf(4 + stage, 0, 0, sav, sizeof sav, 0);
+                if (lg != sav) memcpy(sav, lg, sizeof sav);
+                else for (int i = 0; i < 16; i++) if (sav[i] && (si->ssbo_read & (1u << i))) sav[i] = snap_lookup(sav[i], st.sbuf[stage][i].size);
+            } else if (reads) {
+                for (int i = 0; i < 16; i++)
+                    if (sav[i] && (si->ssbo_read & (1u << i))) { bind_note(2, sav[i], st.sbuf[stage][i].size); sav[i] = snap_storage(sav[i], st.sbuf[stage][i].size, false); }
+                if (g_interp_log) interp_cbuf(4 + stage, 0, 0, sav, sizeof sav, 0);
+            }
+            memcpy(g_bound_sbuf[stage], sav, sizeof sav);
             for (int i = 0; i < 16; i++) {
                 uint32_t *e = &drv[(base + 16 * i) / 4];
-                uint64_t sa = st.sbuf[stage][i].addr;
-                if (sa && (si->ssbo_read & (1u << i))) { bind_note(2, sa, st.sbuf[stage][i].size); sa = snap_storage(sa, st.sbuf[stage][i].size, false); }
+                uint64_t sa = sav[i];
                 e[0] = (uint32_t)sa;
                 e[1] = (uint32_t)(sa >> 32);
                 e[2] = (uint32_t)st.sbuf[stage][i].size;
@@ -3412,7 +3439,12 @@ static void draw(CmdRec *r, bool indexed) {
         for (int s_ = 0; s_ < 2; s_++) {
             ShaderInfo *si = s_ ? pr->fi : pr->vi;
             if (!si->uses_gmem) continue;
-            for (int i = 0; i < 16; i++) if ((si->ssbo_read & (1u << i)) && st.sbuf[s_][i].addr) interp_storage(st.sbuf[s_][i].addr, st.sbuf[s_][i].size);
+            // (only what the draw read in place: a snapshot copy is the frame's own, and the replays bind that copy, so
+            // the game rewriting the original meanwhile - the tiled light lists, rewritten for the next frame while
+            // this one is drawn - can't reach them; checked, it cut the in-betweens for seconds at a time)
+            for (int i = 0; i < 16; i++)
+                if ((si->ssbo_read & (1u << i)) && st.sbuf[s_][i].addr && g_bound_sbuf[s_][i] == st.sbuf[s_][i].addr)
+                    interp_storage(st.sbuf[s_][i].addr, st.sbuf[s_][i].size);
         }
     if (pr->vi->uses_gmem) [enc setVertexBuffer:g_guest_buffer offset:0 atIndex:GMEM_BUFFER_INDEX];
     static id<MTLBuffer> dbgvs;

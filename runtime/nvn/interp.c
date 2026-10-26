@@ -432,7 +432,7 @@ const void *interp_cbuf(int stage, int k, int slot, const void *src, uint64_t si
     GROW(cur->cbs, cur->ncbs, cur->cap_cbs, 4096);
     CbRec *c = &cur->cbs[cur->ncbs++];
     c->stage = (uint8_t)stage, c->slot = (uint8_t)slot, c->off = (uint32_t)cur->nbytes, c->size = (uint32_t)size;
-    c->used = stage >= 2 ? 0 : (uint32_t)(used && used < size ? used : size);  // (stage 2, 3: a texture entry - never compared)
+    c->used = stage >= 2 ? 0 : (uint32_t)(used && used < size ? used : size);  // (stage 2, 3: a texture entry, 4, 5: the storage addresses bound - never compared)
     c->addr = (uint64_t)(uintptr_t)src;
     c->prev_off = c->blend = c->prev2_off = -1;
     c->snap = 0, c->maxd = -1;
@@ -807,6 +807,8 @@ uint64_t interp_replay_ns(uint64_t now) {
     uint64_t since = atomic_load(&rp_since), total = atomic_load(&rp_total_ns);
     return total + (since && now > since ? now - since : 0);
 }
+// (per-frame caches only - targets cleared at first use, the scene camera: the storage-snapshot table and texture
+// uploads never run in a replay, nothing stateful may key on this frame number there)
 uint64_t interp_replay_salt(void) { return g_interp_replaying ? rp_salt : 0; }
 
 void interp_replay_begin(void) {

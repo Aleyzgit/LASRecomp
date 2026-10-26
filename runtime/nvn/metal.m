@@ -541,6 +541,9 @@ static uint64_t fnv_sample(const uint8_t *p, uint64_t n) {
 // Upload all levels/layers from block-linear guest memory.
 static void upload_texture(NvnTexture *t, TexBackend *b, id<MTLBlitCommandEncoder> blit) {
     if (!t->addr || t->target == 10) return;
+    // (a frame interpolation replay shows the frame's textures as it uploaded them: checked again there - a "frame" of
+    // its own - it uploaded what the game had meanwhile written for the next frame, and spent the check budget)
+    if (b->uploaded && g_interp_replaying) return;
     const uint64_t g_frame_counter = renderer_exec_frame();  // (the frame being translated)
     if (b->uploaded && b->checked_frame == g_frame_counter) return;  // (fast exits before any layout math)
     if (b->uploaded && !b->dynamic && ((g_frame_counter + ((uintptr_t)b >> 6)) & 7)) return;
