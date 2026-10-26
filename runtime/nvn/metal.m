@@ -1251,6 +1251,9 @@ static int g_presents_inflight;  // present command buffers committed and not ye
 // in-between images.
 static double pl_vx, pl_vy, pl_vw, pl_vh;
 static float pl_crop[4] = {0, 0, 1, 1};
+// The game image compose last drew and its sampled part (for the menu: menu_set_scene).
+static id<MTLTexture> cmp_scene;
+static float cmp_scene_uv[4] = {0, 0, 1, 1};
 
 // The present pass: the game image t into dst (cleared) as the window shows it - SMAA, MetalFX, scaled and cropped.
 // update: a new game frame - its placement in the window (and the next frame's render scale) is worked out here.
@@ -1351,6 +1354,10 @@ static void compose(id<MTLCommandBuffer> cb, NvnTexture *t, id<MTLTexture> dst, 
         [enc setFragmentTexture:src atIndex:0];
         [enc setFragmentSamplerState:present_sampler atIndex:0];
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        cmp_scene = src;
+        memcpy(cmp_scene_uv, crop, sizeof cmp_scene_uv);
+    } else {
+        cmp_scene = nil;
     }
     [enc endEncoding];
 }
@@ -1376,6 +1383,7 @@ static bool present_direct(NvnTexture *t, uint64_t frame) {
         __atomic_add_fetch(&g_presents_inflight, 1, __ATOMIC_RELAXED);
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         compose(cb, t, drawable.texture, frame, true);
+        menu_set_scene(cmp_scene, cmp_scene_uv);
         pthread_mutex_lock(&menu_mx);
         menu_render(dev, cb, drawable.texture);
         pthread_mutex_unlock(&menu_mx);
@@ -1771,6 +1779,8 @@ static void ip_tick(uint64_t tp) {
         [enc drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         [enc endEncoding];
         if (!pass) {
+            static const float whole[4] = {0, 0, 1, 1};  // (the menu's copy of the game image: this slot's own image)
+            menu_set_scene(from, whole);
             pthread_mutex_lock(&menu_mx);
             menu_render(dev, cb, dst);
             pthread_mutex_unlock(&menu_mx);

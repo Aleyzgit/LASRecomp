@@ -25,6 +25,8 @@ enum { LANG_AUTO = 0, N_LANGUAGES = 12 };
 extern const char *const g_language_codes[N_LANGUAGES];  // what the game is told: "ja", "en-US", "es", ...
 extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto", "Japanese", ..., "Spanish")
 
+enum { RANDO_PRESETS_MAX = 20 };  // (the Randomizer tab's own presets: settings.rando_presets)
+
 typedef struct {
     int aspect;          // ASPECT_*: unlocked = fill the window (wider/taller views), original = 16:9 with bars
     bool fullscreen;
@@ -76,6 +78,7 @@ typedef struct {
     CosColour skin;           // runtime/nvn/texpatch.c skin_apply
     CosColour leaves, grass;  // the overworld's foliage, runtime/nvn/recolour_seasons.c
     CosColour sand;           // the beaches, the desert, the sandy south (recolour_seasons.c)
+    CosColour water;          // the sea, rivers, ponds, dungeon water (runtime/nvn/recolour_water.c)
     int enemy_colours;        // 0 Off, 1 Random per seed, 2 Random every load (runtime/nvn/recolour_enemies.c)
     int screen_filter;        // 0 Off, 1 Game Boy, 2 Game Boy Color, 3 Grayscale (runtime/nvn/screen_filter.h)
     // speedrun (Gameplay tab; runtime/hle/run_timer.c, runtime/livesplit.c)
@@ -85,6 +88,8 @@ typedef struct {
     char livesplit_host[64];  // host:port of the LiveSplit Server ("localhost:16834")
     char rando_seed[128];  // active randomizer seed (rando/<name>/), empty = vanilla
     char rando_options[48];  // the Randomizer tab's New seed options: a seed ID without its random part (empty = defaults)
+    // the player's own randomizer presets (rando_preset lines): "<name>|<options key>|<tracker><map letters>", "" = free
+    char rando_presets[RANDO_PRESETS_MAX][100];
 } Settings;
 
 

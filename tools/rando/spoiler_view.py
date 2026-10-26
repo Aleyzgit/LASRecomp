@@ -4,7 +4,7 @@
   spoiler_view.py <seed dir> [...]
 
 Sections: settings summary, starting items, a step-by-step walkthrough (playthrough spheres: "with what you have,
-go get these"), every item by area, dungeon entrances, shuffled entrances, pots. Seeds made before spheres.json
+go get these"), every item by area, dungeon entrances, shuffled entrances, pots, hints (Hints on). Seeds made before spheres.json
 existed are regenerated into build/ (same seed = same placements) to compute the walkthrough.
 
 Markup read by the game: '# ' section, '## ' sub-heading, '- ' bullet, '  ' continuation, plain text otherwise.
@@ -49,8 +49,9 @@ ITEMS = {'rooster': 'Flying Rooster (pet)', 'ghost': 'Ghost (pet)', 'marin-compa
          'fishing-hook': 'Fishing Hook', 'necklace': 'Necklace', 'scale': "Mermaid's Scale", 'red-tunic': 'Red Tunic',
          'blue-tunic': 'Blue Tunic', 'golden-leaf': 'Golden Leaf', 'mushroom': 'Sleepy Toadstool',
          'medicine': 'Secret Medicine', 'bottle': 'Bottle', 'zol-trap': 'Trap!', 'bomb-capacity': 'Bomb bag upgrade',
-         'arrow-capacity': 'Quiver upgrade', 'powder-capacity': 'Magic Powder upgrade', 'chamber-stone': 'Chamber Stone'}
-JUNK = re.compile(r'^((pot-|dig-)?rupee-\d+|pot-heart|pot-arrows|pot-bombs|pot-powder|trap|zol-trap|arrows?(-\d+)?|bombs?-\d+|powder-\d+)$')
+         'arrow-capacity': 'Quiver upgrade', 'powder-capacity': 'Magic Powder upgrade', 'chamber-stone': 'Chamber Stone',
+         'apple': 'Apple', 'green-apple': 'Green Apple'}
+JUNK = re.compile(r'^((pot-|dig-)?rupee-\d+|pot-heart|apple|green-apple|pot-arrows|pot-bombs|pot-powder|trap|zol-trap|arrows?(-\d+)?|bombs?-\d+|powder-\d+)$')
 
 
 def pretty_item(it):
@@ -60,6 +61,8 @@ def pretty_item(it):
         kind = {'small-key': 'Small Key', 'key': 'Small Key', 'nightmare-key': 'Nightmare Key', 'compass': 'Compass',
                 'map': 'Dungeon Map', 'stone-beak': 'Stone Beak', 'beak': 'Stone Beak'}[m.group(2)]
         return f'{kind} ({DPREFIX[m.group(1)]})'
+    if re.match(r'^keyring-D\d$', base):  # (key rings: key_rings.py)
+        return f'Key Ring ({DPREFIX[base[-2:]]})'
     m = re.match(r'^(small-key|key|nightmare-key|compass|map|stone-beak)-?(D\d)$', base)
     if m:
         return pretty_item(f'{m.group(2)}-{m.group(1)}')
@@ -81,6 +84,9 @@ def pretty_loc(loc):
     if pm:
         name = re.sub(r'(?<!^)(?=[A-Z])', ' ', pm.group(1))
         return f'{name}: pot {pm.group(3)}'
+    pm = re.match(r'^apple-tree-(\d\d[A-P])-(\d)$', loc)  # (Applesanity)
+    if pm:
+        return f'Apple tree ({pm.group(1)}), {pm.group(2)} of 3'
     return loc.replace('-', ' ').capitalize()
 
 
@@ -211,6 +217,13 @@ def build(seed_dir):
             if m:
                 a, b = (x.replace('-', ' ') for x in m.groups())
                 out.append(f'- {a}  ->  {b}' if mode == 'in' else f'- leaving {a}  ->  outside {b}')
+    hp = os.path.join(seed_dir, 'seed_hints.txt')  # (Hints on: what each owl statue and phone call says)
+    if os.path.exists(hp):
+        out.append('')
+        out.append('# Hints')
+        for l in open(hp):
+            where, _, text = l.rstrip('\n').partition(': ')
+            out.append(f'- {where}: {text}')
     with open(os.path.join(seed_dir, 'spoiler_view.txt'), 'w') as f:
         f.write('\n'.join(out) + '\n')
     return len(out)

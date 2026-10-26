@@ -99,19 +99,24 @@ static bool lazy_heap_predicted(bool budget_ext, bool *probe) {
     if (g_vk.props.vendorID == 0x1002 && g_vk.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
         return true;
 #endif
-    if (!whole_import_fits(budget_ext, probe)) return true;
-    if (!strstr(g_vk.props.deviceName, "RADV")) return false;
-    *probe = false;  // (RADV: as before - the dma-buf heap or lazy chunks, no probe)
 #ifdef __linux__
+    // RADV with the dma-buf heap (exec.c guest_heap_dmabuf): no import at all, so whole_import_fits doesn't apply; any
+    // cached host-visible memory type will do, as there (a heap's reported size is only the driver's split: a ROG Ally
+    // has 3305 MB for 3328, and the allocation works). Lazy chunks over it would never be imported: every shader access
+    // a miss, and the render thread remaking the chunk set each frame (15 ms a frame on the Ally).
     const char *d = getenv("LARECOMP_VK_HEAP_DMABUF");
-    if ((d ? atoi(d) != 0 : true) && (g_vk.dmabuf || g_vk.map_placed)) {
+    bool radv = strstr(g_vk.props.deviceName, "RADV") != NULL;
+    if ((d ? atoi(d) != 0 : radv) && (g_vk.dmabuf || g_vk.map_placed)) {
         VkPhysicalDeviceMemoryProperties mp;
         vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
         const VkMemoryPropertyFlags want = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
         for (uint32_t i = 0; i < mp.memoryTypeCount; i++)
-            if ((mp.memoryTypes[i].propertyFlags & want) == want && mp.memoryHeaps[mp.memoryTypes[i].heapIndex].size >= HEAP_MAX) return false;
+            if ((mp.memoryTypes[i].propertyFlags & want) == want) return false;
     }
 #endif
+    if (!whole_import_fits(budget_ext, probe)) return true;
+    if (!strstr(g_vk.props.deviceName, "RADV")) return false;
+    *probe = false;  // (RADV without the dma-buf heap: lazy chunks, no probe)
     return true;
 }
 static atomic_bool ui_ready;
@@ -699,6 +704,8 @@ static Frame cur_frame;
 // nothing to draw into (minimised window).
 bool vk_frame_begin(const float clear[4]) {
     cur_frame.ok = false;
+    extern VkImageView g_vk_scene_view;  // (exec.c: the game image isn't drawn yet this frame)
+    g_vk_scene_view = VK_NULL_HANDLE;
     if (rq_stopping()) return false;  // quitting: no window image after the window closed (#40)
     int w, h;
     SDL_GetWindowSizeInPixels(window, &w, &h);
