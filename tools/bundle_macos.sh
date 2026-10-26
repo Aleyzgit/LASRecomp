@@ -14,15 +14,14 @@ EXE=${1:-build/mac15/lasrecomp}
 APP="build/LAS Recomp.app"
 DEPS=$PWD/build/deps
 BUNDLE_ID=$(sed -n 's/^#define RT_BUNDLE_ID "\(.*\)"/\1/p' runtime/paths.h)
-VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
-# CFBundleShortVersionString must be digits, and is the semantic version under the release tag: beta_<n> -> 0.<n>.0,
-# beta_<n>.<m> -> 0.<n>.<m>, v0.6.0 -> 0.6.0, v1.2.3 -> 1.2.3
-case "$VERSION" in
-    beta_*.*) VERSION="0.${VERSION#beta_}" ;;
-    beta_*) VERSION="0.${VERSION#beta_}.0" ;;
-    v*) VERSION="${VERSION#v}" ;;
-    test-*) VERSION="0.0.1" ;;  # (a test build: a valid bundle version, below every release)
-esac
+TAG=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
+TEST_OF=$(sed -n 's/^#define LARECOMP_TEST_OF "\(.*\)"/\1/p' runtime/ui/launcher.mm)
+# CFBundleShortVersionString = the semantic version under the release tag (0.5.3), CFBundleVersion = a build number
+# that always goes up (503): tools/bundle_version.sh
+read -r VERSION BUILD_NUMBER <<EOF_V
+$(tools/bundle_version.sh "$TAG" "$TEST_OF")
+EOF_V
+[ -n "$BUILD_NUMBER" ] || { echo "no bundle version for $TAG"; exit 1; }
 HELPER=build/helper/rando-gen
 GEN_HELPER=build/helper/lasgen
 ZIG=build/zig
@@ -122,7 +121,7 @@ cat > "$C/Info.plist" <<EOF
     <key>CFBundleIconFile</key><string>icon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$VERSION</string>
-    <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>LSMinimumSystemVersion</key><string>$MIN</string>
     <key>LSArchitecturePriority</key><array><string>arm64</string></array>
