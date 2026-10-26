@@ -68,6 +68,7 @@ uint64_t game_romfs_bytes(const GameVersion *v) { return 0; }
 GameRomfsCheck *game_romfs_check_begin(const GameVersion *v) { return NULL; }
 bool game_romfs_check_file(GameRomfsCheck *c, const char *rel, uint64_t size) { return true; }
 int game_romfs_check_end(GameRomfsCheck *c) { return 0; }
+bool game_romfs_exefs_copy(const char *game_dir, const char *rel, uint64_t size) { return false; }
 __attribute__((constructor)) static void test_ga_init(void) { test_ga.LIVE_SAVE = (uintptr_t)live_save; }
 #include "../runtime/hle/flags_ext.c"
 Service *service_new(const char *name, ServiceHandler handler, void *state) {
