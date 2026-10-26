@@ -39,7 +39,13 @@ NOT_MOVABLE = ('Stairs', 'Downstairs', 'Upstairs', 'Warp', 'Hole', 'PlayerStart'
                'CoralTri', 'EveningCalm', 'ThunderD', 'HeartContainer', 'Owl', 'Return', 'BossDoor')
 # doorways that only work with their original neighbour (tied to their vanilla partner). Tail Cave 06A's hallway was
 # here until the catalog learnt that cells sharing a camera zone are one room (05A/06A/07A: now a fixed unit).
-PINNED = set()
+# Ledges across a room edge: a check on a raised strip that only the vanilla neighbour's ledge reaches (both rooms
+# movable: they move as a pair, the side is never sealed or jumped - chaos_free). Face Shrine 07G's chest
+# (D6-wizzrobes-ledge) sits on a strip running south into 08G, whose ramp leads up to it (user's preview-3 photo: a
+# different room below, chest out of reach). Pairs where one side stays anyway are in STAY (Key Cavern 03D, Turtle
+# Rock 03E). The audit behind these lists: notes/PLAN.md 2026-10-26.
+TIED = {('Lv06FaceShrine_07G', 'S')}
+PINNED = {x for room, s in TIED for x in ((room, s), (rooms.neighbour(room, s), rooms.OPP[s]))}
 
 
 def pinned_ok(room, s, other):
@@ -131,8 +137,17 @@ def on_map(romfs, level, c, r, room=None):
 # north door (opened by the boss) leads to the instrument in 02G - kept together where they are.
 # Its 02B (a pillar room: wide open sides, hole and 02F's landing) found no other place and was left out - 02F's hole
 # then dropped Link into whatever room had its cell: kept home too.
+# Ledges whose other end stays (TIED for pairs that can move): Key Cavern 02D's east-ledge chest is reached from 03D's
+# ramp up its north edge (02D is part of a fixed unit); Turtle Rock 02E's northern-ledge chest is hookshotted from the
+# strip that 03E's ramp leads up to (02E is a fixed unit). Moved, the chest was out of reach.
+# Rooms the only possible neighbour of a room that stays (a doorway that can't jump - water channel, Nightmare door,
+# wide opening - and that no other room matches): Catfish's Maw 04F under 03F's water channel, Angler's Tunnel 03G
+# above 04G, Eagle's Tower 04F under 03F, 02A beside 02B's open west side. Moved away (another dungeon took Catfish's
+# 04F under any room with a doorway at its slot), the round could never close: seed NXC11-...: Catfish's Maw plan()
+# failed 76 times.
 STAY = {'Lv02BottleGrotto_07G', 'Lv07EagleTower_02F', 'Lv07EagleTower_03G', 'Lv07EagleTower_02G',
-        'Lv07EagleTower_02B'}
+        'Lv07EagleTower_02B', 'Lv03KeyCavern_03D', 'Lv08TurtleRock_03E',
+        'Lv05CatfishsMaw_04F', 'Lv04AnglersTunnel_03G', 'Lv07EagleTower_04F', 'Lv07EagleTower_02A'}
 
 # Movable stairs and holes (levels where they are tested): rooms with stairs, holes or the landing spots of holes may
 # move inside their own level - the floor links follow them (the stairs / hole names a player start of its partner
@@ -200,16 +215,21 @@ def dead_shadow(level):
     return {(c + dc, r + dr) for c, r in dead for dc in (-1, 0, 1) for dr in (-1, 0, 1)} - dead
 
 
+def link_targets(cat, romfs, level):
+    """LINK_LEVELS: the rooms its stairs and holes lead into (none elsewhere)."""
+    if level not in LINK_LEVELS or not romfs:
+        return set()
+    import room_logic
+    return set(_partners(romfs, level)) | {b for _, b in room_logic.hole_links(romfs, level, cat)}
+
+
 def linked_all(cat, romfs, level, layout):
     """LINK_LEVELS: every room a stairs or hole of the level leads into is in the layout. One left out keeps its
     player start at its old cell - the stairs / hole would drop Link into whatever room is there now (DevEaglePlay:
     02F's hole into 02B's spot, 02B unused)."""
     if level not in LINK_LEVELS or not romfs:
         return True
-    import room_logic
-    placed = set(layout.values())
-    need = set(_partners(romfs, level)) | {b for _, b in room_logic.hole_links(romfs, level, cat)}
-    return need <= placed
+    return link_targets(cat, romfs, level) <= set(layout.values())
 
 
 def link_room(cat, room):
@@ -347,7 +367,7 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     def can_seal(room, s):
         if chaos:
             return chaos_side[room][s] and s not in exits.get(room, ())
-        return seal and sealable(op[room][s])
+        return seal and sealable(op[room][s]) and (room, s) not in PINNED
 
     def joined(a, b, s, home_pair):
         x, y = side_open(a, s), side_open(b, rooms.OPP[s])
@@ -439,6 +459,9 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
         # reaching one stairs room reaches them all (approximation: one passage network per dungeon)
         stairs = {cell_pos(k) for k in fixed if any(t in a for a in cat[k]['actors'] for t in ('Downstairs', 'Upstairs'))}
         partners = _partners(romfs, level) if romfs and level in LINK_LEVELS else None
+        # LINK_LEVELS: every room a stairs or hole leads into has to be placed (linked_all) - left to chance, the tower
+        # often closed without 01C / 04G and the whole round was thrown away (seed NXC11-...: 238 of 320 tries)
+        must = set(link_targets(cat, romfs, level)) - fixed if partners is not None else set()
 
         def chaos_ok():
             # pieces joined physically (incl. the stairs network); each needs a free, unjoined doorway for a jump
@@ -510,8 +533,9 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
             fr = frontier()
             req = required(fr)
             left = None if exact is None else len(fixed) + len(exact) - len(used)
-            if not fr or (seal and not req and (left == 0 or (left is None and len(placed) >= size))):
-                return (exact is None or left == 0) and connected()
+            done = must <= used
+            if not fr or (done and seal and not req and (left == 0 or (left is None and len(placed) >= size))):
+                return done and (exact is None or left == 0) and connected()
             if left is not None and len(req) > left:
                 return False  # more open cells than rooms left
             budget[0] -= 1
@@ -538,7 +562,7 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
                         continue
                     # grow while small (rooms opening 1-2 more doorways first), then close (rooms opening nothing
                     # first; opening more is still allowed - exact dead ends are rare)
-                    out.append((abs(n - 1.5) if not want_close else n, rng.random(), room))
+                    out.append((room not in must, abs(n - 1.5) if not want_close else n, rng.random(), room))
                 return out
             # fewest candidates first (and give up at once when an open cell has none)
             best = None
@@ -598,7 +622,7 @@ CHAOS_DOORS = {'shutter', 'lock', 'cracked', 'potdoor'}  # (a jump INTO one land
 
 
 def chaos_free(cat, room, side, slot):
-    if isinstance(slot, str):
+    if isinstance(slot, str) or (room, side) in PINNED:  # (a tied side only joins its vanilla partner)
         return False
     doors = [d for d in cat[room]['doors'] if len(d) > 3 and d[0] == side and abs(d[3] - slot) <= 1]
     # a door that belonged to the old neighbour ('(mirror)') leaves a plain opening; the room's own door may still be
@@ -1256,7 +1280,14 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
         rng.shuffle(left)
         share = {lv: sum(1 for k in pool if k.startswith(lv + '_')) for lv in levels}
         for room in left:
-            if not all(chaos_free(cat, room, s, x[0]) for s, v in openings(cat, room).items() for x in v):
+            # a TIED pair goes in as one piece (the first room, its partner one cell over: they join physically)
+            if any(rooms.neighbour(h, hs) == room for h, hs in TIED):
+                continue  # (placed with its head)
+            group = [(room, (0, 0))] + [(rooms.neighbour(room, hs), rooms.STEP[hs]) for h, hs in TIED if h == room]
+            if any(m not in pool or m in used for m, _ in group):
+                continue
+            if not all(chaos_free(cat, m, s, x[0]) for m, _ in group for s, v in openings(cat, m).items() for x in v
+                       if (m, s) not in PINNED):
                 continue
             # the dungeon furthest below its share of the pool, then a random empty cell nobody's doorway faces
             for lv in sorted(levels, key=lambda lv: (sum(1 for v in out[lv].values() if v in pool) - share[lv],
@@ -1267,36 +1298,45 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                 # (the level's map texture archive has a budget: the leftover room's textures must fit too)
                 tex = _base_tex(romfs, lv, ENTRANCES[lv]).union(  # (as plan(): roofs and side-view passages too)
                     *(room_textures(romfs, k) for k in list(L.values()) + offgrid_rooms(romfs, cat, lv)))
-                if len(tex | room_textures(romfs, room)) > TEXTURE_BUDGET:
+                if len(tex.union(*(room_textures(romfs, m) for m, _ in group))) > TEXTURE_BUDGET:
                     continue
                 taken = {cell_pos(k) for k in L}
                 reserved = {cell_pos(n) for n in offgrid_rooms(romfs, cat, lv) if re.match(r'.*_\d\d[A-Z]$', n)}
+                free_set = {(c, r) for c in range(grid_size(lv)[0]) for r in range(1, grid_size(lv)[1] + 1)
+                            if (c, r) not in taken and (c, r) not in reserved and (c, r) not in dead_shadow(lv)
+                            and on_map(romfs, lv, c, r)
+                            and (lv not in LINK_LEVELS or cell_name(lv, c, r) in level_cells(romfs, lv))}
                 free_cells = [(c, r) for c in range(grid_size(lv)[0]) for r in range(1, grid_size(lv)[1] + 1)
-                              if (c, r) not in taken and (c, r) not in reserved and (c, r) not in dead_shadow(lv)
-                              and on_map(romfs, lv, c, r) and on_map(romfs, lv, c, r, room)
-                              and (lv not in LINK_LEVELS or cell_name(lv, c, r) in level_cells(romfs, lv))]
+                              if (c, r) in free_set and on_map(romfs, lv, c, r, room)]
                 rng.shuffle(free_cells)
                 for c, r in free_cells:
-                    ok = True
-                    for s in 'NSWE':
-                        dc, dr = rooms.STEP[s]
-                        n = (c + dc, r + dr)
-                        if n in taken:
-                            theirs = openings(cat, L[cell_name(lv, *n)])[rooms.OPP[s]]
-                            mine = openings(cat, room)[s]
-                            if theirs and mine and [x[0] for x in mine] == [x[0] for x in theirs]:
-                                ok = False  # would join physically: keep it simple, not next to a matching doorway
-                            # a leftover never joins its neighbours: a wall across every doorway either way (an open
-                            # tile there, even another doorway's, and Link could walk on into the other room - plan()
-                            # checks this for the rooms it places: wall_behind)
-                            if (mine and not walls_off(cat, room, s, L[cell_name(lv, *n)])) or \
-                                    (theirs and not walls_off(cat, L[cell_name(lv, *n)], rooms.OPP[s], room)):
-                                ok = False
-                            if theirs and not all(chaos_free(cat, L[cell_name(lv, *n)], rooms.OPP[s], x[0]) for x in theirs):
-                                ok = False
+                    at = {m: (c + dc, r + dr) for m, (dc, dr) in group}
+                    ok = all(p in free_set and on_map(romfs, lv, *p, m) for m, p in at.items())
+                    mine_at = {p: m for m, p in at.items()}
+                    for m, (mc, mr) in at.items() if ok else ():
+                        for s in 'NSWE':
+                            dc, dr = rooms.STEP[s]
+                            n = (mc + dc, mr + dr)
+                            if n in mine_at:
+                                continue  # (its pair partner)
+                            if n in taken:
+                                theirs = openings(cat, L[cell_name(lv, *n)])[rooms.OPP[s]]
+                                mine = openings(cat, m)[s]
+                                if theirs and mine and [x[0] for x in mine] == [x[0] for x in theirs]:
+                                    ok = False  # would join physically: keep it simple, not next to a matching doorway
+                                # a leftover never joins its neighbours: a wall across every doorway either way (an
+                                # open tile there, even another doorway's, and Link could walk on into the other room -
+                                # plan() checks this for the rooms it places: wall_behind)
+                                if (mine and not walls_off(cat, m, s, L[cell_name(lv, *n)])) or \
+                                        (theirs and not walls_off(cat, L[cell_name(lv, *n)], rooms.OPP[s], m)):
+                                    ok = False
+                                if theirs and not all(chaos_free(cat, L[cell_name(lv, *n)], rooms.OPP[s], x[0])
+                                                      for x in theirs):
+                                    ok = False
                     if ok:
-                        L[cell_name(lv, c, r)] = room
-                        used.add(room)
+                        for m, p in at.items():
+                            L[cell_name(lv, *p)] = m
+                            used.add(m)
                         break
                 else:
                     continue
