@@ -28,22 +28,22 @@ const PlasticTheme &plastic_theme(void) {
     if (!init) {
         init = true;
         // parchment, in the colours of the game's item screen (pause menu): khaki paper in an olive frame with a gold
-        // inner edge, the selection the pale gold of the item cursor's slot (dark text), action buttons the slots'
-        // terracotta (cream text), a muted red for Delete / warnings
+        // inner edge, the selection a deep burnt orange (cream text: plain to see from the couch), action buttons the
+        // frame's olive (cream text), a muted red for Delete / warnings
         t.panel = hex(0xE2D6B4, 0.98f);
         t.inset = hex(0xEAE0C6, 0.96f);
         t.frame = hex(0x5F5A33);
         t.frame_inner = hex(0xAA9240);
         t.row = hex(0xD8C8A0);
-        t.row_sel = hex(0xEBC27C);
+        t.row_sel = hex(0x954A16);
         t.row_mark = hex(0xE4C98F);  // (the category shown beside its list, the cursor elsewhere)
-        t.row_hot = hex(0xE6C383);   // (ImGui's own buttons under the cursor)
-        t.button = hex(0x96643F);
+        t.row_hot = hex(0x954A16);   // (ImGui's own buttons under the cursor: as the selection, cream text)
+        t.button = hex(0x58622A);
         t.tab = hex(0xD3C39A);
-        t.tab_sel = hex(0xEBC27C);
+        t.tab_sel = hex(0x954A16);
         t.text = hex32(0x3A2C16);
         t.text_dim = hex32(0x6F6244);
-        t.text_sel = hex32(0x3A2410);
+        t.text_sel = hex32(0xFFF3DC);
         t.text_button = hex32(0xFFF3DC);
         t.section = hex32(0x6C5A1E);
         t.value = hex32(0x5A4A30);
@@ -577,9 +577,26 @@ bool plastic_close_button(float bx, float scale) {
     return close;
 }
 
+bool plastic_close_corner(float bx, float scale) {
+    // in the window's top right corner, clear of the frame (its moulding ends 20 px in), and out of the layout: the
+    // line it's on keeps its height
+    ImGuiWindow *w = ImGui::GetCurrentWindow();
+    ImGuiWindowTempData keep = w->DC;
+    float m = 34 * scale;
+    ImGui::SetCursorScreenPos(ImVec2(w->Pos.x + w->Size.x - m - bx, w->Pos.y + m));
+    bool r = plastic_close_button(bx, scale);
+    w->DC.CursorPos = keep.CursorPos, w->DC.CursorPosPrevLine = keep.CursorPosPrevLine;
+    w->DC.CursorMaxPos = keep.CursorMaxPos, w->DC.IdealMaxPos = keep.IdealMaxPos;
+    w->DC.CurrLineSize = keep.CurrLineSize, w->DC.PrevLineSize = keep.PrevLineSize;
+    w->DC.CurrLineTextBaseOffset = keep.CurrLineTextBaseOffset, w->DC.PrevLineTextBaseOffset = keep.PrevLineTextBaseOffset;
+    w->DC.IsSameLine = keep.IsSameLine, w->DC.IsSetPos = keep.IsSetPos;
+    return r;
+}
+
 // ---- ImGui's own frames and windows as pieces (third_party/imgui: GImGuiLasFrameHook, called from RenderFrame and
 // a window's background)
 static bool g_widgets;
+extern ImU32 GImGuiLasButtonText;
 static bool frame_hook(ImDrawList *dl, const ImVec2 &a, const ImVec2 &b, ImU32 col, float rounding, int what, int flags) {
     if (!g_widgets) return false;
     ImGuiContext &g = *GImGui;
@@ -598,13 +615,14 @@ static bool frame_hook(ImDrawList *dl, const ImVec2 &a, const ImVec2 &b, ImU32 c
         bool hot = !is(ImGuiCol_Button) || focus;
         ImVec4 c = hot ? t.row_hot : t.row;
         c.w *= ImGui::ColorConvertU32ToFloat4(col).w;  // (disabled: faded)
+        if (hot) GImGuiLasButtonText = t.text_sel;  // (its label, drawn next: light on the dark piece)
         plastic_add(dl, ImVec2(a.x + 1, a.y + 1), ImVec2(b.x - 1, b.y - 2 * scale), r, c, PK_PILL, (hot ? 6 : 4.5f) * scale,
                     hot ? 1.0f : 0.7f);
         return true;
     }
     if (is(ImGuiCol_Header) || is(ImGuiCol_HeaderHovered) || is(ImGuiCol_HeaderActive)) {
         bool hot = !is(ImGuiCol_Header) || focus;
-        plastic_add(dl, a, b, r, hot ? t.row_hot : t.row, PK_PILL, 3.5f * scale, 0.6f);
+        plastic_add(dl, a, b, r, hot ? t.row_mark : t.row, PK_PILL, 3.5f * scale, 0.6f);  // (pale: dark text stays)
         return true;
     }
     if (is(ImGuiCol_FrameBg) || is(ImGuiCol_FrameBgHovered) || is(ImGuiCol_FrameBgActive)) {

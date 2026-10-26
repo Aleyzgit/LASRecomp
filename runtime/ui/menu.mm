@@ -890,7 +890,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             bool sel = t.id == g_tab;
             bool lit = (ImGui::IsItemFocused() && g.NavCursorVisible) || ImGui::IsItemHovered();
             ImVec4 col = sel ? pt.tab_sel : lit ? pt.row_mark : pt.tab;
-            if (sel && lit) col = ImVec4(fminf(col.x * 1.06f, 1), fminf(col.y * 1.10f, 1), fminf(col.z * 1.12f, 1), col.w);
+            if (sel && lit) col = ImVec4(col.x * 0.88f, col.y * 0.88f, col.z * 0.88f, col.w);  // (the cursor on it: deeper)
             if (!t.on) col.w *= 0.45f;
             plastic_add(dl, ImVec2(p.x, p.y + (sel ? 0 : 2 * scale)), ImVec2(p.x + tw[k], p.y + th - 2 * scale), 10 * scale, col,
                         PK_PILL, (sel ? 7 : 4) * scale, sel ? 1.0f : 0.55f);
@@ -1123,8 +1123,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         ImGui::PopFont();
         {
             float bx = 44 * scale;
-            ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
-            if (plastic_close_button(bx, scale)) set_open(false);
+            if (plastic_close_corner(bx, scale)) set_open(false);
         }
 
         bool any_popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId), typing = ui_text_busy();  // (before the

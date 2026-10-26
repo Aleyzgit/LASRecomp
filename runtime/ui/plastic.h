@@ -25,6 +25,8 @@ void plastic_panel(ImDrawList *dl, ImVec2 a, ImVec2 b, float scale);
 void plastic_well(ImDrawList *dl, ImVec2 a, ImVec2 b, float scale);
 // the round close X at the cursor (size: its diameter); true when clicked
 bool plastic_close_button(float size, float scale);
+// that X in the current window's top right corner, inside the frame; the layout is left as it was
+bool plastic_close_corner(float size, float scale);
 // While on (the menus' windows): ImGui's own frames (buttons, text fields, headers, check boxes) and window / popup
 // backgrounds are drawn as pieces too. The caller turns it off again before anything else is drawn.
 void plastic_widgets(bool on);

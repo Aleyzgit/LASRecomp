@@ -3744,6 +3744,7 @@ void ImGui::RenderTextEllipsis(ImDrawList* draw_list, const ImVec2& pos_min, con
 // LAS Recomp: our menus draw some frames and window backgrounds themselves (runtime/ui/plastic.mm). what: 0 a frame,
 // 1 a window's background (flags: the window's). True: drawn.
 bool (*GImGuiLasFrameHook)(ImDrawList*, const ImVec2&, const ImVec2&, ImU32, float, int, int) = NULL;
+ImU32 GImGuiLasButtonText = 0;  // (set by the hook: the colour of the button label drawn next; ButtonEx clears it)
 
 void ImGui::RenderFrame(ImVec2 p_min, ImVec2 p_max, ImU32 fill_col, bool borders, float rounding)
 {

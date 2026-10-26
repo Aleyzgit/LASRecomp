@@ -1859,8 +1859,7 @@ extern "C" void launcher_run(const char *root) {
                 bool back;
                 {  // close: the round X in the corner (B / Esc too)
                     float bx = 44 * sc;
-                    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
-                    back = plastic_close_button(bx, sc);
+                    back = plastic_close_corner(bx, sc);
                 }
                 bool popup = ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId);  // (before the pages run, like the menu)
                 menu_tabs_draw(sc, g_font_small, g_font_menu, false, prelaunch_tab);
@@ -1916,8 +1915,7 @@ extern "C" void launcher_run(const char *root) {
                 bool back = false;
                 if (!busy) {  // close: the round X in the corner, as Settings (B / Esc too)
                     float bx = 44 * sc;
-                    ImGui::SameLine(ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x - bx);
-                    back = plastic_close_button(bx, sc);
+                    back = plastic_close_corner(bx, sc);
                 }
                 ImGui::Spacing();
 
