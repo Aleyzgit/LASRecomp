@@ -44,7 +44,7 @@ FLAGS = ['bomb_bag', 'powder_bag', 'environments', 'pets_in_dungeons', 'skip_sto
          'randomize_enemies', 'randomize_music', 'open_mabe', 'fast_songs', 'boss_cutscenes', 'spoiler', 'decoupled',
          'pots', 'no_buffs', 'bushes', 'pet_rooster', 'pet_ghost', 'pet_marin', 'trendsanity', 'boss_souls',
          'hookshot_any', 'digs', 'miniboss_souls', 'no_start_sword', 'no_start_shield', 'no_start_ocarina',
-         'tunic_upgrades', 'shellsanity', 'race', 'random_cosmetics', 'apples', 'hints']  # (final order at merge: apples, chest looks, key rings, hints, rocks)
+         'tunic_upgrades', 'shellsanity', 'race', 'random_cosmetics', 'apples', 'chest_looks', 'key_rings', 'hints']  # (final order at merge: apples, chest looks, key rings, hints, rocks)
 ROOM_IDS = {'off': 0, 'coupled': 2, 'decoupled': 3}  # room_shuffle in the ID (1: the retired Coherent)
 BITS = 150  # (v5: 30 characters; v4 IDs had 125 - decode reads both)
 TIMEOUT = 900  # (seconds per seed)
@@ -142,6 +142,7 @@ def request(sid, o):
         'include': [f'{s}-seashell-reward' for s in shells],
         'exclude': [f'{s}-seashell-reward' for s in shells[o['seashells']:]],
         **({'apples': True} if o.get('apples') else {}),
+        **({'chest-looks': True} if o.get('chest_looks') else {}), **({'key-rings': True} if o.get('key_rings') else {}),
         **({'hints': True} if o.get('hints') else {})}  # (only when on: seeds without it stay as they were)
 
 
@@ -176,10 +177,12 @@ def _compile(cond):
     return compile(py.replace('|', ' or ').replace('&', ' and ').replace('!', ' not '), '<logic>', 'eval')
 
 
-def playthrough(logic, placements, access, extra=None):
+def playthrough(logic, placements, access, extra=None, rings=None):
     """LAS's checkAccess + las_headless's spheres; extra: {location: condition} ANDed on. -> access after all."""
     sys.path.insert(0, HERE)
     import playthrough as pt
+    pt.KEY_RINGS.clear()
+    pt.KEY_RINGS.update({'keyring-' + d: n for d, n in (rings or {}).items()})  # (key rings count as their keys)
     code = {}
 
     def ev(cond, a):
@@ -213,13 +216,14 @@ def check_seed(out_dir, walk, needed=0):
     # (walk: (region, fallback) pairs - a pocket's own region with the entrance shuffle, else its door's region)
     extra = {name: ' | '.join(sorted({r if r in logic else fb for r, fb in walk[name]}))
              for name in logic if name in walk}
-    a, seen = playthrough(logic, p['placements'], p['access'])
+    rings = p.get('key-ring-sizes')
+    a, seen = playthrough(logic, p['placements'], p['access'], rings=rings)
     def missing(acc):  # (Triforce hunt: the pieces are the goal)
         if needed:
             return [] if acc.get('triforce-piece', 0) >= needed else [f"triforce {acc.get('triforce-piece', 0)}/{needed}"]
         return [i for i in INSTRUMENTS + ['kill-nightmare'] if not acc.get(i)]
     own = missing(a)
-    a2, seen2 = playthrough(logic, p['placements'], p['access'], extra)
+    a2, seen2 = playthrough(logic, p['placements'], p['access'], extra, rings)
     strict = missing(a2)
     lost = sorted(k for k in seen - seen2 if k in extra and p['placements'].get(k)
                   and not re.match(r'(pot|dig)-|rupee|heart$|seashell|trap', p['placements'][k]))
@@ -299,6 +303,8 @@ def main():
                     '(off / dungeons / + houses, caves & connector caves), bushsanity on')
     ap.add_argument('--full', action='store_true', help='also generate each seed in full (game files)')
     ap.add_argument('--apples', action='store_true', help='every random mix with Applesanity on')
+    ap.add_argument('--key-rings', action='store_true', help='every random mix with key rings on')
+    ap.add_argument('--chest-looks', action='store_true', help='every random mix with chest looks on')
     ap.add_argument('--souls', action='store_true', help='every random mix with boss and mini-boss souls on')
     ap.add_argument('--triforce', type=int, metavar='N', help='every random mix a Triforce hunt for N pieces '
                     '(extra pieces cycled: none / +25%% / +50%%)')
@@ -325,6 +331,10 @@ def main():
             o['hints'] = True
         if args.souls:
             o['boss_souls'] = o['miniboss_souls'] = True
+        if args.key_rings:
+            o['key_rings'] = True
+        if args.chest_looks:
+            o['chest_looks'] = True
         if args.entrances is not None:
             o['entrances'], o['bushes'] = args.entrances, True
         if args.triforce:

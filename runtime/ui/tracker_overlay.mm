@@ -583,6 +583,7 @@ static std::string item_name(int id, int cnt) {
     for (auto &x : names) if (t == x.tok) s = x.name;
     // (in-game wording: the list already names the dungeon; a soul by its owner, "Moldorm's soul")
     if (s.empty() && !t.compare(0, 4, "key-")) return cnt > 1 ? std::to_string(cnt) + " small keys" : "a small key";
+    else if (s.empty() && !t.compare(0, 8, "keyring-")) return "key ring";
     else if (s.empty() && !t.compare(0, 14, "nightmare-key-")) return "Nightmare Key";
     else if (s.empty() && !t.compare(0, 5, "soul-")) {
         std::string n = t.substr(5);

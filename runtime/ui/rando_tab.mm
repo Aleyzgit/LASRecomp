@@ -143,6 +143,8 @@ struct GenOpts {
     int tri_needed = 0, tri_extra = 0;
     bool race = false;        // race mode: the spoiler log stays shut until the credits, a seed hash on the title screen
     bool apples = false;      // apples: Applesanity, 3 checks per apple tree (tools/rando/apple_trees.py)
+    bool chest_looks = false; // chest-looks: a chest's colour shows what's inside (tools/rando/chest_looks.py)
+    bool key_rings = false;   // key-rings: each dungeon's small keys as one key ring (tools/rando/key_rings.py)
     bool hints = false;       // hints: owl statues and phone booths tell about the seed (tools/rando/seed_hints.py)
 };
 static GenOpts g_opts;
@@ -192,7 +194,8 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
                  &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
                  &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina,
-                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.apples, &o.hints};  // (final order at merge: apples, chest_looks, key_rings, hints, rocks)
+                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.apples, &o.chest_looks,
+                 &o.key_rings, &o.hints};  // (final order at merge: apples, chest_looks, key_rings, hints, rocks)
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -435,6 +438,8 @@ static void start_generation(void) {
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
     if (g_opts.apples) fprintf(f, " \"apples\": true,\n");  // (off: not written, seeds as before)
+    if (g_opts.chest_looks) fprintf(f, " \"chest-looks\": true,\n");  // (off: not written, seeds as before)
+    if (g_opts.key_rings) fprintf(f, " \"key-rings\": true,\n");
     static const char *rs[] = {"off", "coupled", "coupled", "decoupled"};  // (1: retired Coherent, never written)
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
     static const char *shop[] = {"off", "vanilla", "random"};
@@ -646,6 +651,8 @@ static void rows_items(void) {
     opt_toggle("Powder bag", &g_opts.powder_bag, false, "You must find your powder bag to collect and carry Magic Powder.");
     static const char *traps[] = {"None", "Few", "Several", "Many", "Trapsanity"};
     opt_choice("Traps", &g_opts.traps, traps, 5, 1, "How many traps hide among the items.");
+    opt_toggle("Chest looks match contents", &g_opts.chest_looks, false,
+               "Chests with something that helps you progress look as usual, key chests are blue, the rest are brown.");
     static const char *shells[] = {"None", "Up to 5", "Up to 15", "Up to 30", "Up to 40", "All (50)"};
     opt_choice("Seashell Mansion rewards", &g_opts.seashells, shells, 6, 2,
                "Which of the Seashell Mansion's rewards can hold important items: up to how many seashells.");
@@ -672,6 +679,7 @@ static void rows_extra_checks(void) {
     opt_choice("Keysanity", &g_opts.keysanity, ksn, 4, 0,
                "Dungeon keys (and with the last choice every dungeon item) can be anywhere in the world, with logic. A "
                "key always opens doors in the dungeon it belongs to; with keysanity the Items screen shows each dungeon's keys.");
+    opt_toggle("Key rings", &g_opts.key_rings, false, "Each dungeon's small keys come as one key ring.");
     opt_toggle("Potsanity", &g_opts.pots, false,
                "Every liftable pot in houses, caves and dungeons hides an item from the pool (about 400 more checks). "
                "Unchecked pots are golden: lift, smash or throw one to reveal its item.");
