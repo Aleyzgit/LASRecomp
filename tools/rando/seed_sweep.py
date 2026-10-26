@@ -9,7 +9,7 @@ the logic thinks is open too early - the circular dig-spot gates of #81 / #144. 
 runtime/ui/rando_tab.mm (seed_id_encode, request.json in start_generation): keep the two in step.
 
 usage: seed_sweep.py <romfs> [-n seeds] [-j jobs] [--id SEED-ID ...] [--keep dir] [--stealing M] [--shopsanity N]
-                     [--souls] [--rooms N ...] [--triforce N] [--miniboss-freq F] [--entrances T] [--full]
+                     [--souls] [--rooms N ...] [--triforce N] [--miniboss-freq F] [--entrances T] [--hints] [--rocks] [--full]
        (default: the fixed seed IDs below + 40 random option mixes with digsanity on; basic logic, as players get)
 --miniboss-freq F: every random mix randomizes enemies with mini-boss frequency F (0 - 3: Normal, 2x, 3x, All), enemy
 mode Seeded or Random; --full: each seed is also generated in full (game files, enemies and all) and must finish -
@@ -44,7 +44,8 @@ FLAGS = ['bomb_bag', 'powder_bag', 'environments', 'pets_in_dungeons', 'skip_sto
          'randomize_enemies', 'randomize_music', 'open_mabe', 'fast_songs', 'boss_cutscenes', 'spoiler', 'decoupled',
          'pots', 'no_buffs', 'bushes', 'pet_rooster', 'pet_ghost', 'pet_marin', 'trendsanity', 'boss_souls',
          'hookshot_any', 'digs', 'miniboss_souls', 'no_start_sword', 'no_start_shield', 'no_start_ocarina',
-         'tunic_upgrades', 'shellsanity', 'race', 'random_cosmetics', 'apples']
+         'tunic_upgrades', 'shellsanity', 'race', 'random_cosmetics', 'apples', 'chest_looks', 'key_rings', 'hints',
+         'rocks']  # (order after random_cosmetics: apples, chest looks, key rings, hints, rocks)
 ROOM_IDS = {'off': 0, 'coupled': 2, 'decoupled': 3}  # room_shuffle in the ID (1: the retired Coherent)
 BITS = 150  # (v5: 30 characters; v4 IDs had 125 - decode reads both)
 TIMEOUT = 900  # (seconds per seed)
@@ -141,7 +142,9 @@ def request(sid, o):
         'triforce-hunt': o.get('triforce_needed', 0), 'triforce-extra': o.get('triforce_extra', 0) * 25,
         'include': [f'{s}-seashell-reward' for s in shells],
         'exclude': [f'{s}-seashell-reward' for s in shells[o['seashells']:]],
-        **({'apples': True} if o.get('apples') else {})}
+        **({'apples': True} if o.get('apples') else {}),
+        **({'chest-looks': True} if o.get('chest_looks') else {}), **({'key-rings': True} if o.get('key_rings') else {}),
+        **({'hints': True} if o.get('hints') else {}), **({'rocks': True} if o.get('rocks') else {})}  # (only when on: seeds without it stay as they were)
 
 
 def stealing(o):
@@ -175,10 +178,12 @@ def _compile(cond):
     return compile(py.replace('|', ' or ').replace('&', ' and ').replace('!', ' not '), '<logic>', 'eval')
 
 
-def playthrough(logic, placements, access, extra=None):
+def playthrough(logic, placements, access, extra=None, rings=None):
     """LAS's checkAccess + las_headless's spheres; extra: {location: condition} ANDed on. -> access after all."""
     sys.path.insert(0, HERE)
     import playthrough as pt
+    pt.KEY_RINGS.clear()
+    pt.KEY_RINGS.update({'keyring-' + d: n for d, n in (rings or {}).items()})  # (key rings count as their keys)
     code = {}
 
     def ev(cond, a):
@@ -212,13 +217,14 @@ def check_seed(out_dir, walk, needed=0):
     # (walk: (region, fallback) pairs - a pocket's own region with the entrance shuffle, else its door's region)
     extra = {name: ' | '.join(sorted({r if r in logic else fb for r, fb in walk[name]}))
              for name in logic if name in walk}
-    a, seen = playthrough(logic, p['placements'], p['access'])
+    rings = p.get('key-ring-sizes')
+    a, seen = playthrough(logic, p['placements'], p['access'], rings=rings)
     def missing(acc):  # (Triforce hunt: the pieces are the goal)
         if needed:
             return [] if acc.get('triforce-piece', 0) >= needed else [f"triforce {acc.get('triforce-piece', 0)}/{needed}"]
         return [i for i in INSTRUMENTS + ['kill-nightmare'] if not acc.get(i)]
     own = missing(a)
-    a2, seen2 = playthrough(logic, p['placements'], p['access'], extra)
+    a2, seen2 = playthrough(logic, p['placements'], p['access'], extra, rings)
     strict = missing(a2)
     lost = sorted(k for k in seen - seen2 if k in extra and p['placements'].get(k)
                   and not re.match(r'(pot|dig)-|rupee|heart$|seashell|trap', p['placements'][k]))
@@ -277,8 +283,17 @@ def walk_conditions(romfs):
     from RandomizerCore.Tools import leb
     import field_reach
     tr = field_reach.tile_regions(romfs, leb)
-    return {name: {(r, field_reach.OUTER.get(r, r)) for r in tr[t]}
-            for name, t in field_reach.location_tiles(romfs, leb).items() if t in tr}
+    out = {name: {(r, field_reach.OUTER.get(r, r)) for r in tr[t]}
+           for name, t in field_reach.location_tiles(romfs, leb).items() if t in tr}
+    import rocks  # (a rock's own tile is solid: the tiles Link lifts it from)
+    for r in rocks.scan(romfs, leb):
+        gx, gz = field_reach.global_tile(r['room'], r['tile'])
+        near = set()
+        for x, z in ((gx + 1, gz), (gx - 1, gz), (gx, gz + 1), (gx, gz - 1)):
+            near |= tr.get((f'Field_{z // 8 + 1:02d}{chr(65 + x // 10)}', (z % 8) * 10 + x % 10), set())
+        if near:
+            out[rocks.location_name(r)] = {(x, field_reach.OUTER.get(x, x)) for x in near}
+    return out
 
 
 def main():
@@ -298,9 +313,13 @@ def main():
                     '(off / dungeons / + houses, caves & connector caves), bushsanity on')
     ap.add_argument('--full', action='store_true', help='also generate each seed in full (game files)')
     ap.add_argument('--apples', action='store_true', help='every random mix with Applesanity on')
+    ap.add_argument('--key-rings', action='store_true', help='every random mix with key rings on')
+    ap.add_argument('--chest-looks', action='store_true', help='every random mix with chest looks on')
+    ap.add_argument('--rocks', action='store_true', help='every random mix with Rocksanity on')
     ap.add_argument('--souls', action='store_true', help='every random mix with boss and mini-boss souls on')
     ap.add_argument('--triforce', type=int, metavar='N', help='every random mix a Triforce hunt for N pieces '
                     '(extra pieces cycled: none / +25%% / +50%%)')
+    ap.add_argument('--hints', action='store_true', help='every random mix with Hints on (seed_hints.py)')
     ap.add_argument('--rooms', choices=list(ROOM_IDS), action='append',
                     help='dungeon room shuffle of the random mixes (repeat: cycled)')
     args = ap.parse_args()
@@ -319,8 +338,16 @@ def main():
                      enemy_mode=int(rng.random() < 0.5))
         if args.apples:
             o['apples'] = True
+        if args.hints:
+            o['hints'] = True
         if args.souls:
             o['boss_souls'] = o['miniboss_souls'] = True
+        if args.key_rings:
+            o['key_rings'] = True
+        if args.chest_looks:
+            o['chest_looks'] = True
+        if args.rocks:
+            o['rocks'] = True
         if args.entrances is not None:
             o['entrances'], o['bushes'] = args.entrances, True
         if args.triforce:

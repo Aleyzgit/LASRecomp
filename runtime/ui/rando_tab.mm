@@ -143,6 +143,10 @@ struct GenOpts {
     int tri_needed = 0, tri_extra = 0;
     bool race = false;        // race mode: the spoiler log stays shut until the credits, a seed hash on the title screen
     bool apples = false;      // apples: Applesanity, 3 checks per apple tree (tools/rando/apple_trees.py)
+    bool chest_looks = false; // chest-looks: a chest's colour shows what's inside (tools/rando/chest_looks.py)
+    bool key_rings = false;   // key-rings: each dungeon's small keys as one key ring (tools/rando/key_rings.py)
+    bool hints = false;       // hints: owl statues and phone booths tell about the seed (tools/rando/seed_hints.py)
+    bool rocks = false;       // rocks: every overworld rock hides an item (tools/rando/rocks.py)
 };
 static GenOpts g_opts;
 
@@ -191,7 +195,8 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
                  &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
                  &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina,
-                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.apples};
+                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.apples, &o.chest_looks,
+                 &o.key_rings, &o.hints, &o.rocks};  // (order after random_cosmetics: apples, chest_looks, key_rings, hints, rocks)
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -417,6 +422,7 @@ static void start_generation(void) {
     }
     fprintf(f, " \"pots\": %s, \"no-buff-drops\": %s, \"bushes\": %s, \"digs\": %s,\n", g_opts.pots ? "true" : "false",
             g_opts.no_buffs ? "true" : "false", g_opts.bushes ? "true" : "false", g_opts.digs ? "true" : "false");
+    if (g_opts.rocks) fprintf(f, " \"rocks\": true,\n");  // (off: not written, seeds as before)
     fprintf(f, " \"tunic-upgrades\": %s, \"shellsanity\": %s, \"random-cosmetics\": %s,\n",
             g_opts.tunic_upgrades ? "true" : "false", g_opts.shellsanity ? "true" : "false",
             g_opts.random_cosmetics ? "true" : "false");
@@ -434,6 +440,8 @@ static void start_generation(void) {
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
     if (g_opts.apples) fprintf(f, " \"apples\": true,\n");  // (off: not written, seeds as before)
+    if (g_opts.chest_looks) fprintf(f, " \"chest-looks\": true,\n");  // (off: not written, seeds as before)
+    if (g_opts.key_rings) fprintf(f, " \"key-rings\": true,\n");
     static const char *rs[] = {"off", "coupled", "coupled", "decoupled"};  // (1: retired Coherent, never written)
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
     static const char *shop[] = {"off", "vanilla", "random"};
@@ -444,6 +452,7 @@ static void start_generation(void) {
             g_opts.miniboss_souls ? "true" : "false");
     fprintf(f, " \"hookshot-anything\": %s,\n", g_opts.hookshot_any ? "true" : "false");
     fprintf(f, " \"race-mode\": %s,\n", g_opts.race ? "true" : "false");  // (runtime only: spoiler lock, seed hash)
+    if (g_opts.hints) fprintf(f, " \"hints\": true,\n");  // (only when on: seeds without it stay as they were)
     fprintf(f, " \"triforce-hunt\": %d, \"triforce-extra\": %d,\n", g_opts.tri_needed, g_opts.tri_extra * 25);
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"pet-rooster\": %s, \"pet-ghost\": %s, \"open-desert\": %s,\n", g_opts.pet_rooster ? "true" : "false",
@@ -644,6 +653,8 @@ static void rows_items(void) {
     opt_toggle("Powder bag", &g_opts.powder_bag, false, "You must find your powder bag to collect and carry Magic Powder.");
     static const char *traps[] = {"None", "Few", "Several", "Many", "Trapsanity"};
     opt_choice("Traps", &g_opts.traps, traps, 5, 1, "How many traps hide among the items.");
+    opt_toggle("Chest looks match contents", &g_opts.chest_looks, false,
+               "Chests with something that helps you progress look as usual, key chests are blue, the rest are brown.");
     static const char *shells[] = {"None", "Up to 5", "Up to 15", "Up to 30", "Up to 40", "All (50)"};
     opt_choice("Seashell Mansion rewards", &g_opts.seashells, shells, 6, 2,
                "Which of the Seashell Mansion's rewards can hold important items: up to how many seashells.");
@@ -666,10 +677,12 @@ static void rows_extra_checks(void) {
                "dug, so you can see where you've been.");
     opt_toggle("Shellsanity", &g_opts.shellsanity, false, "Every hidden Secret Seashell spot holds an item from the pool.");
     opt_toggle("Applesanity", &g_opts.apples, false, "Each apple tree holds 3 items from the pool.");
+    opt_toggle("Rocksanity", &g_opts.rocks, false, "Every rock you can lift on the overworld hides an item from the pool.");
     static const char *ksn[] = {"Off", "Small keys", "Small + Nightmare", "All dungeon items"};
     opt_choice("Keysanity", &g_opts.keysanity, ksn, 4, 0,
                "Dungeon keys (and with the last choice every dungeon item) can be anywhere in the world, with logic. A "
                "key always opens doors in the dungeon it belongs to; with keysanity the Items screen shows each dungeon's keys.");
+    opt_toggle("Key rings", &g_opts.key_rings, false, "Each dungeon's small keys come as one key ring.");
     opt_toggle("Potsanity", &g_opts.pots, false,
                "Every liftable pot in houses, caves and dungeons hides an item from the pool (about 400 more checks). "
                "Unchecked pots are golden: lift, smash or throw one to reveal its item.");
@@ -811,6 +824,7 @@ static void rows_other(void) {
     opt_toggle("Hookshot anything", &g_opts.hookshot_any, false,
                "The Hookshot latches onto any wall or object it hits, not only hookshot targets. The logic counts the "
                "gaps this crosses. Seeds made with it always have Hookshot Anything on.");
+    opt_toggle("Hints", &g_opts.hints, false, "Owl statues and phone booths give hints.");
     opt_toggle("Fast songs", &g_opts.fast_songs, true, "Learning a song skips its cutscene.");
     opt_toggle("Boss cutscenes", &g_opts.boss_cutscenes, false, "Bosses' intro cutscenes play.");
     opt_toggle("Randomize music", &g_opts.randomize_music, false, "The game's music tracks are shuffled.");
