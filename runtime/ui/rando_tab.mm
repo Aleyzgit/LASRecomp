@@ -971,8 +971,9 @@ static const OptName kOptNames[] = {  // (names the built-in presets use; inv: t
     {"randomize_enemies", &GenOpts::randomize_enemies}, {"enemy_mode", nullptr, &GenOpts::enemy_mode},
     {"enemy_minibosses", &GenOpts::enemy_minibosses}, {"miniboss_freq", nullptr, &GenOpts::miniboss_freq},
     {"boss_souls", &GenOpts::boss_souls}, {"miniboss_souls", &GenOpts::miniboss_souls}, {"no_buffs", &GenOpts::no_buffs},
-    // not on this branch yet (their entries below are skipped until a line is added here): "hints" (rando-hints),
-    // "chest_looks" + "key_rings" (rando-chests-keyrings), "rocks" (rando-rocksanity), "labyrinth" (rando-labyrinth)
+    {"hints", &GenOpts::hints}, {"chest_looks", &GenOpts::chest_looks}, {"key_rings", &GenOpts::key_rings},
+    {"rocks", &GenOpts::rocks},
+    // not on this branch yet (its entry below is skipped until a line is added here): "labyrinth" (rando-labyrinth)
 };
 static const OptName *opt_by_name(const char *n) {
     for (const OptName &o : kOptNames) if (!strcmp(o.name, n)) return &o;
