@@ -537,7 +537,8 @@ extern "C" bool cosmetics_seed_on(void);  // runtime/cosmetics_seed.c
 static void tab_cosmetics(void) {
     opt_begin("##cosmetics", ImGui::GetFontSize() / 34);
     CosColour *rows[] = {&g_settings.tunic, &g_settings.hearts, &g_settings.hair, &g_settings.skin, &g_settings.shield,
-                         &g_settings.leaves, &g_settings.grass, &g_settings.sand, &g_settings.water};
+                         &g_settings.leaves, &g_settings.grass, &g_settings.sand, &g_settings.water,
+                         &g_settings.fences, &g_settings.walls, &g_settings.houses};
     if (opt_button("Randomize all", "Every color below gets a random color."))
         for (CosColour *c : rows) c->pick = 1 + rand() % (COL_RANDOM - 1);  // (a named colour: shown as what it is)
     if (opt_button("Default all", "Everything on this page back to the game's own look.")) {
@@ -554,7 +555,8 @@ static void tab_cosmetics(void) {
     opt_colour("Shield color", &g_settings.shield, COL_SLOT_SHIELD, "The color of Link's shield.");
     opt_section("Overworld");
     {   // Season: fills Leaves, Grass and Sand at once (palette: Orange 2, Gold 3, Pink 9, White 10; Water stays out: it
-        // has no season, and white water would read as ice); "Mixed" when they match none
+        // has no season, and white water would read as ice; nor fences, walls or houses: wood and stone have none);
+        // "Mixed" when they match none
         static const char *const names[] = {"Spring", "Autumn", "Winter", "Cherry blossom", "Mixed"};
         static const int preset[4][3] = {{COL_DEFAULT, COL_DEFAULT, COL_DEFAULT}, {2, 3, 3}, {10, 10, 10},
                                          {9, COL_DEFAULT, COL_DEFAULT}};
@@ -576,6 +578,9 @@ static void tab_cosmetics(void) {
     opt_colour("Grass color", &g_settings.grass, COL_SLOT_GRASS, "The overworld's grass.");
     opt_colour("Sand color", &g_settings.sand, COL_SLOT_SAND, "The beaches, the desert and the sandy south.");
     opt_colour("Water color", &g_settings.water, COL_SLOT_WATER, "The sea, rivers, ponds, waterfalls and dungeon water.");
+    opt_colour("Fence color", &g_settings.fences, COL_SLOT_FENCES, "The wooden fences.");
+    opt_colour("Wall color", &g_settings.walls, COL_SLOT_WALLS, "The overworld's cliff walls and ledges.");
+    opt_colour("House color", &g_settings.houses, COL_SLOT_HOUSES, "The village houses' roofs.");
     opt_section("Enemies");
     {   // (Off in a seed with its own cosmetics: "Seed", its enemies are per seed)
         const char *modes[N_ENEMY_COLOUR_MODES];
