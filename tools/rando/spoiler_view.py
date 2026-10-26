@@ -4,7 +4,7 @@
   spoiler_view.py <seed dir> [...]
 
 Sections: settings summary, starting items, a step-by-step walkthrough (playthrough spheres: "with what you have,
-go get these"), every item by area, dungeon entrances, shuffled entrances, pots. Seeds made before spheres.json
+go get these"), every item by area, dungeon entrances, shuffled entrances, pots, hints (Hints on). Seeds made before spheres.json
 existed are regenerated into build/ (same seed = same placements) to compute the walkthrough.
 
 Markup read by the game: '# ' section, '## ' sub-heading, '- ' bullet, '  ' continuation, plain text otherwise.
@@ -215,6 +215,13 @@ def build(seed_dir):
             if m:
                 a, b = (x.replace('-', ' ') for x in m.groups())
                 out.append(f'- {a}  ->  {b}' if mode == 'in' else f'- leaving {a}  ->  outside {b}')
+    hp = os.path.join(seed_dir, 'seed_hints.txt')  # (Hints on: what each owl statue and phone call says)
+    if os.path.exists(hp):
+        out.append('')
+        out.append('# Hints')
+        for l in open(hp):
+            where, _, text = l.rstrip('\n').partition(': ')
+            out.append(f'- {where}: {text}')
     with open(os.path.join(seed_dir, 'spoiler_view.txt'), 'w') as f:
         f.write('\n'.join(out) + '\n')
     return len(out)

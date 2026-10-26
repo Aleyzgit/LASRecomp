@@ -143,6 +143,7 @@ struct GenOpts {
     int tri_needed = 0, tri_extra = 0;
     bool race = false;        // race mode: the spoiler log stays shut until the credits, a seed hash on the title screen
     bool apples = false;      // apples: Applesanity, 3 checks per apple tree (tools/rando/apple_trees.py)
+    bool hints = false;       // hints: owl statues and phone booths tell about the seed (tools/rando/seed_hints.py)
 };
 static GenOpts g_opts;
 
@@ -191,7 +192,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
                  &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
                  &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina,
-                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.apples};
+                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.apples, &o.hints};  // (final order at merge: apples, chest_looks, key_rings, hints, rocks)
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -444,6 +445,7 @@ static void start_generation(void) {
             g_opts.miniboss_souls ? "true" : "false");
     fprintf(f, " \"hookshot-anything\": %s,\n", g_opts.hookshot_any ? "true" : "false");
     fprintf(f, " \"race-mode\": %s,\n", g_opts.race ? "true" : "false");  // (runtime only: spoiler lock, seed hash)
+    if (g_opts.hints) fprintf(f, " \"hints\": true,\n");  // (only when on: seeds without it stay as they were)
     fprintf(f, " \"triforce-hunt\": %d, \"triforce-extra\": %d,\n", g_opts.tri_needed, g_opts.tri_extra * 25);
     fprintf(f, " \"entrance-tier\": %d, \"entrance-decoupled\": %s,\n", g_opts.entrances, g_opts.entrances >= 2 && g_opts.decoupled ? "true" : "false");
     fprintf(f, " \"pet-rooster\": %s, \"pet-ghost\": %s, \"open-desert\": %s,\n", g_opts.pet_rooster ? "true" : "false",
@@ -811,6 +813,7 @@ static void rows_other(void) {
     opt_toggle("Hookshot anything", &g_opts.hookshot_any, false,
                "The Hookshot latches onto any wall or object it hits, not only hookshot targets. The logic counts the "
                "gaps this crosses. Seeds made with it always have Hookshot Anything on.");
+    opt_toggle("Hints", &g_opts.hints, false, "Owl statues and phone booths give hints.");
     opt_toggle("Fast songs", &g_opts.fast_songs, true, "Learning a song skips its cutscene.");
     opt_toggle("Boss cutscenes", &g_opts.boss_cutscenes, false, "Bosses' intro cutscenes play.");
     opt_toggle("Randomize music", &g_opts.randomize_music, false, "The game's music tracks are shuffled.");

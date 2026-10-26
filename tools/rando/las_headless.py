@@ -519,6 +519,10 @@ def main():
     import hint_sheet  # the Hint Sheet's steps: progression items in playthrough order
     print('hint sheet steps:', hint_sheet.steps(sh.logic_defs, pl, settings, lambda k, acc: sh.checkAccess(k, acc, settings['logic']),
                                                 sph, out_dir), flush=True)
+    if settings.get('hints'):  # owl statues and phone booths (tools/rando/seed_hints.py)
+        import seed_hints
+        print('hints:', seed_hints.pick(sh.logic_defs, pl, settings, lambda k, acc: sh.checkAccess(k, acc, settings['logic']),
+                                        out_dir, ent, romfs, room_plan and room_plan[0]), flush=True)
     for k in [k for k, v in sh.logic_defs.items() if v.get('_check_only')]:
         del sh.logic_defs[k]
     missing = [i for i in playthrough.INSTRUMENTS + ['kill-nightmare'] if not access.get(i)]
@@ -659,7 +663,9 @@ def main():
 
     import escape_bottle  # Tarin gives it with the starting items, in the game's own get-item message box
     print('escape bottle:', escape_bottle.apply(out_dir, romfs), flush=True)
-    print('hint sheet:', hint_sheet.apply(out_dir, romfs, settings), flush=True)  # (after it: Tarin's next gift)
+    print('hint sheet:', hint_sheet.apply(out_dir, romfs, settings, ent, sh.logic_defs), flush=True)  # (after it: Tarin's next gift)
+    if settings.get('hints'):
+        print('hints:', seed_hints.apply(out_dir, romfs, settings), flush=True)
 
     if soul_kinds:  # where the souls' fairy models stand (after the rooms moved): drawn red there (souls.c)
         print('soul spots:', souls_mod.write_spots(out_dir, leb, result['placements']), flush=True)
