@@ -15,9 +15,11 @@ APP="build/LAS Recomp.app"
 DEPS=$PWD/build/deps
 BUNDLE_ID=$(sed -n 's/^#define RT_BUNDLE_ID "\(.*\)"/\1/p' runtime/paths.h)
 VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
-# CFBundleShortVersionString must be digits: beta_<n> -> 0.9.<n>, beta_<n>.<m> -> 0.9.<n>.<m>, v1.2.3 -> 1.2.3
+# CFBundleShortVersionString must be digits, and is the semantic version under the release tag: beta_<n> -> 0.<n>.0,
+# beta_<n>.<m> -> 0.<n>.<m>, v0.6.0 -> 0.6.0, v1.2.3 -> 1.2.3
 case "$VERSION" in
-    beta_*) VERSION="0.9.${VERSION#beta_}" ;;
+    beta_*.*) VERSION="0.${VERSION#beta_}" ;;
+    beta_*) VERSION="0.${VERSION#beta_}.0" ;;
     v*) VERSION="${VERSION#v}" ;;
     test-*) VERSION="0.0.1" ;;  # (a test build: a valid bundle version, below every release)
 esac
