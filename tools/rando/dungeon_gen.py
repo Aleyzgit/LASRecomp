@@ -632,16 +632,29 @@ WARP_PADS = {0xF3}  # ObjDungeonWarp: paired warp tiles naming '<room>_Warp' sta
 GLOBAL_FLAG_BASE = 1600  # fresh event flags for generated rooms (the game uses < 1119; save bitfield = 2048 bits)
 
 
+CRYSTAL_FLAG = 9  # the level-local flag the game keeps a dungeon's crystal switch state in (FlagMap)
+
+
+def crystal_levels(cat):
+    """Levels with crystal switches in their own rooms (their uses of CRYSTAL_FLAG are the crystal state)."""
+    return {rooms.level_of(r) for r, v in cat.items() if 'ObjCrystalSw' in v.get('actors', ())}
+
+
 class FlagMap:
     """Room objects keep their state in flags: switch slot (type 1, index) = a global event flag (unique per room in
     the game: a room used twice, or played before in another dungeon, would share / inherit state), (type 0,
     index) = a level-local flag (0..254 per dungeon; rooms from different dungeons collide). Every generated
-    dungeon gets fresh numbers; objects sharing a flag in their source room keep sharing it."""
+    dungeon gets fresh numbers; objects sharing a flag in their source room keep sharing it.
+    Level-local flag 9 is the game's own: it holds the dungeon's crystal switch state (orange / blue pegs). It is never
+    handed out (a moved room's horse head with flag 9 reset the pegs on every floor change - Eagle's Tower play test;
+    clear-the-room shutters with it opened / closed with the pegs); rooms of a dungeon with crystal switches keep
+    their own uses of it (Bottle Grotto's warp-in starts)."""
 
-    def __init__(self, next_global=GLOBAL_FLAG_BASE, reserved_local=(), keep_global=()):
+    def __init__(self, next_global=GLOBAL_FLAG_BASE, reserved_local=(), keep_global=(), crystal_levels=()):
         self.g, self.l = {}, {}
         self.next_g, self.next_l = next_global, 1
-        self.reserved = set(reserved_local)  # local flags of the rooms that keep theirs (anchors)
+        self.reserved = set(reserved_local) | {CRYSTAL_FLAG}  # local flags of the rooms that keep theirs (anchors)
+        self.crystal_levels = set(crystal_levels)
         # global flags of this level's rooms that stay: a moved room sharing one (the other half of a locked door,
         # a shutter pair) keeps it - one lock, as room_logic.py counts it (a fresh flag made it two: a key short)
         self.keep = set(keep_global)
@@ -659,6 +672,8 @@ class FlagMap:
     def local(self, level, i):
         if i in (0, 255):
             return i
+        if i == CRYSTAL_FLAG and level in self.crystal_levels:
+            return i
         k = (level, i)
         if k not in self.l:
             while self.next_l in self.reserved:
@@ -668,6 +683,21 @@ class FlagMap:
             if self.next_l >= 255:
                 raise RuntimeError('out of level-local flags')
         return self.l[k]
+
+
+class _CrystalFlagOnly:
+    """The flags of a room that keeps its own (an anchor), but with its uses of CRYSTAL_FLAG renumbered: a dungeon
+    without crystal switches uses flag 9 for its own things (Catfish's Maw 05E's event box), which a crystal room
+    moved in would share."""
+
+    def __init__(self, flags):
+        self.flags = flags
+
+    def glob(self, i):
+        return i
+
+    def local(self, level, i):
+        return self.flags.local(level, i) if i == CRYSTAL_FLAG else i
 
 
 _roof_cache = {}
@@ -1255,7 +1285,12 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
     # the wrong room / left enemies asleep)
     first_zone = max([300] + [z + 1 for z in kept_zones if z < 0x10000])
     zone_ids = {cell: first_zone + i for i, cell in enumerate(sorted(layout))}
-    flags = FlagMap(reserved_local=reserved, keep_global=kept_global)
+    flags = FlagMap(reserved_local=reserved, keep_global=kept_global, crystal_levels=crystal_levels(cat_all))
+    # crystal switches moved into a dungeon that has none: its own rooms' uses of flag 9 move out of their way
+    kept_flags = None
+    if level not in flags.crystal_levels and any('ObjCrystalSw' in cat_all.get(src, {}).get('actors', ())
+                                                 for src in layout.values()):
+        kept_flags = _CrystalFlagOnly(flags)
     cat = json.load(open(os.path.join(HERE, 'room_catalog.json')))
     if shared_flags is not None:  # several dungeons in one seed: global flags continue across them
         flags.next_g = shared_flags.next_g
@@ -1278,7 +1313,7 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
         sibs = {(cell_pos(u)[0] - sc, cell_pos(u)[1] - sr) for u in unit} if whole else set()
         others = [(dc, dr) for dc in (-1, 0, 1) for dr in (-1, 0, 1)
                   if (dc, dr) != (0, 0) and (c0 + dc, r0 + dr) in here and (dc, dr) not in sibs]
-        _fix_room(romfs, out, cell, src, None if keep else zone_ids[cell], None if keep else flags, missing, whole,
+        _fix_room(romfs, out, cell, src, None if keep else zone_ids[cell], kept_flags if keep else flags, missing, whole,
                   corners, others)
         area, own = _source_records(romfs, src)
         r = {'name': cell, 'unit': zone_ids[cell], 'area_data': area, 'zone_data': own if own_zones else home_zone}
