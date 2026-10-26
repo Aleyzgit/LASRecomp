@@ -27,28 +27,30 @@ const PlasticTheme &plastic_theme(void) {
     static bool init;
     if (!init) {
         init = true;
-        // parchment: warm paper, brown frame and text, orange selection, green action buttons
-        t.panel = hex(0xF6EBD3, 0.98f);
-        t.inset = hex(0xFBF4E4, 0.96f);
-        t.frame = hex(0x8C5A2B);
-        t.frame_inner = hex(0xC08A4E);
-        t.row = hex(0xF3E5C8);
-        t.row_sel = hex(0xE07A3C);
-        t.row_mark = hex(0xF2C7A0);  // (the category shown beside its list, the cursor elsewhere)
-        t.row_hot = hex(0xEE9C66);   // (ImGui's own buttons under the cursor: brown text stays readable)
-        t.button = hex(0x3E8E6E);
-        t.tab = hex(0xEBDAB6);
-        t.tab_sel = hex(0xE07A3C);
-        t.text = hex32(0x4A3220);
-        t.text_dim = hex32(0x8A7356);
-        t.text_sel = hex32(0xFFFFFF);
-        t.text_button = hex32(0xFFFFFF);
-        t.section = hex32(0x8C5A2B);
-        t.value = hex32(0x6E5238);
-        t.value_changed = hex32(0x2E1E12);
-        t.warn = hex32(0xC23A22);
-        t.title = hex32(0x8C5A2B);
-        t.arrow = hex32(0xB07A45);
+        // parchment, in the colours of the game's item screen (pause menu): khaki paper in an olive frame with a gold
+        // inner edge, the selection the pale gold of the item cursor's slot (dark text), action buttons the slots'
+        // terracotta (cream text), a muted red for Delete / warnings
+        t.panel = hex(0xE2D6B4, 0.98f);
+        t.inset = hex(0xEAE0C6, 0.96f);
+        t.frame = hex(0x5F5A33);
+        t.frame_inner = hex(0xAA9240);
+        t.row = hex(0xD8C8A0);
+        t.row_sel = hex(0xEBC27C);
+        t.row_mark = hex(0xE4C98F);  // (the category shown beside its list, the cursor elsewhere)
+        t.row_hot = hex(0xE6C383);   // (ImGui's own buttons under the cursor)
+        t.button = hex(0x96643F);
+        t.tab = hex(0xD3C39A);
+        t.tab_sel = hex(0xEBC27C);
+        t.text = hex32(0x3A2C16);
+        t.text_dim = hex32(0x6F6244);
+        t.text_sel = hex32(0x3A2410);
+        t.text_button = hex32(0xFFF3DC);
+        t.section = hex32(0x6C5A1E);
+        t.value = hex32(0x5A4A30);
+        t.value_changed = hex32(0x241A0C);
+        t.warn = hex32(0x8C3826);
+        t.title = hex32(0x6C5A1E);
+        t.arrow = hex32(0x7A6A32);
         t.dim = 0.62f;
         t.glare = 0.14f;
     }

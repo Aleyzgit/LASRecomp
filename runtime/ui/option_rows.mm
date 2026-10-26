@@ -34,11 +34,12 @@ static std::string g_page;  // (the page drawn last: its last shown description 
 
 static bool g_next_disabled;
 static std::vector<OptLine> *g_collect;  // (opt_collect_begin: rows are only read, not drawn)
-static bool g_row_button;  // (the next row is an action: a green button)
+static bool g_row_button;  // (the next row is an action: a button)
 void opt_disable_next(void) { g_next_disabled = true; }
 static bool g_next_mark, g_next_warn;
 void opt_mark_next(void) { g_next_mark = true; }
 void opt_warn_next(void) { g_next_warn = true; }
+void opt_button_next(void) { g_row_button = true; }
 static int g_indent;
 static bool g_focus_req, g_take_first;  // (opt_focus_first: requested / this page's first row takes it)
 void opt_focus_first(bool on) { g_focus_req = on; }
@@ -186,8 +187,8 @@ static int row(const char *label, const std::string &value, bool changed, const 
         if (dh > g_desc_max) g_desc_max = dh;
     }
 
-    // the row: a plastic pill; selected (cursor or mouse), it stands up orange with white text. Actions are green
-    // buttons.
+    // the row: a plastic pill; selected (cursor or mouse), it stands up in the selection colour (text_sel). Actions
+    // are buttons (text_button), warnings red ones.
     ImDrawList *dl = ImGui::GetWindowDrawList();
     const PlasticTheme &pt = plastic_theme();
     float pad = 16 * g_scale, fs = ImGui::GetFontSize();
@@ -203,11 +204,12 @@ static int row(const char *label, const std::string &value, bool changed, const 
     if (upper)
         for (char &c : t) c = (char)toupper((unsigned char)c);
     float ty = p.y + (h - fs) * 0.5f - 1 * g_scale;
-    bool light = !off && (sel || button);  // (white text on an orange / green / red piece)
-    ImU32 label_col = off ? pt.text_dim : light ? pt.text_sel : pt.text;
+    bool light = !off && (sel || button);
+    ImU32 on_col = sel ? pt.text_sel : pt.text_button;  // (text on the selection / on a button)
+    ImU32 label_col = off ? pt.text_dim : light ? on_col : pt.text;
     dl->AddText(ImVec2(p.x + lpad, ty), label_col, t.c_str());
     float right = p.x + w - pad - 14 * g_scale;  // (the value's right edge)
-    ImU32 ac = off ? pt.text_dim : light ? pt.text_sel : pt.arrow;  // (arrows, chevron)
+    ImU32 ac = off ? pt.text_dim : light ? on_col : pt.arrow;  // (arrows, chevron)
     if (arrows && !value.empty()) {  // ◀ value ▶, drawn (the fonts have no arrow glyphs); a click on one steps
         float aw = fs * 0.42f, gap = fs * 0.55f, cy = ty + fs * 0.52f;
         float rx = right - aw, lx = rx - gap - ImGui::CalcTextSize(value.c_str()).x - gap - aw;
@@ -229,7 +231,7 @@ static int row(const char *label, const std::string &value, bool changed, const 
     }
     if (!value.empty()) {
         float vw = ImGui::CalcTextSize(value.c_str()).x, vx = right - vw;
-        ImU32 vc = off ? pt.text_dim : light ? pt.text_sel : warn ? pt.warn : changed ? pt.value_changed : pt.value;
+        ImU32 vc = off ? pt.text_dim : light ? on_col : warn ? pt.warn : changed ? pt.value_changed : pt.value;
         dl->AddText(ImVec2(vx, ty), vc, value.c_str());
     }
     if (dup) ImGui::PopID();
@@ -303,7 +305,7 @@ bool opt_radio(const char *label, bool selected, const char *desc) {
 }
 
 bool opt_action(const char *label, const char *value, const char *desc, bool upper, bool changed) {
-    g_row_button = (!value || !*value) && upper;  // (a plain action: a button)
+    g_row_button = g_row_button || ((!value || !*value) && upper);  // (a plain action: a button)
     return row(label, value ? value : "", changed, desc, upper) == 2;
 }
 

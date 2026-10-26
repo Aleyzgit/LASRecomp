@@ -938,10 +938,12 @@ static void rows_seeds(const char *active) {
         }
         if (!is_active && opt_action("Play", "", NULL)) play_seed(s.name.c_str());
         if (s.race && !s.race_done) opt_disable_next();  // (race mode: shut until the credits)
+        opt_button_next();  // (Locked: still a button, greyed out)
         if (opt_action("Spoiler log", s.race && !s.race_done ? "Locked" : "", NULL)) g_spoiler_seed = s.name;
         if (s.id.empty()) opt_disable_next();
         if (opt_action("Copy seed ID", "", NULL)) ImGui::SetClipboardText(s.id.c_str());
         if (is_active) opt_disable_next();  // (the game is reading its files)
+        opt_button_next();  // (a button like the others, the name on its right)
         if (opt_text("Rename", rename_buf, sizeof rename_buf, "", NULL)) {
             std::string to_name = clean_name(rename_buf), to = "rando/" + to_name;
             struct stat sb;
@@ -958,6 +960,7 @@ static void rows_seeds(const char *active) {
             return;
         }
         if (is_active) opt_disable_next();
+        opt_warn_next();  // (red: not to be taken for Play)
         if (opt_action("Delete", "", NULL)) g_confirm_delete = true, g_focus = FOCUS_CANCEL;
         take_focus(FOCUS_DELETE);
         return;
