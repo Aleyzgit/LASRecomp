@@ -48,6 +48,7 @@ extern "C" {
 #include "input_bind.h"
 #include "nvn/shader_prep.h"
 bool controls_ui_took_back(void);  // ui/controls_ui.mm: B went back a step on Configure inputs
+bool rando_tab_took_back(void);   // ui/rando_tab.mm: B went back a step in the right column
 void ui_window_init(void);
 SDL_Window *ui_window(void);
 #ifdef __APPLE__
@@ -187,8 +188,13 @@ static bool file_exists(const std::string &p) {
 
 // The game's RomFS (the same in every supported version) has exactly ROMFS_FILES files: a copy with fewer is incomplete (a copy or unzip that
 // stopped partway) and the game crashes on the first one it misses (issues #24, #35). Only the number ships.
-enum { ROMFS_FILES = 3836 };
-static int count_files(const std::string &dir, int depth = 0) {
+// Their sizes add up to game_romfs_bytes() (per version): every file there with another total is a damaged or
+// changed file (issue #391). The game still plays then; the start screen says so.
+// With check (base: where the path inside romfs starts), the files that aren't the game's are named in the log, the
+// first ROMFS_ODD_LOGGED of them (check->odd counts them all).
+enum { ROMFS_FILES = 3836, ROMFS_ODD_LOGGED = 20 };
+struct RomfsCheckWalk { GameRomfsCheck *check; size_t base; int odd; };
+static int count_files(const std::string &dir, int depth = 0, uint64_t *bytes = NULL, RomfsCheckWalk *check = NULL) {
     DIR *d = depth < 12 ? opendir(dir.c_str()) : NULL;
     if (!d) return 0;
     int n = 0;
@@ -197,14 +203,23 @@ static int count_files(const std::string &dir, int depth = 0) {
         std::string p = dir + "/" + e->d_name;
         struct stat st;
         if (stat(p.c_str(), &st) != 0) continue;
-        n += S_ISDIR(st.st_mode) ? count_files(p, depth + 1) : S_ISREG(st.st_mode) ? 1 : 0;
+        if (S_ISDIR(st.st_mode)) n += count_files(p, depth + 1, bytes, check);
+        else if (S_ISREG(st.st_mode)) {
+            n++;
+            if (bytes) *bytes += (uint64_t)st.st_size;
+            if (check && !game_romfs_check_file(check->check, p.c_str() + check->base, (uint64_t)st.st_size) &&
+                check->odd++ < ROMFS_ODD_LOGGED)
+                fprintf(stderr, "[launcher] romfs: not one of the game's files: %s (%llu bytes)\n", p.c_str() + check->base,
+                        (unsigned long long)st.st_size);
+        }
     }
     closedir(d);
     return n;
 }
-// The copied romfs' file count, counted once (the checks below run every frame): -1 = count again (game files set
-// up, deleted)
+// The copied romfs' file count and bytes, counted once (the checks below run every frame): -1 = count again (game
+// files set up, deleted)
 static int g_romfs_count = -1;
+static uint64_t g_romfs_bytes, g_romfs_want;  // (want: this version's total, 0 unknown)
 static std::atomic<bool> g_build_cache_changed{true};
 static std::atomic<int> g_files_changes{0};  // (the version label on the start screen is read again)
 static void game_files_changed(void) { g_romfs_count = -1; g_build_cache_changed = true; ++g_files_changes; }
@@ -229,10 +244,31 @@ static std::string check_copied_files(const std::string &root) {
     if (!file_exists(root + "/exefs/main")) return "No game files yet";
     if (!game_version_of(root.c_str())) return "Wrong version of the game";
     if (!file_exists(root + "/romfs/region_common")) return incomplete(0);
-    if (g_romfs_count < 0) g_romfs_count = count_files(root + "/romfs");
+    if (g_romfs_count < 0) {
+        g_romfs_bytes = 0;
+        const GameVersion *v = game_version_of(root.c_str());
+        RomfsCheckWalk check = {game_romfs_check_begin(v), root.size() + strlen("/romfs/"), 0};
+        g_romfs_count = count_files(root + "/romfs", 0, &g_romfs_bytes, &check);
+        int missing = game_romfs_check_end(check.check);
+        if (check.odd > ROMFS_ODD_LOGGED)
+            fprintf(stderr, "[launcher] romfs: %d more files that aren't the game's\n", check.odd - ROMFS_ODD_LOGGED);
+        if (missing) fprintf(stderr, "[launcher] romfs: %d of the game's files missing or changed\n", missing);
+        g_romfs_want = game_romfs_bytes(v);
+        if (g_romfs_count >= ROMFS_FILES && g_romfs_want && g_romfs_bytes != g_romfs_want)
+            fprintf(stderr, "[launcher] romfs: %llu bytes in %d files, this version's are %llu: damaged or changed "
+                    "game files\n", (unsigned long long)g_romfs_bytes, g_romfs_count, (unsigned long long)g_romfs_want);
+    }
     if (g_romfs_count < ROMFS_FILES) return incomplete(g_romfs_count);
     return "";
 }
+
+// Every file there, but not the game's sizes: a damaged or changed file (issue #391). Playable, so not a
+// check_game_files() problem: the start screen shows it beside "ready".
+static bool files_changed(const std::string &root) {
+    return check_copied_files(root).empty() && g_romfs_want && g_romfs_bytes != g_romfs_want;
+}
+static const char *const CHANGED_HEAD = "Game files damaged or changed";
+static const char *const CHANGED_HINT = "Copy your game files again, then choose that folder and set them up again.";
 
 // "" = ready to play, else what is wrong
 static std::string check_game_files(const std::string &root) {
@@ -460,7 +496,8 @@ check:
         game_files_changed();
         std::string why = check_game_files(g_root);
         if (why.empty()) prepare_shaders();  // (the GPU device is up: the start screen draws with it)
-        if (why.empty()) set_job("Game files ready.");
+        if (why.empty() && files_changed(g_root)) set_job(CHANGED_HEAD, true, CHANGED_HINT);  // (playable all the same)
+        else if (why.empty()) set_job("Game files ready.");
         else if (why.find("version") != std::string::npos) set_failure(FAIL_VERSION);
         else set_failure(FAIL_MISSING, g_romfs_count);
     }
@@ -1822,7 +1859,7 @@ extern "C" void launcher_run(const char *root) {
                 menu_tabs_draw(sc, g_font_small, g_font_menu, false, prelaunch_tab);
                 int cap_dev;
                 bind_capture_active(&cap_dev, NULL, NULL);
-                if (!popup && !typing && cap_dev < 0 && !controls_ui_took_back() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+                if (!popup && !typing && cap_dev < 0 && !controls_ui_took_back() && !rando_tab_took_back() && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
                     (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
                     back = true;
                 ImGui::PopFont();
@@ -1997,6 +2034,12 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", status.c_str());
                     ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "%s", status_hint(status));
                     ImGui::PopTextWrapPos();
+                } else if (ready && files_changed(g_root)) {  // (playable, but a damaged or changed file: #391)
+                    ImGui::Dummy(ImVec2(0, 14 * sc));
+                    ImGui::PushTextWrapPos(0);
+                    ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "%s", CHANGED_HEAD);
+                    ImGui::TextColored(ImVec4(0.86f, 0.85f, 0.80f, 1), "%s", CHANGED_HINT);
+                    ImGui::PopTextWrapPos();
                 }
                 if (!ready && g_onedrive > 0 && !g_settings.onedrive_kept) {  // (before the copy is the time to move)
                     ImGui::Dummy(ImVec2(0, 14 * sc));
@@ -2041,7 +2084,11 @@ extern "C" void launcher_run(const char *root) {
             if (page == MAIN) {
             ImGui::PushFont(g_font_small);
             ImGui::SetCursorPos(ImVec2(x0, ds.y - 118 * s));
-            if (status.empty()) {
+            if (status.empty() && files_changed(g_root)) {  // (playable, but a damaged or changed file: #391)
+                ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "!  %s", CHANGED_HEAD);
+                ImGui::SetCursorPosX(x0);
+                ImGui::TextDisabled("%s", CHANGED_HINT);
+            } else if (status.empty()) {
                 {  // a drawn check mark (the Switch font has no ✓)
                     ImVec2 p = ImGui::GetCursorScreenPos();
                     float u = ImGui::GetTextLineHeight();
