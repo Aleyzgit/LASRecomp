@@ -36,8 +36,10 @@ if [ ! -f "$P/lib/libavcodec.dll.a" ]; then
     cp -R "$S/ffmpeg-root$NEUTRAL"/. "$P"/
     sed -i "s|$NEUTRAL|$P|g" "$P"/lib/pkgconfig/lib{avformat,avcodec,avutil,swscale}.pc  # (pkg-config: the real place)
 fi
-for f in "$P"/bin/*.dll; do  # (no path of this machine inside: FFmpeg's configure line)
-    ! grep -qaiF -e "$PWD" -e "$(cygpath -m "$PWD")" -e "$(cygpath -w "$PWD")" "$f" || { echo "$f holds a path of this machine"; exit 1; }
-done
+if [ "${CI:-}" != true ]; then  # (no path of this machine inside: FFmpeg's configure line; not on CI: no one's paths)
+    for f in "$P"/bin/*.dll; do
+        ! grep -qaiF -e "$PWD" -e "$(cygpath -m "$PWD")" -e "$(cygpath -w "$PWD")" "$f" || { echo "$f holds a path of this machine"; exit 1; }
+    done
+fi
 grep -q 'GPL version 3\|--enable-gpl' "$P/lib/pkgconfig/libavcodec.pc" && { echo "deps-win: FFmpeg is not LGPL"; exit 1; }
 echo "deps-win: $(ls "$P/bin"/*.dll | xargs -n1 basename | tr '\n' ' ')"

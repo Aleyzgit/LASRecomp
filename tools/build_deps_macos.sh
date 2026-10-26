@@ -71,10 +71,13 @@ if [ ! -x "$P/python/bin/python3.12" ]; then
     tar -xf "$S/cpython-3.12.14-20260924.tar.gz" -C "$P/python" --strip-components 1
 fi
 
-# no path of this machine inside a library (FFmpeg's configure line, source file names)
-for f in "$P"/lib/*.dylib; do
-    [ -L "$f" ] || ! grep -qaF -e "$PWD" -e "$HOME" "$f" || { echo "$f holds a path of this machine"; exit 1; }
-done
+# no path of this machine inside a library (FFmpeg's configure line, source file names); not on CI (no one's paths)
+if [ "${CI:-}" != true ]; then
+    case "$(basename "$HOME")" in runner|runneradmin) home=() ;; *) home=(-e "$HOME") ;; esac
+    for f in "$P"/lib/*.dylib; do
+        [ -L "$f" ] || ! grep -qaF -e "$PWD" ${home[@]+"${home[@]}"} "$f" || { echo "$f holds a path of this machine"; exit 1; }
+    done
+fi
 
 echo "build/deps ready (macOS $MIN):"
 for f in "$P"/lib/*.dylib; do

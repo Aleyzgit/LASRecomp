@@ -137,6 +137,10 @@ while read -r f; do [ "$f" = "$C/MacOS/lasrecomp" ] || codesign -f -s - "$f" 2>/
 codesign -f -s - "$APP"
 codesign --verify --strict "$APP"
 if find "$APP" -name 'lasgame*' | grep . >/dev/null; then echo "game code inside $APP"; exit 1; fi
-# no path of this machine inside (configure lines, debug paths, frozen Python's file names)
-if grep -rlaF -e "$HOME" -e "$PWD" "$APP"; then echo "^ these hold a path of this machine"; exit 1; fi
+# no path of this machine inside (configure lines, debug paths, frozen Python's file names). Not on CI: its paths
+# name no one, and prebuilt wheels hold the CI runner's own (/Users/runner/...)
+if [ "${CI:-}" != true ]; then
+    case "$(basename "$HOME")" in runner|runneradmin) home=() ;; *) home=(-e "$HOME") ;; esac
+    if grep -rlaF -e "$PWD" ${home[@]+"${home[@]}"} "$APP"; then echo "^ these hold a path of this machine"; exit 1; fi
+fi
 echo "$APP: $(du -sh "$APP" | cut -f1), $(ls "$C/Frameworks" | wc -l | tr -d ' ') dylibs, macOS $MIN+"
