@@ -575,7 +575,7 @@ static void tab_cosmetics(void) {
     opt_colour("Leaves color", &g_settings.leaves, COL_SLOT_LEAVES, "The overworld's tree leaves and bushes.");
     opt_colour("Grass color", &g_settings.grass, COL_SLOT_GRASS, "The overworld's grass.");
     opt_colour("Sand color", &g_settings.sand, COL_SLOT_SAND, "The beaches, the desert and the sandy south.");
-    opt_colour("Water color", &g_settings.water, COL_SLOT_WATER, "The sea, rivers, ponds and dungeon water.");
+    opt_colour("Water color", &g_settings.water, COL_SLOT_WATER, "The sea, rivers, ponds, waterfalls and dungeon water.");
     opt_section("Enemies");
     {   // (Off in a seed with its own cosmetics: "Seed", its enemies are per seed)
         const char *modes[N_ENEMY_COLOUR_MODES];
