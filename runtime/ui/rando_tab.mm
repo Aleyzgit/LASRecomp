@@ -616,7 +616,8 @@ static void rows_general(void) {
                "Link takes, the red one always strengthens his attacks, and with both he has both.");
     opt_toggle("No Guardian Acorns / Pieces of Power", &g_opts.no_buffs, false,
                "Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power.");
-    if (opt_toggle("Check tracker on overworld map", &g_settings.tracker, true,  // (the player's own, not part of a seed)
+    opt_own_next();  // (the player's own, not part of a seed)
+    if (opt_toggle("Check tracker on overworld map", &g_settings.tracker, true,
                    "The overworld map marks the checks you have and haven't done yet."))
         settings_save();
 }
@@ -755,6 +756,7 @@ static void rows_world(float scale) {
         bool on = g_settings.chaos_letters != CHAOS_LETTERS_OFF;
         opt_indent(1);
         if (!g_opts.room_shuffle) opt_disable_next();
+        opt_own_next();
         if (opt_toggle("Map tracks door connections", &on, true,
                        "Matching letters (A-A, B-B...) on the dungeon map show which doorways connect: a pair appears once "
                        "you've been through either end, and every pair of the dungeon once you have its map.")) {
@@ -842,54 +844,85 @@ static void cat_rows(int c, float scale) {
     }
 }
 
-// ---- the options picked, read-only (Generate seed under the cursor): the new seed's name and ID, then each category's
-// options that aren't their default, in two columns when one is too long for the pane
+// ---- the options picked, read-only (Generate seed under the cursor), for a last look: the new seed's name and ID, then
+// every seed option with its value, by category in the left column's order (options shut by their parent - greyed out
+// on their page - are left out; the player's own settings too). Two columns when the pane is wide enough; an entry too
+// long for its column goes on under itself, a step in. The pane scrolls (wheel, right stick: option_rows.mm).
 static void seed_summary(float scale) {
     const PlasticTheme &pt = plastic_theme();
-    struct Item { bool head; std::string a, b; };
+    struct Item { bool head; std::string a, b; int indent; };
     std::vector<Item> items;
-    int shown = 0;
     for (int c = CAT_GENERAL; c < N_CAT; c++) {
         std::vector<OptLine> v;
         opt_collect_begin(&v);
         cat_rows(c, scale);
         opt_collect_end();
-        bool head = false;
-        for (const OptLine &l : v) {
-            if (!l.changed) continue;
-            if (!head) items.push_back({true, k_cat_name[c], ""}), head = true;
-            items.push_back({false, l.label, l.value}), shown++;
-        }
+        if (v.empty()) continue;
+        items.push_back({true, k_cat_name[c], "", 0});
+        for (const OptLine &l : v) items.push_back({false, l.label, l.value, l.indent});
     }
     char id[48];
     seed_id_encode(g_opts, id, sizeof id);
     opt_section("Your options");
     ImGui::SetWindowFontScale(0.8f);
-    float fs = ImGui::GetFontSize(), lh = fs * 1.12f, gap = fs * 0.4f;
+    ImFont *font = ImGui::GetFont();
+    float fs = ImGui::GetFontSize(), lh = fs * 1.12f, gap = fs * 0.4f, step = fs * 0.9f;
     ImDrawList *dl = ImGui::GetWindowDrawList();
-    auto pair = [&](ImVec2 at, float w, const char *a, const char *b, ImU32 ca) {  // "label: value", cut at w
-        dl->PushClipRect(at, ImVec2(at.x + w, at.y + lh), true);
-        std::string la = std::string(a) + ": ";
-        dl->AddText(at, ca, la.c_str());
-        dl->AddText(ImVec2(at.x + ImGui::CalcTextSize(la.c_str()).x, at.y), pt.value_changed, b);
-        dl->PopClipRect();
+    // "label: value" in lines of at most w (broken between words; the lines after the first a step in): each line's
+    // start and end in the text, and where the label ends (the value is drawn in its own colour)
+    struct Line { size_t s, e; };
+    auto wrap = [&](const std::string &t, float w, std::vector<Line> *out) {
+        out->clear();
+        const char *b = t.c_str(), *p = b, *end = b + t.size();
+        while (p < end) {
+            float lw = out->empty() ? w : w - step;
+            const char *q = font->CalcWordWrapPositionA(fs / font->FontSize, p, end, lw);
+            if (q <= p) q = p + 1;  // (a word longer than the line: at least one character)
+            out->push_back({(size_t)(p - b), (size_t)(q - b)});
+            p = q;
+            while (p < end && *p == ' ') p++;
+        }
+        return (int)out->size();
+    };
+    auto draw = [&](ImVec2 at, float w, const Item &it) {
+        std::string la = it.a + ": ", t = la + it.b;
+        std::vector<Line> ls;
+        wrap(t, w, &ls);
+        for (size_t k = 0; k < ls.size(); k++) {
+            float x = at.x + (k ? step : 0), y = at.y + lh * k;
+            size_t s = ls[k].s, e = ls[k].e, m = std::min(std::max(s, la.size()), e);  // (label: s..m, value: m..e)
+            if (m > s) dl->AddText(font, fs, ImVec2(x, y), pt.text, t.c_str() + s, t.c_str() + m);
+            if (e > m) {
+                float lx = m > s ? font->CalcTextSizeA(fs, FLT_MAX, 0, t.c_str() + s, t.c_str() + m).x : 0;
+                dl->AddText(font, fs, ImVec2(x + lx, y), pt.value_changed, t.c_str() + m, t.c_str() + e);
+            }
+        }
+        return lh * ls.size();
     };
     ImVec2 p = ImGui::GetCursorScreenPos();
     float W = ImGui::GetContentRegionAvail().x;
-    pair(p, W, "Seed", g_opts.seed[0] ? g_opts.seed : "Random", pt.text);
-    pair(ImVec2(p.x, p.y + lh), W, "Seed ID", id, pt.text);
-    p.y += lh * 2 + gap;
-    float H = ImGui::GetContentRegionAvail().y - lh * 2 - gap * 2;  // (room left, the closing line under it)
-    float total = 0;
-    for (const Item &it : items) total += it.head ? lh + gap : lh;
-    int cols = total > H ? 2 : 1;
+    p.y += draw(p, W, {false, "Seed", g_opts.seed[0] ? g_opts.seed : "Random", 0});
+    p.y += draw(p, W, {false, "Seed ID", id, 0});
+    p.y += gap;
+    // two columns while a middling entry still fits on one line of one (the longer ones go on under themselves)
+    float mid_w = font->CalcTextSizeA(fs, FLT_MAX, 0, "Seashell Mansion rewards: All (50)").x + fs * 0.5f;
+    int cols = (W - fs) * 0.5f >= mid_w ? 2 : 1;
     float cw = cols == 2 ? (W - fs) * 0.5f : W;
+    std::vector<float> hs(items.size());
+    float total = 0;
+    std::vector<Line> tmp;
+    for (size_t i = 0; i < items.size(); i++) {
+        const Item &it = items[i];
+        float iw = cw - fs * 0.5f - step * it.indent;
+        hs[i] = it.head ? lh + gap : lh * wrap(it.a + ": " + it.b, iw, &tmp);
+        total += hs[i];
+    }
     size_t split = items.size();  // (the second column starts at a category: the most even split)
     if (cols == 2) {
         float acc = 0, best = total;
         for (size_t i = 0; i < items.size(); i++) {
             if (items[i].head && i && fmaxf(acc, total - acc) < best) best = fmaxf(acc, total - acc), split = i;
-            acc += items[i].head ? lh + gap : lh;
+            acc += hs[i];
         }
     }
     float y0 = p.y, y = y0, x = p.x, ymax = y0;
@@ -900,15 +933,15 @@ static void seed_summary(float scale) {
             if (y > y0) y += gap;
             std::string t = it.a;
             for (char &c : t) c = (char)toupper((unsigned char)c);
-            dl->AddText(ImVec2(x, y), pt.section, t.c_str());
-        } else
-            pair(ImVec2(x + fs * 0.5f, y), cw - fs * 0.5f, it.a.c_str(), it.b.c_str(), pt.text);
-        y += lh;
+            dl->AddText(font, fs, ImVec2(x, y), pt.section, t.c_str());
+            y += lh;
+        } else {
+            float ix = fs * 0.5f + step * it.indent;
+            y += draw(ImVec2(x + ix, y), cw - ix, it);
+        }
         ymax = fmaxf(ymax, y);
     }
-    dl->AddText(ImVec2(p.x, ymax + gap), pt.text_dim, shown ? "Everything else is the default." : "Every option is the default.");
-    ymax += gap + lh;
-    ImGui::Dummy(ImVec2(W, ymax - ImGui::GetCursorScreenPos().y));
+    ImGui::Dummy(ImVec2(W, ymax + gap - ImGui::GetCursorScreenPos().y));
     ImGui::SetWindowFontScale(1.0f);
 }
 

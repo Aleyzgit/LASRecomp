@@ -40,6 +40,8 @@ static bool g_next_mark, g_next_warn;
 void opt_mark_next(void) { g_next_mark = true; }
 void opt_warn_next(void) { g_next_warn = true; }
 void opt_button_next(void) { g_row_button = true; }
+static bool g_next_own;
+void opt_own_next(void) { g_next_own = true; }
 static int g_indent;
 static bool g_focus_req, g_take_first;  // (opt_focus_first: requested / this page's first row takes it)
 void opt_focus_first(bool on) { g_focus_req = on; }
@@ -119,8 +121,8 @@ static int row(const char *label, const std::string &value, bool changed, const 
     bool lr = arrows || g_lr_row;
     g_lr_row = false;
     if (g_collect) {
-        if (!g_next_disabled && !value.empty()) g_collect->push_back({label, value, changed});
-        g_next_disabled = g_next_mark = g_next_warn = g_row_button = false;
+        if (!g_next_disabled && !g_next_own && !value.empty()) g_collect->push_back({label, value, changed, g_indent});
+        g_next_disabled = g_next_mark = g_next_warn = g_row_button = g_next_own = false;
         g_half = 0;
         return 0;
     }
@@ -160,7 +162,7 @@ static int row(const char *label, const std::string &value, bool changed, const 
     g_rows.push_back(dup ? std::string(label) + " #" + std::to_string(dup + 1) : std::string(label));
     g_row_pane.push_back(g_pane);
     bool mark = g_next_mark, warn = g_next_warn;
-    g_next_disabled = g_next_mark = g_next_warn = false;
+    g_next_disabled = g_next_mark = g_next_warn = g_next_own = false;
     bool hov = ImGui::IsItemHovered(), foc = ImGui::IsItemFocused() && ImGui::GetCurrentContext()->NavCursorVisible;
     int step = clicked && !off ? 2 : 0;
     g_held = false;
@@ -527,6 +529,7 @@ bool opt_pressed_left(void) {
            ImGui::IsKeyPressed(ImGuiKey_LeftArrow);
 }
 
-void opt_collect_begin(std::vector<OptLine> *out) { g_collect = out; }
+static int g_collect_indent;  // (the pane's indent, kept while the rows are read)
+void opt_collect_begin(std::vector<OptLine> *out) { g_collect = out, g_collect_indent = g_indent, g_indent = 0; }
 bool opt_collecting(void) { return g_collect != NULL; }
-void opt_collect_end(void) { g_collect = NULL; }
+void opt_collect_end(void) { g_collect = NULL, g_indent = g_collect_indent; }

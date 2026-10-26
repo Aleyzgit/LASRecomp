@@ -50,6 +50,7 @@ void opt_mark_next(void);
 // the next row's value in red (a problem: e.g. the same button bound twice)
 void opt_warn_next(void);
 void opt_button_next(void);  // the next row (one with a value too, or a text row) as a button
+void opt_own_next(void);  // the next row is the player's own setting, not part of a seed: the summary leaves it out
 // rows after this sit one step in (+1) or back out (-1): options that belong to the row above
 void opt_indent(int step);
 void opt_end(void);
@@ -103,7 +104,7 @@ bool opt_pressed_back(void);
 bool opt_pressed_left(void);
 // Rows between these are only read, not drawn (the Randomizer's summary): each enabled row with a value goes into out.
 // Calls of the caller's own that use the last item (ImGui::IsItemFocused, popups) must be skipped while opt_collecting().
-struct OptLine { std::string label, value; bool changed; };
+struct OptLine { std::string label, value; bool changed; int indent; };  // (indent: opt_indent steps)
 void opt_collect_begin(std::vector<OptLine> *out);
 bool opt_collecting(void);
 void opt_collect_end(void);
