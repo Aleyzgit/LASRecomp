@@ -614,6 +614,8 @@ static void rows_general(void) {
     opt_toggle("Treat Tunics as Upgrades", &g_opts.tunic_upgrades, false,
                "The red and blue tunics add up instead of replacing each other: the blue one always halves the damage "
                "Link takes, the red one always strengthens his attacks, and with both he has both.");
+    opt_toggle("No Guardian Acorns / Pieces of Power", &g_opts.no_buffs, false,
+               "Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power.");
     if (opt_toggle("Check tracker on overworld map", &g_settings.tracker, true,  // (the player's own, not part of a seed)
                    "The overworld map marks the checks you have and haven't done yet."))
         settings_save();
@@ -798,8 +800,6 @@ static void rows_enemies(void) {
     opt_toggle("Mini-boss souls", &g_opts.miniboss_souls, false,
                "Each kind of dungeon mini-boss has a soul hidden among the items; one soul counts for every fight with "
                "that kind. Until you find it the mini-boss doesn't show up and its room's way on stays shut.");
-    opt_toggle("No Guardian Acorns / Pieces of Power", &g_opts.no_buffs, false,
-               "Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power.");
 }
 
 static void rows_companions(void) {
