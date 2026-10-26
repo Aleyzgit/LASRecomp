@@ -75,6 +75,7 @@ typedef struct {
     CosColour skin;           // runtime/nvn/texpatch.c skin_apply
     CosColour leaves, grass;  // the overworld's foliage, runtime/nvn/recolour_seasons.c
     CosColour sand;           // the beaches, the desert, the sandy south (recolour_seasons.c)
+    CosColour water;          // the sea, rivers, ponds, dungeon water (runtime/nvn/recolour_water.c)
     int enemy_colours;        // 0 Off, 1 Random per seed, 2 Random every load (runtime/nvn/recolour_enemies.c)
     int screen_filter;        // 0 Off, 1 Game Boy, 2 Game Boy Color, 3 Grayscale (runtime/nvn/screen_filter.h)
     // speedrun (Gameplay tab; runtime/hle/run_timer.c, runtime/livesplit.c)

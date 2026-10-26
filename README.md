@@ -81,7 +81,7 @@ Known issues and their status are on the [GitHub issues page](https://github.com
 - Controllers that aren't recognised can be added with a mapping file (see [SDL_GameControllerDB](https://github.com/mdqinc/SDL_GameControllerDB)).
 - Play in English, Japanese, Spanish, French, German, Italian, Dutch, Russian, Korean or Chinese (Simplified or Traditional).
 - Optional extras: 360-degree movement, blur removal, mirror mode, faster walking and hiding the Hero Mode icon.
-- Cosmetics: change Link's tunic, hair, skin and shield colours, the colour of the grass, leaves and sand (with season presets), give enemies random colours, or play with a Game Boy, Game Boy Color or grayscale filter.
+- Cosmetics: change Link's tunic, hair, skin and shield colours, the colour of the grass, leaves and sand (with season presets) and of the water, give enemies random colours, or play with a Game Boy, Game Boy Color or grayscale filter.
 - Optional run timer, with LiveSplit support.
 
 **Randomizer**
