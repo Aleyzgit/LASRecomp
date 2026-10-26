@@ -574,8 +574,8 @@ static std::string g_spoiler_seed;  // seed whose spoiler page is open
 // ---- the tab, in two columns (as the Controls tab's Configure inputs): Seeds and the seed option categories on the
 // left with a new seed's name, ID and Generate seed under them; the chosen category's rows (or the seed list, or a
 // seed's actions) on the right. Each category's rows are in their own function below.
-enum { CAT_SEEDS, CAT_GENERAL, CAT_GOAL, CAT_ITEMS, CAT_EXTRA, CAT_WORLD, CAT_ENEMIES, CAT_COMPANIONS, CAT_OTHER, N_CAT };
-static const char *const k_cat_name[N_CAT] = {"Seeds", "General", "Goal", "Items", "Extra checks", "World",
+enum { CAT_SEEDS, CAT_PRESETS, CAT_GENERAL, CAT_GOAL, CAT_ITEMS, CAT_EXTRA, CAT_WORLD, CAT_ENEMIES, CAT_COMPANIONS, CAT_OTHER, N_CAT };
+static const char *const k_cat_name[N_CAT] = {"Seeds", "Presets", "General", "Goal", "Items", "Extra checks", "World",
                                               "Enemies & bosses", "Companions", "Other"};
 static int g_cat = CAT_GENERAL;
 static bool g_in_right;            // the cursor is in the right column (last frame)
@@ -583,7 +583,7 @@ static int g_last_frame = -10;     // (a frame without this tab: the cursor star
 static std::string g_act_seed;     // the seed whose actions the right column shows ("": the seed list)
 static std::string g_focus_seed;   // (FOCUS_SEED: this seed's row)
 static bool g_confirm_delete;
-enum { FOCUS_NONE, FOCUS_CAT, FOCUS_RIGHT, FOCUS_SEED, FOCUS_DELETE, FOCUS_CANCEL, FOCUS_TRI };
+enum { FOCUS_NONE, FOCUS_CAT, FOCUS_RIGHT, FOCUS_SEED, FOCUS_DELETE, FOCUS_CANCEL, FOCUS_TRI, FOCUS_PRESET, FOCUS_SAVE_AS };
 static int g_focus;                // put the cursor on this row when it's drawn
 
 static void take_focus(int want) {
@@ -949,6 +949,310 @@ static void seed_summary(float scale) {
     ImGui::SetWindowFontScale(1.0f);
 }
 
+// ---- Presets: four built-in ones (difficulty options only, by option name) and the player's own (every option: the
+// options key, as rando_options, plus the two player settings on the tabs' pages). Applying one keeps the seed's name
+// and random part, and leaves one step of Undo.
+struct OptName { const char *name; bool GenOpts::*b; int GenOpts::*i; bool inv; };
+static const OptName kOptNames[] = {  // (names the built-in presets use; inv: the field stores "not")
+    {"start_sword", &GenOpts::no_start_sword, nullptr, true}, {"start_shield", &GenOpts::no_start_shield, nullptr, true},
+    {"start_ocarina", &GenOpts::no_start_ocarina, nullptr, true},
+    {"steal_without_sword", &GenOpts::steal_needs_sword, nullptr, true},
+    {"dungeon_items", nullptr, &GenOpts::dungeon_items}, {"keysanity", nullptr, &GenOpts::keysanity},
+    {"bomb_bag", &GenOpts::bomb_bag}, {"powder_bag", &GenOpts::powder_bag}, {"traps", nullptr, &GenOpts::traps},
+    {"seashells", nullptr, &GenOpts::seashells}, {"start_rupees", nullptr, &GenOpts::start_rupees},
+    {"bushes", &GenOpts::bushes}, {"digs", &GenOpts::digs}, {"shellsanity", &GenOpts::shellsanity},
+    {"apples", &GenOpts::apples}, {"pots", &GenOpts::pots}, {"shopsanity", nullptr, &GenOpts::shopsanity},
+    {"stealing", &GenOpts::no_stealing, nullptr, true}, {"trendsanity", &GenOpts::trendsanity},
+    {"fishing", &GenOpts::inc_fishing}, {"rapids", &GenOpts::inc_rapids}, {"dampe", &GenOpts::inc_dampe},
+    {"trade", &GenOpts::inc_trade}, {"blupees", &GenOpts::inc_blue},
+    {"entrance_dungeons", &GenOpts::shuffle_dungeons}, {"entrance_houses", nullptr, &GenOpts::entrances},
+    {"decoupled", &GenOpts::decoupled}, {"room_shuffle", nullptr, &GenOpts::room_shuffle},
+    {"shuffle_instruments", &GenOpts::shuffle_instruments}, {"open_mabe", &GenOpts::open_mabe},
+    {"randomize_enemies", &GenOpts::randomize_enemies}, {"enemy_mode", nullptr, &GenOpts::enemy_mode},
+    {"enemy_minibosses", &GenOpts::enemy_minibosses}, {"miniboss_freq", nullptr, &GenOpts::miniboss_freq},
+    {"boss_souls", &GenOpts::boss_souls}, {"miniboss_souls", &GenOpts::miniboss_souls}, {"no_buffs", &GenOpts::no_buffs},
+    // not on this branch yet (their entries below are skipped until a line is added here): "hints" (rando-hints),
+    // "chest_looks" + "key_rings" (rando-chests-keyrings), "rocks" (rando-rocksanity), "labyrinth" (rando-labyrinth)
+};
+static const OptName *opt_by_name(const char *n) {
+    for (const OptName &o : kOptNames) if (!strcmp(o.name, n)) return &o;
+    return nullptr;
+}
+
+struct PresetVal { const char *opt; int v; };
+struct Builtin { const char *name, *desc; std::vector<PresetVal> vals; };
+static const std::vector<Builtin> &builtins(void) {
+    // every row: Easy, Standard, Hard, Chaos. Taste and comfort options (music, cosmetics, environments, spoiler, race,
+    // companions, Hookshot anything, Triforce hunt, Fast songs, Boss cutscenes, Treat Tunics as Upgrades) are left alone.
+    static const struct { const char *opt; int v[4]; } t[] = {
+        {"start_sword", {1, 1, 1, 0}}, {"start_shield", {1, 1, 0, 0}}, {"start_ocarina", {1, 1, 1, 0}},
+        {"steal_without_sword", {1, 0, 0, 0}},
+        {"dungeon_items", {3, 0, 0, 0}}, {"keysanity", {0, 0, 2, 3}}, {"key_rings", {1, 0, 0, 0}},
+        {"bomb_bag", {0, 0, 1, 1}}, {"powder_bag", {0, 0, 1, 1}}, {"traps", {0, 1, 2, 3}}, {"seashells", {2, 2, 3, 5}},
+        {"start_rupees", {200, 0, 0, 0}}, {"hints", {1, 1, 1, 0}}, {"chest_looks", {1, 1, 0, 0}},
+        {"bushes", {0, 0, 0, 1}}, {"digs", {0, 0, 0, 1}}, {"rocks", {0, 0, 0, 1}}, {"shellsanity", {0, 0, 0, 1}},
+        {"apples", {0, 0, 0, 1}}, {"pots", {0, 0, 0, 1}}, {"shopsanity", {0, 0, 2, 2}}, {"stealing", {1, 1, 1, 0}},
+        {"trendsanity", {0, 0, 0, 1}}, {"fishing", {0, 0, 0, 1}}, {"rapids", {0, 0, 0, 1}}, {"dampe", {0, 0, 0, 1}},
+        {"trade", {0, 0, 0, 1}}, {"blupees", {0, 0, 0, 1}},
+        {"entrance_dungeons", {0, 0, 1, 1}}, {"entrance_houses", {0, 0, 2, 2}}, {"decoupled", {0, 0, 0, 1}},
+        {"room_shuffle", {0, 0, 2, 3}}, {"labyrinth", {0, 0, 0, 0}}, {"shuffle_instruments", {0, 0, 1, 1}},
+        {"open_mabe", {1, 0, 0, 0}}, {"randomize_enemies", {0, 0, 1, 1}}, {"enemy_mode", {0, 0, 0, 1}},
+        {"enemy_minibosses", {0, 0, 0, 1}}, {"miniboss_freq", {0, 0, 0, 1}},
+        {"boss_souls", {0, 0, 1, 1}}, {"miniboss_souls", {0, 0, 0, 1}}, {"no_buffs", {0, 0, 1, 1}},
+    };
+    static std::vector<Builtin> b = {
+        {"Easy", "Dungeon items from the start, no traps, Mabe Village open, 200 rupees.", {}},
+        {"Standard", "The default options, with hints and chest looks.", {}},
+        {"Hard", "Keysanity, shuffled entrances, rooms and instruments, random enemies, boss souls.", {}},
+        {"Chaos", "Every extra check and every shuffle.", {}},
+    };
+    if (b[0].vals.empty())
+        for (auto &r : t) for (int k = 0; k < 4; k++) b[k].vals.push_back({r.opt, r.v[k]});
+    return b;
+}
+
+static void builtin_apply(const Builtin &p, GenOpts &o) {
+    for (const PresetVal &v : p.vals) {
+        const OptName *n = opt_by_name(v.opt);
+        if (!n) continue;  // (an option this build doesn't have)
+        if (n->b) o.*(n->b) = n->inv ? !v.v : v.v != 0;
+        else o.*(n->i) = v.v;
+    }
+}
+
+static bool builtin_matches(const Builtin &p, const GenOpts &o) {
+    for (const PresetVal &v : p.vals) {
+        const OptName *n = opt_by_name(v.opt);
+        if (!n) continue;
+        if (n->b ? (n->inv ? !(o.*(n->b)) : o.*(n->b)) != (v.v != 0) : o.*(n->i) != v.v) return false;
+    }
+    return true;
+}
+
+struct UserPreset { std::string name, key; int tracker = -1, letters = -1; };
+static std::vector<UserPreset> user_presets(void) {
+    std::vector<UserPreset> v;
+    for (int i = 0; i < RANDO_PRESETS_MAX; i++) {
+        const char *s = g_settings.rando_presets[i], *a = strchr(s, '|');
+        if (!s[0] || !a) continue;
+        UserPreset p;
+        p.name.assign(s, a - s);
+        const char *b = strchr(a + 1, '|');
+        p.key.assign(a + 1, b ? (size_t)(b - a - 1) : strlen(a + 1));
+        if (b && isdigit((unsigned char)b[1]) && isdigit((unsigned char)b[2])) p.tracker = b[1] - '0', p.letters = b[2] - '0';
+        v.push_back(p);
+    }
+    return v;
+}
+
+static void user_presets_store(const std::vector<UserPreset> &v) {
+    memset(g_settings.rando_presets, 0, sizeof g_settings.rando_presets);
+    for (size_t i = 0; i < v.size() && i < RANDO_PRESETS_MAX; i++) {
+        char t[3] = "";
+        if (v[i].tracker >= 0) snprintf(t, sizeof t, "%d%d", v[i].tracker, v[i].letters);
+        snprintf(g_settings.rando_presets[i], sizeof g_settings.rando_presets[i], "%s|%s|%s", v[i].name.c_str(),
+                 v[i].key.c_str(), t);
+    }
+    settings_save();
+}
+
+static UserPreset current_as_preset(const char *name) {
+    UserPreset p;
+    p.name = name;
+    char k[48];
+    opts_key(g_opts, k, sizeof k);
+    p.key = k;
+    p.tracker = g_settings.tracker ? 1 : 0;
+    p.letters = g_settings.chaos_letters;
+    return p;
+}
+
+static bool user_matches(const UserPreset &p) {
+    char k[48];
+    opts_key(g_opts, k, sizeof k);
+    return p.key == k && (p.tracker < 0 || (p.tracker == (g_settings.tracker ? 1 : 0) && p.letters == g_settings.chaos_letters));
+}
+
+// a preset name: printable, no '|' (the line's separator), up to 32 characters, no spaces at the ends
+static std::string clean_preset_name(const char *in) {
+    std::string n;
+    for (const char *p = in; *p && n.size() < 32; p++)
+        if ((unsigned char)*p >= 0x20 && *p != '|' && *p != 0x7f) n += *p;
+    while (!n.empty() && n.back() == ' ') n.pop_back();
+    while (!n.empty() && n[0] == ' ') n.erase(0, 1);
+    return n;
+}
+
+// the one step of Undo: the options before the last preset, shown while the options are still the preset's
+static struct { bool on; GenOpts opts; bool tracker; int letters; char after[48]; bool tracker_after; int letters_after; } g_undo;
+
+static void undo_mark(void) {
+    g_undo.on = true;
+    g_undo.opts = g_opts;
+    g_undo.tracker = g_settings.tracker, g_undo.letters = g_settings.chaos_letters;
+}
+static void undo_mark_after(void) {
+    opts_key(g_opts, g_undo.after, sizeof g_undo.after);
+    g_undo.tracker_after = g_settings.tracker, g_undo.letters_after = g_settings.chaos_letters;
+}
+static bool undo_available(void) {
+    if (!g_undo.on) return false;
+    char k[48];
+    opts_key(g_opts, k, sizeof k);
+    return !strcmp(k, g_undo.after) && g_undo.tracker_after == g_settings.tracker && g_undo.letters_after == g_settings.chaos_letters;
+}
+
+static void set_opts_keep_seed(const GenOpts &t) {  // (the seed's name and random part stay)
+    GenOpts n = t;
+    strlcpy(n.seed, g_opts.seed, sizeof n.seed);
+    n.rng = g_opts.rng;
+    g_opts = n;
+    tri_mode_from_opts();
+}
+
+static void apply_builtin(const Builtin &p) {
+    undo_mark();
+    GenOpts t = g_opts;
+    builtin_apply(p, t);
+    set_opts_keep_seed(t);
+    undo_mark_after();
+    LOG("[rando] preset %s\n", p.name);
+}
+
+static bool apply_user(const UserPreset &p) {
+    GenOpts t = g_opts;
+    std::string err = seed_id_decode(p.key.c_str(), t);
+    if (!err.empty()) { LOG("[rando] preset %s not loaded: %s\n", p.name.c_str(), err.c_str()); return false; }
+    undo_mark();
+    set_opts_keep_seed(t);
+    bool save = false;
+    if (p.tracker >= 0 && (g_settings.tracker ? 1 : 0) != p.tracker) g_settings.tracker = p.tracker != 0, save = true;
+    if (p.letters >= 0 && p.letters <= CHAOS_LETTERS_MAP && g_settings.chaos_letters != p.letters) g_settings.chaos_letters = p.letters, save = true;
+    if (save) settings_save();
+    undo_mark_after();
+    LOG("[rando] preset %s (yours)\n", p.name.c_str());
+    return true;
+}
+
+static void undo_preset(void) {
+    set_opts_keep_seed(g_undo.opts);
+    if (g_settings.tracker != g_undo.tracker || g_settings.chaos_letters != g_undo.letters) {
+        g_settings.tracker = g_undo.tracker, g_settings.chaos_letters = g_undo.letters;
+        settings_save();
+    }
+    g_undo.on = false;
+}
+
+// the preset the options match now ("" none): one of the player's (every option) first, else a built-in
+static std::string current_preset(void) {
+    for (const UserPreset &p : user_presets()) if (user_matches(p)) return p.name;
+    for (const Builtin &b : builtins()) if (builtin_matches(b, g_opts)) return b.name;
+    return "";
+}
+
+static std::string g_act_preset;       // the player's preset whose actions the right column shows ("": the list)
+static std::string g_focus_preset;     // (FOCUS_PRESET: this preset's row)
+static std::string g_replace_preset;   // Save as: a preset of this name exists, replace it?
+static bool g_preset_confirm_delete;
+static std::string g_preset_msg;       // (a name already taken)
+
+static void rows_presets(void) {
+    std::vector<UserPreset> mine = user_presets();
+    if (!g_act_preset.empty()) {  // one of the player's: its actions
+        int at = -1;
+        for (size_t i = 0; i < mine.size(); i++) if (mine[i].name == g_act_preset) at = (int)i;
+        if (at < 0) { g_act_preset.clear(), g_preset_confirm_delete = false; return; }
+        if (g_preset_confirm_delete) {
+            ImGui::TextColored(plastic_col(plastic_theme().warn), "Delete this preset?");
+            ImGui::Spacing();
+            opt_warn_next();
+            if (opt_action("Delete preset", "", NULL)) {
+                mine.erase(mine.begin() + at);
+                user_presets_store(mine);
+                g_act_preset.clear(), g_preset_confirm_delete = false, g_focus = FOCUS_RIGHT;
+                return;
+            }
+            if (opt_action("Cancel", "", NULL)) g_preset_confirm_delete = false, g_focus = FOCUS_DELETE;
+            take_focus(FOCUS_CANCEL);
+            return;
+        }
+        bool cur = user_matches(mine[at]);
+        if (cur) opt_disable_next();
+        if (opt_action("Use", cur ? "Current" : "", NULL)) apply_user(mine[at]);
+        static char rename_buf[40];
+        if (!opt_text_editing("Rename")) strlcpy(rename_buf, mine[at].name.c_str(), sizeof rename_buf);
+        if (opt_text("Rename", rename_buf, sizeof rename_buf, "", NULL)) {
+            std::string to = clean_preset_name(rename_buf);
+            bool taken = false;
+            for (const UserPreset &p : mine) if (p.name == to && p.name != mine[at].name) taken = true;
+            for (const Builtin &b : builtins()) if (to == b.name) taken = true;
+            if (taken) g_preset_msg = "A preset named \"" + to + "\" already exists.";
+            else if (!to.empty() && to != mine[at].name) {
+                mine[at].name = to, g_act_preset = to, g_preset_msg.clear();
+                user_presets_store(mine);
+            }
+        }
+        if (cur) opt_disable_next();
+        if (opt_action("Update to current", "", "Saves the options set now into this preset.")) {
+            mine[at] = current_as_preset(mine[at].name.c_str());
+            user_presets_store(mine);
+        }
+        if (opt_action("Delete", "", NULL)) g_preset_confirm_delete = true, g_focus = FOCUS_CANCEL;
+        take_focus(FOCUS_DELETE);
+        if (!g_preset_msg.empty()) { opt_disable_next(); opt_action(g_preset_msg.c_str(), "", NULL, false); }
+        return;
+    }
+    if (!g_replace_preset.empty()) {  // Save as: the name exists
+        ImGui::TextColored(plastic_col(plastic_theme().warn), "Replace \"%s\"?", g_replace_preset.c_str());
+        ImGui::Spacing();
+        if (opt_action("Replace", "", NULL)) {
+            for (UserPreset &p : mine) if (p.name == g_replace_preset) p = current_as_preset(p.name.c_str());
+            user_presets_store(mine);
+            g_focus_preset = g_replace_preset, g_replace_preset.clear(), g_focus = FOCUS_PRESET;
+            return;
+        }
+        if (opt_action("Cancel", "", NULL)) g_replace_preset.clear(), g_focus = FOCUS_SAVE_AS;
+        take_focus(FOCUS_CANCEL);
+        return;
+    }
+    std::string cur = current_preset();
+    for (const Builtin &b : builtins())
+        if (opt_action(b.name, cur == b.name ? "Current" : "", b.desc, false)) apply_builtin(b);
+    if (undo_available() && opt_action("Undo", "", "Puts back the options you had before.", false)) {
+        undo_preset();
+        g_focus = FOCUS_RIGHT;
+    }
+    opt_section("Yours");
+    static char name_buf[40];
+    bool full = mine.size() >= RANDO_PRESETS_MAX;
+    if (full) opt_disable_next();
+    if (opt_text("Save current as", name_buf, sizeof name_buf, "", full ? "Up to 20 presets. Delete one first." :
+                 "Saves every option set now under a name.")) {
+        std::string n = clean_preset_name(name_buf);
+        name_buf[0] = 0;
+        bool builtin = false;
+        for (const Builtin &b : builtins()) if (n == b.name) builtin = true;
+        bool exists = false;
+        for (const UserPreset &p : mine) if (p.name == n) exists = true;
+        if (builtin) g_preset_msg = "\"" + n + "\" is a built-in preset.";
+        else if (exists) g_replace_preset = n, g_focus = FOCUS_CANCEL, g_preset_msg.clear();
+        else if (!n.empty()) {
+            mine.push_back(current_as_preset(n.c_str()));
+            user_presets_store(mine);
+            g_preset_msg.clear();
+            LOG("[rando] preset saved: %s\n", n.c_str());
+        }
+    }
+    take_focus(FOCUS_SAVE_AS);
+    if (!g_preset_msg.empty()) { opt_disable_next(); opt_action(g_preset_msg.c_str(), "", NULL, false); }
+    for (const UserPreset &p : mine) {
+        if (opt_action(p.name.c_str(), cur == p.name ? "Current" : "", "Use, rename, update or delete it.", false))
+            g_act_preset = p.name, g_preset_confirm_delete = false, g_preset_msg.clear(), g_focus = FOCUS_RIGHT;
+        if (g_focus == FOCUS_PRESET && p.name == g_focus_preset) take_focus(FOCUS_PRESET);
+    }
+    if (g_focus == FOCUS_PRESET) g_focus = FOCUS_RIGHT;
+}
+
 // ---- Seeds: the seed list, or a seed's actions
 static void rows_seeds(const char *active) {
     if (!g_act_seed.empty()) {
@@ -1066,7 +1370,10 @@ extern "C" void rando_tab_draw(float scale) {
     poll_generation();
 
     int frame = ImGui::GetFrameCount();
-    if (frame - g_last_frame > 1) g_focus = FOCUS_NONE, g_in_right = false, g_confirm_delete = false;  // (back on the tab)
+    if (frame - g_last_frame > 1) {  // (back on the tab)
+        g_focus = FOCUS_NONE, g_in_right = false, g_confirm_delete = false;
+        g_preset_confirm_delete = false, g_replace_preset.clear(), g_preset_msg.clear();
+    }
     g_last_frame = frame;
     // (test) LARECOMP_RANDO_CAT=<category name, e.g. extra checks>[:right]: that category shown (right: the cursor on its
     // first row); LARECOMP_RANDO_SEED_OPEN=<seed>: that seed's actions; LARECOMP_TRI_RIGHT=1: the Triforce hunt's Custom
@@ -1090,7 +1397,11 @@ extern "C" void rando_tab_draw(float scale) {
     if (g_in_right && !busy && !ui_text_busy() && !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) &&
         (opt_pressed_back() || (opt_pressed_left() && !opt_focused_lr()))) {
         g_back_frame = frame;
-        if (g_confirm_delete) g_confirm_delete = false, g_focus = FOCUS_DELETE;
+        if (g_cat == CAT_PRESETS && g_preset_confirm_delete) g_preset_confirm_delete = false, g_focus = FOCUS_DELETE;
+        else if (g_cat == CAT_PRESETS && !g_replace_preset.empty()) g_replace_preset.clear(), g_focus = FOCUS_SAVE_AS;
+        else if (g_cat == CAT_PRESETS && !g_act_preset.empty())
+            g_focus_preset = g_act_preset, g_act_preset.clear(), g_preset_msg.clear(), g_focus = FOCUS_PRESET;
+        else if (g_confirm_delete) g_confirm_delete = false, g_focus = FOCUS_DELETE;
         else if (!g_act_seed.empty()) g_focus_seed = g_act_seed, g_act_seed.clear(), g_focus = FOCUS_SEED;
         else g_focus = FOCUS_CAT;
     }
@@ -1101,18 +1412,24 @@ extern "C" void rando_tab_draw(float scale) {
 
     opt_begin("##rando", scale);
     opt_compact();
+    std::string cur_preset = current_preset();  // (Seeds and Presets share a line: half rows, a long name cut short)
+    if (cur_preset.size() > 12) cur_preset = cur_preset.substr(0, 10) + "...";
     for (int c = 0; c < N_CAT; c++) {
+        if (c == CAT_SEEDS) opt_pair_next();
         if (g_in_right && c == g_cat) opt_mark_next();
         char n[16];
         snprintf(n, sizeof n, "%d", (int)g_seeds.size());
-        bool open = opt_link(k_cat_name[c], NULL, c == CAT_SEEDS ? n : NULL);
+        bool open = opt_link(k_cat_name[c], NULL, c == CAT_SEEDS ? n : c == CAT_PRESETS ? cur_preset.c_str() : NULL);
         bool clicked = ImGui::IsItemClicked();
         if (c == g_cat) take_focus(FOCUS_CAT);
         bool pick = (opt_item_nav_focused() && g_cat != c) || open;  // (moving down the list shows each)
-        if (pick && g_cat != c) g_act_seed.clear(), g_confirm_delete = false;
+        if (pick && g_cat != c)
+            g_act_seed.clear(), g_confirm_delete = false, g_act_preset.clear(), g_preset_confirm_delete = false,
+            g_replace_preset.clear(), g_preset_msg.clear();
         if (pick) g_cat = c;
         if (open && !clicked) g_focus = FOCUS_RIGHT;  // (A / Right: the cursor goes to its rows)
         if (open && c == CAT_SEEDS) g_act_seed.clear(), g_confirm_delete = false;
+        if (open && c == CAT_PRESETS) g_act_preset.clear(), g_preset_confirm_delete = false, g_replace_preset.clear();
     }
 
     // ---- a new seed
@@ -1156,10 +1473,14 @@ extern "C" void rando_tab_draw(float scale) {
     if (summary) seed_summary(scale);
     else {
         if (g_cat == CAT_SEEDS && !g_act_seed.empty()) seed_header(active);
-        else opt_section(k_cat_name[g_cat]);
+        else if (g_cat == CAT_PRESETS && !g_act_preset.empty()) {
+            ImGui::TextColored(plastic_col(plastic_theme().title), "%s", g_act_preset.c_str());
+            ImGui::Spacing();
+        } else opt_section(k_cat_name[g_cat]);
         opt_list_begin();
         if (g_focus == FOCUS_RIGHT) g_focus = FOCUS_NONE, opt_focus_next_row();
         if (g_cat == CAT_SEEDS) rows_seeds(active);
+        else if (g_cat == CAT_PRESETS) rows_presets();
         else cat_rows(g_cat, scale);
         opt_list_end();
         opt_desc_text();

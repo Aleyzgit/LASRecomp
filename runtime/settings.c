@@ -210,6 +210,10 @@ void settings_load(void) {
         else if (!strcmp(key, "timer_position")) g_settings.timer_pos = !strcmp(val, "right") ? TIMER_POS_RIGHT : TIMER_POS_LEFT;
         else if (!strcmp(key, "livesplit")) g_settings.livesplit = atoi(val) != 0;
         else if (!strcmp(key, "rando_options")) strlcpy(g_settings.rando_options, val, sizeof g_settings.rando_options);
+        else if (!strcmp(key, "rando_preset")) {  // (in order; past the cap: dropped)
+            for (int i = 0; i < RANDO_PRESETS_MAX; i++)
+                if (!g_settings.rando_presets[i][0]) { strlcpy(g_settings.rando_presets[i], val, sizeof g_settings.rando_presets[i]); break; }
+        }
         else if (!strcmp(key, "livesplit_host")) strlcpy(g_settings.livesplit_host, val, sizeof g_settings.livesplit_host);
         else if (!strcmp(key, "tunic")) col_parse(&g_settings.tunic, val);  // (colour rows: runtime/cosmetic_colour.c)
         else if (!strcmp(key, "hearts")) col_parse(&g_settings.hearts, val);
@@ -296,5 +300,7 @@ void settings_save(void) {
     bind_settings_save(f);
     fprintf(f, "rando_seed = %s\n", g_settings.rando_seed);
     if (g_settings.rando_options[0]) fprintf(f, "rando_options = %s\n", g_settings.rando_options);
+    for (int i = 0; i < RANDO_PRESETS_MAX; i++)
+        if (g_settings.rando_presets[i][0]) fprintf(f, "rando_preset = %s\n", g_settings.rando_presets[i]);
     fclose(f);
 }
