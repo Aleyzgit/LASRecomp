@@ -15,9 +15,11 @@ APP="build/LAS Recomp.app"
 DEPS=$PWD/build/deps
 BUNDLE_ID=$(sed -n 's/^#define RT_BUNDLE_ID "\(.*\)"/\1/p' runtime/paths.h)
 VERSION=$(sed -n 's/^#define LARECOMP_VERSION "\(.*\)"/\1/p' runtime/ui/launcher.mm)
-# CFBundleShortVersionString must be digits: beta_<n> -> 0.9.<n>, beta_<n>.<m> -> 0.9.<n>.<m>, v1.2.3 -> 1.2.3
+# CFBundleShortVersionString must be digits, and is the semantic version under the release tag: beta_<n> -> 0.<n>.0,
+# beta_<n>.<m> -> 0.<n>.<m>, v0.6.0 -> 0.6.0, v1.2.3 -> 1.2.3
 case "$VERSION" in
-    beta_*) VERSION="0.9.${VERSION#beta_}" ;;
+    beta_*.*) VERSION="0.${VERSION#beta_}" ;;
+    beta_*) VERSION="0.${VERSION#beta_}.0" ;;
     v*) VERSION="${VERSION#v}" ;;
     test-*) VERSION="0.0.1" ;;  # (a test build: a valid bundle version, below every release)
 esac
@@ -137,4 +139,10 @@ while read -r f; do [ "$f" = "$C/MacOS/lasrecomp" ] || codesign -f -s - "$f" 2>/
 codesign -f -s - "$APP"
 codesign --verify --strict "$APP"
 if find "$APP" -name 'lasgame*' | grep . >/dev/null; then echo "game code inside $APP"; exit 1; fi
+# no path of this machine inside (configure lines, debug paths, frozen Python's file names). Not on CI: its paths
+# name no one, and prebuilt wheels hold the CI runner's own (/Users/runner/...)
+if [ "${CI:-}" != true ]; then
+    case "$(basename "$HOME")" in runner|runneradmin) home=() ;; *) home=(-e "$HOME") ;; esac
+    if grep -rlaF -e "$PWD" ${home[@]+"${home[@]}"} "$APP"; then echo "^ these hold a path of this machine"; exit 1; fi
+fi
 echo "$APP: $(du -sh "$APP" | cut -f1), $(ls "$C/Frameworks" | wc -l | tr -d ' ') dylibs, macOS $MIN+"
