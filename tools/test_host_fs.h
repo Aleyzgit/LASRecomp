@@ -43,6 +43,7 @@ static ssize_t test_write(int fd, const void *p, size_t n, off_t off) {
 const char *g_romfs_dir;
 int rt_romfs_files;
 uint64_t rt_romfs_bytes;
+int rt_romfs_missing;
 const char *rando_seed_dir(void) { return NULL; }
 bool romfs_layout(const char *p, RomfsLayout *l, char *why, size_t n) { abort(); }
 bool rando_romfs_override(const char *p, char *out, size_t n) { abort(); }
