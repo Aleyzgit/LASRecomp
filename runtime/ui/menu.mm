@@ -236,6 +236,10 @@ bool menu_handle_event(const SDL_Event *e) {
             q.key = ImGuiKey_GamepadLStickUp; q.value = v < -0.3f ? -v : 0; push(q);
             q.key = ImGuiKey_GamepadLStickDown; q.value = v > 0.3f ? v : 0; push(q);
             break;
+        case SDL_GAMEPAD_AXIS_RIGHTY:  // (scrolls a right column of plain text: option_rows.mm)
+            q.key = ImGuiKey_GamepadRStickUp; q.value = v < 0 ? -v : 0; push(q);
+            q.key = ImGuiKey_GamepadRStickDown; q.value = v > 0 ? v : 0; push(q);
+            break;
         case SDL_GAMEPAD_AXIS_LEFT_TRIGGER: q.key = ImGuiKey_GamepadL2; q.value = v; push(q); break;
         case SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: q.key = ImGuiKey_GamepadR2; q.value = v; push(q); break;
         default: break;

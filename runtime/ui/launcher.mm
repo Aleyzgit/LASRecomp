@@ -1070,6 +1070,9 @@ static bool launcher_pad_event(const SDL_Event &e) {
         } else if (e.gaxis.axis == SDL_GAMEPAD_AXIS_LEFTY) {
             io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickUp, v < -0.3f, v < -0.3f ? -v : 0);
             io.AddKeyAnalogEvent(ImGuiKey_GamepadLStickDown, v > 0.3f, v > 0.3f ? v : 0);
+        } else if (e.gaxis.axis == SDL_GAMEPAD_AXIS_RIGHTY) {  // (scrolls a right column of plain text: option_rows.mm)
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickUp, v < -0.1f, v < 0 ? -v : 0);
+            io.AddKeyAnalogEvent(ImGuiKey_GamepadRStickDown, v > 0.1f, v > 0 ? v : 0);
         }
         return true;
     }

@@ -398,6 +398,28 @@ static void left_end(void) {
     else if (g_desc_shown.empty()) g_desc_shown = g_desc_first;
 }
 
+// The right stick scrolls the right pane while it only shows something to read (a description, the Randomizer's
+// summary) and is longer than the pane; a pane with rows to pick (this frame) keeps the stick still. Speed grows with
+// the tilt, past a small dead zone. Called at the pane's end, inside its child window.
+static bool any_nav_items(ImGuiWindow *w) {
+    if (w->DC.NavLayersActiveMaskNext & 1) return true;
+    for (ImGuiWindow *c : w->DC.ChildWindows)
+        if (c->Active && any_nav_items(c)) return true;
+    return false;
+}
+static void stick_scroll(void) {
+    ImGuiWindow *w = ImGui::GetCurrentWindow();
+    if (w->ScrollMax.y <= 0 || any_nav_items(w)) return;
+    float v = ImGui::GetKeyData(ImGuiKey_GamepadRStickDown)->AnalogValue - ImGui::GetKeyData(ImGuiKey_GamepadRStickUp)->AnalogValue;
+    const float dead = 0.18f;
+    float a = fabsf(v);
+    if (a <= dead) return;
+    float t = fminf((a - dead) / (1 - dead), 1.0f);
+    float speed = ImGui::GetFontSize() * (2.0f + 26.0f * t * t);  // (pixels a second: a slow crawl to a quick run)
+    float dy = speed * ImGui::GetIO().DeltaTime * (v > 0 ? 1 : -1);
+    ImGui::SetScrollY(w, ImClamp(w->Scroll.y + dy, 0.0f, w->ScrollMax.y));
+}
+
 // the right pane's child window, in a well beside the left one
 static void right_begin(const char *id, ImGuiWindowFlags flags) {
     ImGui::SameLine(0, 0);
@@ -431,6 +453,7 @@ void opt_end(void) {
     left_end();
     right_begin("##desc", ImGuiWindowFlags_NoNav);
     opt_desc_text();
+    stick_scroll();
     ImGui::EndChild();
     ImGui::PopID();
 }
@@ -448,6 +471,7 @@ void opt_split(void) {
 
 void opt_split_end(void) {
     ImGui::PopStyleVar();
+    stick_scroll();
     ImGui::EndChild();
     ImGui::PopID();
 }
