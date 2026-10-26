@@ -15,6 +15,7 @@ static char g_line[512];   // the first fatal line (FATAL message / "signal 11 a
 static uint64_t g_pc;      // a crash's host pc (0: a FATAL)
 int rt_romfs_files = -1;   // the game's own RomFS files (runtime/services/fs.c; -1: not read yet)
 uint64_t rt_romfs_bytes;   // their sizes summed (issue #391: one damaged file, every file there)
+int rt_romfs_missing;      // the game's files not found by name and size (#391: a renamed file keeps count and bytes)
 enum { ROMFS_FILES = 3836 };  // (every supported version: runtime/ui/launcher.mm counts the same)
 
 void rt_fatal_msg(const char *fmt, ...) {
@@ -85,8 +86,9 @@ void rt_crash_explain(char *out, size_t n, const char *log_path) {
         snprintf(head, sizeof head, "No font for the game's text");
         snprintf(what, sizeof what, "Import the Switch fonts in Settings (Game font), or reinstall LAS Recomp - it "
                  "comes with a font of its own.");
-    } else if (rt_romfs_files >= ROMFS_FILES && game_romfs_bytes(game_version()) &&
-               rt_romfs_bytes != game_romfs_bytes(game_version())) {
+    } else if (rt_romfs_files >= ROMFS_FILES &&
+               (rt_romfs_missing > 0 ||
+                (game_romfs_bytes(game_version()) && rt_romfs_bytes != game_romfs_bytes(game_version())))) {
         snprintf(head, sizeof head, "Your game files are damaged or changed");
         snprintf(what, sizeof what, "All of the game's files are there, but some don't match the game, and the game "
                  "stopped when it needed one of them. Copy your game files again, then set them up again on the start "
