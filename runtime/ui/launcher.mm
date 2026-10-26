@@ -226,6 +226,7 @@ static int count_files(const std::string &dir, int depth = 0, uint64_t *bytes = 
 // files set up, deleted)
 static int g_romfs_count = -1;
 static uint64_t g_romfs_bytes, g_romfs_want;  // (want: this version's total, 0 unknown)
+static int g_romfs_missing;  // the game's files not there by name and size (a renamed or moved file: same count)
 static std::atomic<bool> g_build_cache_changed{true};
 static std::atomic<int> g_files_changes{0};  // (the version label on the start screen is read again)
 static void game_files_changed(void) { g_romfs_count = -1; g_build_cache_changed = true; ++g_files_changes; }
@@ -256,6 +257,7 @@ static std::string check_copied_files(const std::string &root) {
         RomfsCheckWalk check = {game_romfs_check_begin(v), root.size() + strlen("/romfs/"), 0, root.c_str(), 0};
         g_romfs_count = count_files(root + "/romfs", 0, &g_romfs_bytes, &check);
         int missing = game_romfs_check_end(check.check);
+        g_romfs_missing = missing;
         if (check.copies)
             fprintf(stderr, "[launcher] romfs: %d %s of the game code at the root, ignored\n", check.copies,
                     check.copies == 1 ? "copy" : "copies");
@@ -271,10 +273,11 @@ static std::string check_copied_files(const std::string &root) {
     return "";
 }
 
-// Every file there, but not the game's sizes: a damaged or changed file (issue #391). Playable, so not a
-// check_game_files() problem: the start screen shows it beside "ready".
+// Every file there, but not all of them the game's (name and size) or not the game's sizes: a damaged, changed,
+// renamed or moved file (issue #391). Playable, so not a check_game_files() problem: the start screen shows it beside
+// "ready".
 static bool files_changed(const std::string &root) {
-    return check_copied_files(root).empty() && g_romfs_want && g_romfs_bytes != g_romfs_want;
+    return check_copied_files(root).empty() && (g_romfs_missing > 0 || (g_romfs_want && g_romfs_bytes != g_romfs_want));
 }
 static const char *const CHANGED_HEAD = "Game files damaged or changed";
 static const char *const CHANGED_HINT = "Copy your game files again, then choose that folder and set them up again.";
