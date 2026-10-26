@@ -137,4 +137,6 @@ while read -r f; do [ "$f" = "$C/MacOS/lasrecomp" ] || codesign -f -s - "$f" 2>/
 codesign -f -s - "$APP"
 codesign --verify --strict "$APP"
 if find "$APP" -name 'lasgame*' | grep . >/dev/null; then echo "game code inside $APP"; exit 1; fi
+# no path of this machine inside (configure lines, debug paths, frozen Python's file names)
+if grep -rlaF -e "$HOME" -e "$PWD" "$APP"; then echo "^ these hold a path of this machine"; exit 1; fi
 echo "$APP: $(du -sh "$APP" | cut -f1), $(ls "$C/Frameworks" | wc -l | tr -d ' ') dylibs, macOS $MIN+"
