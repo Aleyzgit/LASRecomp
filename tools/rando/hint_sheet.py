@@ -512,7 +512,8 @@ def place_phrase(step, dungeon_of, entered_via):
         if lv in LEVEL_DUNGEON:
             return 'in a pot ' + dungeon(dungeon_of.get(loc, LEVEL_DUNGEON[lv]))
         return f'in a pot in {_words(lv)}' + (f' ({area})' if area else '')
-    if loc.startswith(('bush-', 'dig-', 'apple-tree-')):
+    rock = re.match(r'rock-\d\d[A-P]-', loc)  # (rocksanity; not LAS's rock-maze)
+    if loc.startswith(('bush-', 'dig-', 'apple-tree-')) or rock:
         lm = step.get('landmark')
         if lm and lm.startswith(GENERIC) and area:
             lm += f' in {area}'
@@ -520,6 +521,8 @@ def place_phrase(step, dungeon_of, entered_via):
             return f'under a bush by {lm}' if lm else f'under a bush in {area or "the wilds"}'
         if loc.startswith('apple-tree-'):  # (Applesanity, tools/rando/apple_trees.py)
             return f'in an apple tree by {lm}' if lm else f'in an apple tree in {area or "the wilds"}'
+        if rock:
+            return f'under a rock by {lm}' if lm else f'under a rock in {area or "the wilds"}'
         return f'buried near {lm}' if lm else f'buried in {area or "the ground"}'
     if loc.endswith('-dig'):
         return f'buried in {area or "the ground"}'
@@ -582,6 +585,8 @@ def place_parts(step, dungeon_of, names, lang):
         return area, det('bush')
     if loc.startswith('apple-tree-'):
         return area, det('apple')
+    if re.match(r'rock-\d\d[A-P]-', loc):
+        return area, det('rock')
     if loc.startswith('dig-') or loc.endswith('-dig'):
         return area, det('buried')
     for prefix, label in (('shop-', 'ToolShop'), ('trendy-prize', 'GameShop'), ('fishing-', 'FishingPond'),
@@ -814,11 +819,14 @@ def apply(out_dir, romfs, settings, ent=None, logic_defs=None):
             event_tools.addEntryPoint(flow.flowchart, n)
             event_tools.createActionChain(flow.flowchart, n, [('Dialog', 'Show', {'message': f'System:{n}'})])
     event_tools.writeFlow(cp, flow)
-    if any(s['loc'].startswith(('bush-', 'dig-', 'apple-tree-')) for s in steps_):  # (their nearest landmark)
+    if any(re.match(r'bush-|dig-|apple-tree-|rock-\d\d[A-P]-', s['loc']) for s in steps_):  # (their nearest landmark)
         from RandomizerCore.Tools import leb
         import bushes
+        import rocks
         marks = landmarks(romfs, leb)
         bush_tile = {bushes.location_name(b): (b['room'], b['tile']) for b in bushes.scan(romfs, leb, pits=True)}
+        if any(re.match(r'rock-\d\d[A-P]-', s['loc']) for s in steps_):
+            bush_tile.update({rocks.location_name(r): (r['room'], r['tile']) for r in rocks.scan(romfs, leb)})
         for st in steps_:
             m = re.match(r'^dig-(\d\d[A-P])-(\d+)$', st['loc'])
             spot = (m.group(1), int(m.group(2))) if m else bush_tile.get(st['loc'])
