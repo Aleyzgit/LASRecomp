@@ -12,6 +12,7 @@
 #include "imgui.h"
 #include "option_rows.h"
 #include "osk.h"
+#include "plastic.h"
 #include "warp_data.h"
 
 extern "C" {
@@ -123,7 +124,7 @@ extern "C" bool warp_tab_draw(float scale) {
     for (int k = 0; k < na; k++) area_ok |= areas[k].first == g_area;
     if (!area_ok) g_area = na ? areas[0].first : -1;
 
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "Warp");
+    ImGui::TextColored(plastic_col(plastic_theme().title), "Warp");
     ImGui::SameLine();
     if (avail) ImGui::TextDisabled("   Link is in: %s", *cur ? cur : "?");
     else ImGui::TextDisabled("   Load a save and get into the game to warp.");

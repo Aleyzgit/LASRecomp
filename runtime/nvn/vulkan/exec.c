@@ -6868,6 +6868,11 @@ static VkImageView post_process(VkCommandBuffer cb, TexBackend *b, float fx, flo
     return v;
 }
 
+// The game image as drawn into the window this frame (its view, the uv rect shown): NULL until vk_present_draw
+// (device.c vk_frame_begin clears it)
+VkImageView g_vk_scene_view;
+float g_vk_scene_uv[4];
+
 // Inside the window image's rendering (device.c vk_frame_begin): the game image into (vx, vy, vw, vh).
 void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, float vw, float vh, const float pv[8]) {
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
@@ -6880,6 +6885,8 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     memcpy(pvc, pv, sizeof pvc);
     if (!upscaled) { pvc[4] *= fx; pvc[5] *= fy; pvc[6] *= fx; pvc[7] *= fy; }
     pv = pvc;
+    g_vk_scene_view = src;  // (the open menu's glare guard reads it: runtime/ui/plastic.mm)
+    memcpy(g_vk_scene_uv, pv + 4, sizeof g_vk_scene_uv);
     VkPipeline p = present_pipeline(g_vk.sc_format);
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
