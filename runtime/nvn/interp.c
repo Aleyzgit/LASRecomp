@@ -28,6 +28,13 @@
 //   LARECOMP_INTERP_LOG_CUTS=1       log each frame cut and why
 //   LARECOMP_INTERP_SNAP=elem        a jumping buffer snaps per element (default: the whole buffer shows this frame)
 //   LARECOMP_INTERP_TOGGLE=0         blend values that alternate every frame too (default: they keep this frame's value)
+//   LARECOMP_INTERP_ROT=0            rotations blend element-wise (default: along the arc, rot_plan)
+//   LARECOMP_INTERP_ROT_SWITCH=<deg> a turn past this in one frame switches half-way (default 100)
+//   LARECOMP_INTERP_HALFWAY=0        switched values (whole numbers, discontinuities) show this frame's at once
+//   LARECOMP_INTERP_UNIFY=0          draws reading the same uniforms decide apart (default: one decision per buffer)
+//   LARECOMP_INTERP_ORDER_CHECK=0    pairs by occurrence (more than 64 draws of a key) unchecked
+//   LARECOMP_INTERP_GEO_COPY=0       replays read the per-frame geometry in place (renderer.m iv_geometry)
+//   research: LARECOMP_INTERP_LOG_SPLITS=1 logs each buffer decided apart (before LARECOMP_INTERP_UNIFY joins them)
 //   research: LARECOMP_INTERP_LOG_MOVES=<d> [_FROM=<frame>] logs uniform buffers whose elements moved more than d in one
 //   frame; LARECOMP_INTERP_DUMP=<frame>:<path> writes both frames' draws and uniform copies as text at that frame;
 //   LARECOMP_INTERP_LOG_KEYS=1 (renderer.m) logs each draw key's components once
@@ -69,6 +76,7 @@ typedef struct {
     int64_t prev_off, blend;
     int64_t prev2_off;  // the same buffer two frames back (-1: none): an element back at that value toggles, not moves
     float maxd;  // the largest element change from the previous frame (-1: not matched): how fast it was moving
+    uint32_t plan_first, plan_n; uint8_t plan_switch;  // its rotation blocks (interp_prepare's plans)
 } CbRec;
 typedef struct {
     uint64_t key; uint32_t occ, first_cb, ncb;
@@ -243,8 +251,10 @@ static int pair_cmp(const void *a, const void *b) {
     if (x->d != y->d) return x->d < y->d ? -1 : 1;
     return x->docc < y->docc ? -1 : x->docc > y->docc;
 }
+static uint64_t st_order_pairs, s_order_pairs;
+static int order_check = -1;  // LARECOMP_INTERP_ORDER_CHECK=0: occurrence pairs unchecked (research)
 static int32_t *p_match;  // per draw of this frame: its previous-frame draw (-1: none; -2: UI; -3: just appeared - not blended)
-static uint64_t st_id_pairs, st_content_pairs, st_new_objects, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled, s_integral, s_wraps, s_discont;  // (stats)
+static uint64_t st_id_pairs, st_content_pairs, st_new_objects, s_id_pairs, s_content_pairs, s_new_objects, s_class_snaps, s_toggled, s_integral, s_wraps, s_discont, s_split;  // (stats)
 static uint32_t *p_order; static uint32_t p_order_cap;
 static int order_cmp(const void *a, const void *b) {
     const DrawRec *x = &cur->draws[*(const uint32_t *)a], *y = &cur->draws[*(const uint32_t *)b];
@@ -262,7 +272,8 @@ static void match_all(void) {
     memset(p_used, 0, prev->ndraws);
     for (uint32_t j = 0; j < cur->ndraws; j++) p_order[j] = j, p_match[j] = -1;
     // by identity: the object's draw in prev2 (same per-object buffer addresses) and that draw's partner in prev
-    st_id_pairs = st_content_pairs = st_new_objects = 0;
+    st_id_pairs = st_content_pairs = st_new_objects = st_order_pairs = 0;
+    if (order_check < 0) { const char *e = getenv("LARECOMP_INTERP_ORDER_CHECK"); order_check = !e || atoi(e); }
     if (prev2->ndraws && !prev2->overflow && !history_reset) {
         index_prev2();
         static int32_t *inv; static uint32_t inv_cap;  // prev2's draw -> prev's draw paired with it
@@ -318,7 +329,13 @@ static void match_all(void) {
             for (uint32_t k = g; k < ge; k++) {
                 if (p_match[p_order[k]] != -1) continue;
                 int32_t pj = lookup_prev(key, cur->draws[p_order[k]].occ);
-                if (pj >= 0 && !p_used[pj]) p_match[p_order[k]] = pj, p_used[pj] = 1;
+                if (pj < 0 || p_used[pj]) continue;
+                st_order_pairs++;
+                // (the same occurrence is another object when a tile came into view before it: kept at this frame -
+                // blended, a ground tile's depth pre-pass was drawn half-way to another tile's place while its
+                // colour pass, paired by identity, was not: black bands where the depth-equal test failed)
+                if (order_check && draw_maxdiff(&cur->draws[p_order[k]], &prev->draws[pj]) > cut_threshold()) { p_match[p_order[k]] = -3; st_new_objects++; continue; }
+                p_match[p_order[k]] = pj, p_used[pj] = 1;
             }
         } else if (nprev) {
             uint32_t np = 0;
@@ -588,7 +605,7 @@ bool interp_frame_end(bool log_next) {
     match_all();
     for (uint32_t j = 0; j < cur->ndraws; j++) cur->draws[j].pair = p_match[j] >= 0 ? p_match[j] : -1;
     history_reset = false;  // (this frame paired without the old chain: from here on it is the chain)
-    s_id_pairs += st_id_pairs, s_content_pairs += st_content_pairs, s_new_objects += st_new_objects;
+    s_id_pairs += st_id_pairs, s_order_pairs += st_order_pairs, s_content_pairs += st_content_pairs, s_new_objects += st_new_objects;
     float cut = cut_threshold();
     int stages = blend_stages();
     uint64_t matched = 0, changed = 0, cuts = 0;
@@ -702,6 +719,63 @@ bool interp_frame_end(bool log_next) {
         }
         if (camera_jump) { log_cut(6, NULL); return false; }
     }
+    {   // One decision per buffer. Draws that read the same uniforms take the same partner and rules:
+        // - an object's own blocks (the vertex stage's slots 2 and up) by address: the same memory with the same
+        //   contents (its depth pre-pass, colour pass, shadow);
+        // - the shared blocks (slots 0 and 1: the pass's camera, the light) by contents: each pass has its own copy.
+        //   The first copy in a paired draw decides, and unpaired draws (a new object, a tile of the ground that
+        //   came into view while scrolling) take it too: they stay where they are in the world and the camera moves
+        //   them, instead of being drawn with this frame's camera while their depth pre-pass was not.
+        // Decided apart, an object's passes drew it in two places: one paired (blended camera), the other not (this
+        // frame's camera: a pass whose draw was left as a new object). The colour pass's depth-equal test then failed
+        // against the pre-pass's depth and the object showed the cleared target: black silhouettes, and black bands
+        // with hatched triangle edges on the ground (the beach on a 5120x1440 window, walking at 30 game frames a
+        // second: motion per frame past the new-object distance). LARECOMP_INTERP_UNIFY=0: off.
+        static int unify = -1;
+        if (unify < 0) { const char *e = getenv("LARECOMP_INTERP_UNIFY"); unify = !e || atoi(e); }
+        static uint64_t u_keys[1 << HBITS]; static int32_t u_idx[1 << HBITS];
+        memset(u_idx, 0xff, sizeof u_idx);
+        for (int pass = 0; pass < 2; pass++)  // (0: the paired draws' shared copies first, 1: everything else)
+            for (uint32_t j = 0; j < cur->ndraws; j++) {
+                if (p_match[j] == -2) continue;  // (UI: never blended)
+                DrawRec *d = &cur->draws[j];
+                for (uint32_t q = 0; q < d->ncb; q++) {
+                    CbRec *cc = &cur->cbs[d->first_cb + q];
+                    if (cc->stage > 1 || !cc->used) continue;
+                    bool shared = cc->slot <= 1;
+                    if (pass == 0 && !(shared && p_match[j] >= 0)) continue;
+                    uint64_t k;
+                    if (shared) {
+                        const uint64_t *w = (const uint64_t *)(cur->bytes + cc->off);
+                        k = 0x9E3779B97F4A7C15ull ^ cc->used;
+                        for (uint32_t z = 0; z < cc->used / 8 && z < 16; z++) k = (k ^ w[z]) * 0xff51afd7ed558ccdull, k ^= k >> 29;  // (the head: memcmp settles it)
+                        k |= 1;
+                    } else k = ((cc->addr * 0x9E3779B97F4A7C15ull) ^ cc->size) & ~1ull;
+                    uint32_t h = (uint32_t)(k >> (64 - HBITS));
+                    int32_t f = -1;
+                    for (int n = 0; n < (1 << HBITS); n++, h = (h + 1) & ((1 << HBITS) - 1)) {
+                        if (u_idx[h] < 0) { u_keys[h] = k; u_idx[h] = (int32_t)(d->first_cb + q); break; }
+                        CbRec *c0 = &cur->cbs[u_idx[h]];
+                        if (u_keys[h] == k && c0->size == cc->size && c0->used == cc->used && (shared || c0->addr == cc->addr) &&
+                            !memcmp(cur->bytes + c0->off, cur->bytes + cc->off, cc->used)) { f = u_idx[h]; break; }
+                    }
+                    if (f < 0 || f == (int32_t)(d->first_cb + q)) continue;
+                    CbRec *c0 = &cur->cbs[f];
+                    bool same = (c0->prev_off < 0) == (cc->prev_off < 0) && c0->snap == cc->snap && (c0->prev2_off < 0) == (cc->prev2_off < 0) &&
+                                (c0->prev_off < 0 || !memcmp(prev->bytes + c0->prev_off, prev->bytes + cc->prev_off, cc->used)) &&
+                                (c0->prev2_off < 0 || !memcmp(prev2->bytes + c0->prev2_off, prev2->bytes + cc->prev2_off, cc->used));
+                    if (same) continue;
+                    s_split++;
+                    {   static int on = -1, nlog;  // LARECOMP_INTERP_LOG_SPLITS=1: each (research)
+                        if (on < 0) on = getenv("LARECOMP_INTERP_LOG_SPLITS") != NULL;
+                        if (on && nlog++ < 5000)
+                            LOG("[interp-split] frame %llu draw %u (%d) stage %d slot %d size %u: first %s%s, this %s%s\n", (unsigned long long)g_interp_present_frame, j, p_match[j], cc->stage, cc->slot, cc->size,
+                                c0->prev_off < 0 ? "unpaired" : "paired", c0->snap ? " snap" : "", cc->prev_off < 0 ? "unpaired" : "paired", cc->snap ? " snap" : "");
+                    }
+                    if (unify) cc->prev_off = c0->prev_off, cc->prev2_off = c0->prev2_off, cc->snap = c0->snap;
+                }
+            }
+    }
     s_draws += cur->ndraws, s_matched += matched, s_changed += changed, s_cut_cbs += cuts, s_blended_cbs += changed - cuts;
     s_prep += plat_now_ns() / 1e6 - t0;
     char why[96];
@@ -720,8 +794,175 @@ bool interp_frame_end(bool log_next) {
     return true;
 }
 
+// ---- rotations (letsgo-recomp's rule, MIT): three rows of a buffer whose 3x3 part is a rotation with a scale per axis
+// in both frames - a model matrix, a bone, a camera - blend along the arc. Element by element, a turn shrinks the
+// matrix by cos(angle / 2) and passes through a flat one at 180 degrees, and the per-element rules below (the
+// discontinuity rule: the sine terms of a turn change sign) snapped some terms and blended others: a sheared model.
+// Link turning round on the spot flickered as a sliver or a skewed model. A turn larger than
+// LARECOMP_INTERP_ROT_SWITCH degrees (default 100) in one frame is no motion the in-betweens can show (a facing that
+// switched, a new animation's pose): it switches half-way.
+static float rot_switch_cos(void) {  // cos(the switch angle / 2): compared with the quaternions' dot product
+    static float c = -2;
+    if (c < -1) { const char *e = getenv("LARECOMP_INTERP_ROT_SWITCH"); c = cosf((e ? (float)atof(e) : 100.0f) * (float)M_PI / 360.0f); }
+    return c;
+}
+static uint64_t s_rot_blocks, s_rot_switch;  // (stats)
+// m (3 rows of 4: the 3x3 part) = R * S, R a rotation, S symmetric (the polar decomposition: Higham's iteration
+// X <- (X + X^-T) / 2). A bone carries its parents' stretch turned with it (Link's skeleton: off-axis shear up to
+// 0.2 in the hair's bones), so a test for a plain rotation with a scale per axis missed some bones of a skeleton:
+// those blended element-wise and the rest along the arc, and the hair between them stretched into a long curve.
+// loose: per-object buffers (a model, its bones) take any matrix whose S is no more than `loose` off its diagonal;
+// elsewhere only near-plain rotations (0.02) count.
+static bool rot_split(const float *m, float loose, float R[3][3], float S[3][3]) {
+    double X[3][3];
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) X[i][j] = m[i * 4 + j];
+    double det0 = X[0][0] * (X[1][1] * X[2][2] - X[1][2] * X[2][1]) - X[0][1] * (X[1][0] * X[2][2] - X[1][2] * X[2][0]) + X[0][2] * (X[1][0] * X[2][1] - X[1][1] * X[2][0]);
+    double fro = 0;
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) fro += X[i][j] * X[i][j];
+    if (!(det0 > 1e-3 * pow(fro / 3, 1.5)) || !isfinite(det0)) return false;  // (flat, mirrored or degenerate: element-wise)
+    {   // (most are a rotation with a scale per axis: orthogonal columns, R and S at once)
+        double n[3], o = 0;
+        for (int j = 0; j < 3; j++) n[j] = sqrt(X[0][j] * X[0][j] + X[1][j] * X[1][j] + X[2][j] * X[2][j]);
+        for (int j = 0; j < 3; j++)
+            for (int k = j + 1; k < 3; k++) o = fmax(o, fabs(X[0][j] * X[0][k] + X[1][j] * X[1][k] + X[2][j] * X[2][k]) / (n[j] * n[k]));
+        if (o < 1e-5) {
+            for (int i = 0; i < 3; i++)
+                for (int j = 0; j < 3; j++) R[i][j] = (float)(X[i][j] / n[j]), S[i][j] = i == j ? (float)n[j] : 0;
+            return true;
+        }
+    }
+    for (int it = 0; it < 30; it++) {
+        double c[3][3], det = X[0][0] * (X[1][1] * X[2][2] - X[1][2] * X[2][1]) - X[0][1] * (X[1][0] * X[2][2] - X[1][2] * X[2][0]) + X[0][2] * (X[1][0] * X[2][1] - X[1][1] * X[2][0]);
+        c[0][0] = X[1][1] * X[2][2] - X[1][2] * X[2][1]; c[0][1] = X[1][2] * X[2][0] - X[1][0] * X[2][2]; c[0][2] = X[1][0] * X[2][1] - X[1][1] * X[2][0];
+        c[1][0] = X[0][2] * X[2][1] - X[0][1] * X[2][2]; c[1][1] = X[0][0] * X[2][2] - X[0][2] * X[2][0]; c[1][2] = X[0][1] * X[2][0] - X[0][0] * X[2][1];
+        c[2][0] = X[0][1] * X[1][2] - X[0][2] * X[1][1]; c[2][1] = X[0][2] * X[1][0] - X[0][0] * X[1][2]; c[2][2] = X[0][0] * X[1][1] - X[0][1] * X[1][0];
+        double dmax = 0;  // (c / det = X^-T: the cofactor matrix)
+        for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) { double v = 0.5 * (X[i][j] + c[i][j] / det); dmax = fmax(dmax, fabs(v - X[i][j])); X[i][j] = v; }
+        if (dmax < 1e-7) break;
+    }
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) R[i][j] = (float)X[i][j];
+    float off = 0, diag = 0;
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) {
+            double v = 0;
+            for (int k = 0; k < 3; k++) v += X[k][i] * m[k * 4 + j];  // S = R^T M
+            S[i][j] = (float)v;
+        }
+    for (int i = 0; i < 3; i++) { if (!(S[i][i] > 0)) return false; diag = fmaxf(diag, S[i][i]); }
+    for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) if (i != j) off = fmaxf(off, fabsf(S[i][j]));
+    return off <= loose * diag;
+}
+static void rot_to_quat(float R[3][3], float q[4]) {  // (w, x, y, z)
+    float tr = R[0][0] + R[1][1] + R[2][2];
+    if (tr > 0) { float s = sqrtf(tr + 1) * 2; q[0] = s / 4; q[1] = (R[2][1] - R[1][2]) / s; q[2] = (R[0][2] - R[2][0]) / s; q[3] = (R[1][0] - R[0][1]) / s; }
+    else if (R[0][0] > R[1][1] && R[0][0] > R[2][2]) { float s = sqrtf(1 + R[0][0] - R[1][1] - R[2][2]) * 2; q[0] = (R[2][1] - R[1][2]) / s; q[1] = s / 4; q[2] = (R[0][1] + R[1][0]) / s; q[3] = (R[0][2] + R[2][0]) / s; }
+    else if (R[1][1] > R[2][2]) { float s = sqrtf(1 + R[1][1] - R[0][0] - R[2][2]) * 2; q[0] = (R[0][2] - R[2][0]) / s; q[1] = (R[0][1] + R[1][0]) / s; q[2] = s / 4; q[3] = (R[1][2] + R[2][1]) / s; }
+    else { float s = sqrtf(1 + R[2][2] - R[0][0] - R[1][1]) * 2; q[0] = (R[1][0] - R[0][1]) / s; q[1] = (R[0][2] + R[2][0]) / s; q[2] = (R[1][2] + R[2][1]) / s; q[3] = s / 4; }
+}
+static void quat_to_rot(const float q[4], float R[3][3]) {
+    float w = q[0], x = q[1], y = q[2], z = q[3];
+    R[0][0] = 1 - 2 * (y * y + z * z); R[0][1] = 2 * (x * y - z * w);     R[0][2] = 2 * (x * z + y * w);
+    R[1][0] = 2 * (x * y + z * w);     R[1][1] = 1 - 2 * (x * x + z * z); R[1][2] = 2 * (y * z - x * w);
+    R[2][0] = 2 * (x * z - y * w);     R[2][1] = 2 * (y * z + x * w);     R[2][2] = 1 - 2 * (x * x + y * y);
+}
+// A rotation block's plan (once per frame; interp_prepare runs for every image): what rot_apply does at each t.
+typedef struct {
+    uint32_t cb, row;
+    uint8_t kind;  // 1: toggles (this frame's), 2: switches half-way, 3: blends along the arc
+    uint8_t screw;  // the translation turns round the axis through c
+    float qa[4], qb[4], dot, Sa[3][3], Sb[3][3], Ra[3][3];
+    double c[3], up, u[3];
+} RotPlan;
+// The rotation block at rows a, b (a2: two frames back, or NULL): false when it is no rotation pair (the caller
+// blends element-wise). The fourth element of each row is its translation.
+static bool rot_plan(const float *a, const float *b, const float *a2, float loose, RotPlan *P) {
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 4; j++)
+            if (!blendable(a[i * 4 + j], b[i * 4 + j])) return false;
+    float Rb[3][3];
+    if (!rot_split(a, loose, P->Ra, P->Sa) || !rot_split(b, loose, Rb, P->Sb)) return false;
+    bool toggle = a2;  // (back at its value of two frames ago: alternating, this frame's - the element rule's)
+    for (int i = 0; i < 3 && toggle; i++)
+        for (int j = 0; j < 3 && toggle; j++) toggle = a2[i * 4 + j] == b[i * 4 + j];
+    if (toggle) { P->kind = 1; return true; }
+    rot_to_quat(P->Ra, P->qa), rot_to_quat(Rb, P->qb);
+    float dot = P->qa[0] * P->qb[0] + P->qa[1] * P->qb[1] + P->qa[2] * P->qb[2] + P->qa[3] * P->qb[3];
+    if (dot < 0) { dot = -dot; for (int k = 0; k < 4; k++) P->qb[k] = -P->qb[k]; }  // (the short way round)
+    P->dot = dot;
+    if (dot < rot_switch_cos()) { P->kind = 2; return true; }  // a switch: the old rotation until half-way, then the new one
+    P->kind = 3;
+    // The translation (each row's fourth element) moves with the turn, along the arc round the turn's axis (a screw
+    // motion: dual-quaternion ScLERP). A bone of a skeleton that turns about the model's centre otherwise cut across
+    // the chord while its rotation took the arc: bones far from the centre (the hair, the hat's tip) were pulled
+    // inwards by up to 30% at a quarter turn and the mesh between them stretched.
+    P->screw = 0;
+    const float *qa = P->qa, *qb = P->qb;
+    double ta[3] = {a[3], a[7], a[11]}, tb[3] = {b[3], b[7], b[11]};
+    double vx = qa[0] * qb[1] - qb[0] * qa[1] - (qb[2] * qa[3] - qb[3] * qa[2]),  // qd = qb * conj(qa): the turn
+           vy = qa[0] * qb[2] - qb[0] * qa[2] - (qb[3] * qa[1] - qb[1] * qa[3]),
+           vz = qa[0] * qb[3] - qb[0] * qa[3] - (qb[1] * qa[2] - qb[2] * qa[1]);
+    double vn = sqrt(vx * vx + vy * vy + vz * vz), th = 2 * atan2(vn, (double)dot);
+    if (th > 1e-3) {
+        double u[3] = {vx / vn, vy / vn, vz / vn}, Rd[3][3], td[3], up = 0, tp[3], c[3], ct = 1 / tan(th / 2);
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) { Rd[i][j] = 0; for (int k = 0; k < 3; k++) Rd[i][j] += (double)Rb[i][k] * P->Ra[j][k]; }
+        for (int i = 0; i < 3; i++) td[i] = tb[i] - (Rd[i][0] * ta[0] + Rd[i][1] * ta[1] + Rd[i][2] * ta[2]);
+        for (int i = 0; i < 3; i++) up += u[i] * td[i];
+        for (int i = 0; i < 3; i++) tp[i] = td[i] - up * u[i];
+        c[0] = 0.5 * (tp[0] + ct * (u[1] * tp[2] - u[2] * tp[1]));  // the axis' point: (I - Rd) c = tp
+        c[1] = 0.5 * (tp[1] + ct * (u[2] * tp[0] - u[0] * tp[2]));
+        c[2] = 0.5 * (tp[2] + ct * (u[0] * tp[1] - u[1] * tp[0]));
+        double cn = sqrt(c[0] * c[0] + c[1] * c[1] + c[2] * c[2]), tn = sqrt(ta[0] * ta[0] + ta[1] * ta[1] + ta[2] * ta[2]) + sqrt(tb[0] * tb[0] + tb[1] * tb[1] + tb[2] * tb[2]);
+        if (cn < 100 * (tn + 1)) {  // (a nearly straight path: the axis far away - linear, as it is to float precision)
+            P->screw = 1, P->up = up;
+            for (int k = 0; k < 3; k++) P->c[k] = c[k], P->u[k] = u[k];
+        }
+    }
+    return true;
+}
+static void rot_apply(const RotPlan *P, const float *a, const float *b, float t, float *out) {
+    s_rot_blocks++;
+    if (P->kind == 1 || P->kind == 2) {
+        if (P->kind == 2) s_rot_switch++;
+        const float *src = P->kind == 2 && t < 0.5f ? a : b;
+        for (int i = 0; i < 12; i++) out[i] = src[i];
+        return;
+    }
+    float q[4], wa = 1 - t, wb = t;
+    if (P->dot < 0.9995f) {
+        float th = acosf(P->dot), sn = sinf(th);
+        wa = sinf((1 - t) * th) / sn, wb = sinf(t * th) / sn;
+    }
+    float n = 0;
+    for (int k = 0; k < 4; k++) q[k] = wa * P->qa[k] + wb * P->qb[k], n += q[k] * q[k];
+    n = sqrtf(n);
+    for (int k = 0; k < 4; k++) q[k] /= n;
+    float R[3][3];
+    quat_to_rot(q, R);
+    for (int i = 0; i < 3; i++)
+        for (int j = 0; j < 3; j++) {
+            float v = 0;
+            for (int k = 0; k < 3; k++) v += R[i][k] * (P->Sa[k][j] + (P->Sb[k][j] - P->Sa[k][j]) * t);
+            out[i * 4 + j] = v;
+        }
+    double ta[3] = {a[3], a[7], a[11]}, tt[3];
+    for (int i = 0; i < 3; i++) tt[i] = ta[i] + ((double)b[i * 4 + 3] - ta[i]) * t;
+    if (P->screw) {
+        double Mt[3][3], x[3] = {ta[0] - P->c[0], ta[1] - P->c[1], ta[2] - P->c[2]};  // R(t) * Ra^T: the turn so far
+        for (int i = 0; i < 3; i++)
+            for (int j = 0; j < 3; j++) { Mt[i][j] = 0; for (int k = 0; k < 3; k++) Mt[i][j] += (double)R[i][k] * P->Ra[j][k]; }
+        for (int i = 0; i < 3; i++) tt[i] = Mt[i][0] * x[0] + Mt[i][1] * x[1] + Mt[i][2] * x[2] + P->c[i] + t * P->up * P->u[i];
+    }
+    for (int i = 0; i < 3; i++) out[i * 4 + 3] = (float)tt[i];
+}
+static RotPlan *plans; static uint32_t nplans, plans_cap;
+static uint64_t frame_serial;  // (interp_frame_rotate's count)
+static uint64_t plans_serial = ~0ull;
+
 bool interp_prepare(float t) {
     if (!can_blend) return false;
+    bool planned = plans_serial == frame_serial;
+    if (!planned) nplans = 0;
     double t0 = plat_now_ns() / 1e6;
     blend_n = 0;
     for (uint32_t i = 0; i < cur->ncbs; i++) {
@@ -738,17 +979,56 @@ bool interp_prepare(float t) {
         // A buffer that jumped shows this frame's values whole (letsgo-recomp's rule: a matrix with some elements
         // snapped and others blended shears and shrinks the model; the earlier per-element snap did that).
         // LARECOMP_INTERP_SNAP=elem: the old per-element snap (research).
-        static int snap_elem = -1, toggles = -1;
+        static int snap_elem = -1, toggles = -1, rot_on = -1, halfway = -1;
         if (snap_elem < 0) {
             const char *e = getenv("LARECOMP_INTERP_SNAP"); snap_elem = e && !strcmp(e, "elem");
             e = getenv("LARECOMP_INTERP_TOGGLE"); toggles = !e || atoi(e);  // =0: blend toggling values too (research)
+            e = getenv("LARECOMP_INTERP_ROT"); rot_on = !e || atoi(e);  // =0: rotations blend element-wise (research)
+            e = getenv("LARECOMP_INTERP_HALFWAY"); halfway = !e || atoi(e);  // =0: switched values show this frame's at once
         }
         if (cc->snap && !snap_elem) { memcpy(out, b, cc->size); cc->blend = (int64_t)blend_n; blend_n += (cc->size + 15) & ~15u; continue; }
         float cut = cut_threshold();
         // An element back at its value of two frames ago alternates (dither offsets, frame parity, a jitter) - it is
         // not moving: it keeps this frame's value instead of a midpoint neither frame shows.
         const float *a2 = cc->prev2_off >= 0 ? (const float *)(prev2->bytes + cc->prev2_off) : NULL;
+        // rotation blocks first (rows of 4 elements): their 3x3 parts are done, the rest goes through the rules below
+        static uint8_t *done; static uint32_t done_cap;
+        if (nf > done_cap) { done_cap = nf * 2; done = realloc(done, done_cap); }
+        memset(done, 0, nf);
+        if (rot_on) {
+            if (!planned) {  // (the frame's first image: find the blocks; the later images reuse the plans)
+                float loose = cc->stage == 0 && cc->slot >= 2 ? 0.35f : 0.02f;
+                cc->plan_first = nplans, cc->plan_switch = 0;
+                for (uint32_t r = 0; r + 3 <= nf / 4;) {
+                    const float *ra = a + r * 4, *rb = b + r * 4;
+                    if (nplans == plans_cap) { plans_cap = plans_cap ? plans_cap * 2 : 4096; plans = realloc(plans, sizeof *plans * plans_cap); }
+                    RotPlan *P = &plans[nplans];
+                    if (!memcmp(ra, rb, 48) || !rot_plan(ra, rb, a2 ? a2 + r * 4 : NULL, loose, P)) { r++; continue; }
+                    P->cb = i, P->row = r;
+                    cc->plan_switch |= P->kind == 2;
+                    nplans++;
+                    r += 3;
+                }
+                cc->plan_n = nplans - cc->plan_first;
+            }
+            for (uint32_t k = cc->plan_first; k < cc->plan_first + cc->plan_n; k++) {
+                const RotPlan *P = &plans[k];
+                rot_apply(P, a + P->row * 4, b + P->row * 4, t, out + P->row * 4);
+                memset(done + P->row * 4, 1, 12);
+            }
+            // One turn past the switch angle switches the whole buffer half-way: a skeleton's bones together (Link
+            // turning round: his body's bones switched while the hat's and hair's, turned a little less, blended
+            // through a quarter turn - the hat stretched into a long curve for an image)
+            if (cc->plan_switch) {
+                memcpy(out, t < 0.5f ? a : b, nf * 4);
+                memcpy((uint8_t *)out + nf * 4, (const uint8_t *)b + nf * 4, cc->size - nf * 4);
+                cc->blend = (int64_t)blend_n;
+                blend_n += (cc->size + 15) & ~15u;
+                continue;
+            }
+        }
         for (uint32_t q = 0; q < nf; q++) {
+            if (done[q]) continue;
             float av = a[q], bv = b[q], d = bv - av;
             bool toggle = toggles && a2 && a2[q] == bv && av != bv;
             s_toggled += toggle;
@@ -757,12 +1037,14 @@ bool interp_prepare(float t) {
             // (a texture's frame, a mode): this frame's - unless the value took the same step the frame before (a
             // frame counter, 1127 -> 1128 every frame: time, blended). Dusklight never blends a texture-swap
             // animation (src/dusk/interp/material.cpp: a texNo track that changed is left at the sim frame's value).
+            // A switch shows the previous frame's value until half-way and this frame's after (letsgo-recomp: values
+            // that held still, then changed, switch half-way): the change lands between the two frames, as it did.
             static long log_rules = -1;  // LARECOMP_INTERP_LOG_RULES=<frame> (research): the rules' decisions for 5 frames from there
             if (log_rules < 0) { const char *e = getenv("LARECOMP_INTERP_LOG_RULES"); log_rules = e ? atol(e) : 0; }
             bool lr = log_rules && (long)s_frame_no >= log_rules && (long)s_frame_no < log_rules + 5;
             if (av == rintf(av) && bv == rintf(bv) && fabsf(d) >= 1.0f && (!a2 || (a2[q] == rintf(a2[q]) && av - a2[q] != d))) {
                 if (lr) LOG("[interp-rule] f%llu whole-number cb %u stage %d slot %d elem %u: %g, %g -> %g\n", (unsigned long long)s_frame_no, i, cc->stage, cc->slot, q, a2 ? a2[q] : NAN, av, bv);
-                out[q] = bv; s_integral++; continue;
+                out[q] = halfway && t < 0.5f ? av : bv; s_integral++; continue;
             }
             // A texture translation that scrolls a little every frame and wraps (0.98 -> 0.01) changed by nearly a
             // whole tile: blended, the wrap's midpoint is on screen for an image (the water's ripples jumping back).
@@ -781,12 +1063,12 @@ bool interp_prepare(float t) {
             }
             // A discontinuity: a change over half the value's size and over eight times the step it took the frame
             // before (a lighting weight jumping 0.05 -> 1, Link's facing turning in one frame) is a switch, not motion:
-            // this frame's value, as Dusklight shows an animation that was not continuous this tick at its current
-            // value (src/dusk/interp/material.cpp, Update::~Update's `continuous`). Blended, the in-between showed a
+            // switched half-way (above), as Dusklight shows an animation that was not continuous this tick unblended
+            // (src/dusk/interp/material.cpp, Update::~Update's `continuous`). Blended, the in-between showed a
             // state neither frame has (the village 5% darker for one image).
             if (a2 && fabsf(d) > 0.5f * fmaxf(fabsf(av), fabsf(bv)) && fabsf(d) > 8.0f * fabsf(av - a2[q]) + 1e-4f) {
                 if (lr) LOG("[interp-rule] f%llu discontinuity cb %u stage %d slot %d elem %u: %g, %g -> %g\n", (unsigned long long)s_frame_no, i, cc->stage, cc->slot, q, a2[q], av, bv);
-                out[q] = bv; s_discont++; continue;
+                out[q] = halfway && t < 0.5f ? av : bv; s_discont++; continue;
             }
             out[q] = av + d * t;
         }
@@ -794,6 +1076,7 @@ bool interp_prepare(float t) {
         cc->blend = (int64_t)blend_n;
         blend_n += (cc->size + 15) & ~15u;
     }
+    plans_serial = frame_serial;
     s_prep += plat_now_ns() / 1e6 - t0;
     return true;
 }
@@ -831,7 +1114,9 @@ void interp_replay_end(void) {
     if (d / 1e6 > s_replay_cpu_max) s_replay_cpu_max = d / 1e6;
 }
 
+uint64_t interp_frame_serial(void) { return frame_serial; }
 void interp_frame_rotate(void) {
+    frame_serial++;
     Frame *t = prev2; prev2 = prev; prev = cur; cur = t;
     prev_valid = prev->ndraws > 0 && !prev->overflow;
     frame_reset(cur);
@@ -977,17 +1262,24 @@ void interp_log_stats(void) {
     int o = 0;
     for (int i = 0; i < 9; i++)
         if (s_cuts[i]) o += snprintf(cuts + o, sizeof cuts - (size_t)o, " %s %llu", cut_name[i], (unsigned long long)s_cuts[i]);
-    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image, whole-number %.0f, wraps %.1f, discontinuities %.1f | images "
+    LOG("[interp] %s: %.1f game frames/s, draws %.0f/frame matched %.1f%% (by object %.0f/f, by content %.0f/f, by order %.1f/f, new objects %.1f/f), buffers blended %.0f/f jumps %.0f/f (+%.0f/f with their class), toggling elements %.0f/image, whole-number %.0f, wraps %.1f, discontinuities %.1f, rotations %.0f (switched %.1f), split buffers %.1f/f | images "
         "%.1f/s planned (in-between %.1f/s), late %llu, skipped %llu | replay cpu %.2f ms avg %.2f max, gpu %.2f ms; "
         "present pass gpu %.2f ms; prep %.2f ms/f | latency %.1f ms | cuts:%s\n",
-        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0, s_replays ? (double)s_integral / s_replays : 0, s_replays ? (double)s_wraps / s_replays : 0, s_replays ? (double)s_discont / s_replays : 0,
+        game_level_name(), n / dt, s_draws / n, s_draws ? 100.0 * s_matched / s_draws : 0, s_id_pairs / n, s_content_pairs / n, s_order_pairs / n, s_new_objects / n, s_blended_cbs / n, s_cut_cbs / n, s_class_snaps / n, s_replays ? (double)s_toggled / s_replays : 0, s_replays ? (double)s_integral / s_replays : 0, s_replays ? (double)s_wraps / s_replays : 0, s_replays ? (double)s_discont / s_replays : 0,
+        s_replays ? (double)s_rot_blocks / s_replays : 0, s_replays ? (double)s_rot_switch / s_replays : 0, (double)s_split / n,
         s_shots / dt, s_mids / dt, (unsigned long long)s_late, (unsigned long long)s_skipped,
         s_replays ? s_replay_cpu / s_replays : 0, s_replay_cpu_max, gn ? s_replay_gpu / gn : 0, cn ? s_compose_gpu / cn : 0,
         s_prep / n, s_frames ? s_L / n : 0, o ? cuts : " none");
+    {   extern void renderer_interp_geo_stats(uint64_t *binds, uint64_t *differed, uint64_t *missed);
+        uint64_t gb, gd, gm;
+        renderer_interp_geo_stats(&gb, &gd, &gm);
+        if (gb || gm) LOG("[interp] replay geometry: %llu binds from the frame's copies, %llu of them rewritten live since, %llu not found\n",
+                          (unsigned long long)gb, (unsigned long long)gd, (unsigned long long)gm);
+    }
     if (st_replay_misses || st_replay_cb_miss)
         LOG("[interp] replay draw misses %llu/%llu, uniform misses %llu\n", (unsigned long long)st_replay_misses,
             (unsigned long long)st_replay_draws, (unsigned long long)st_replay_cb_miss);
-    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_content_pairs = s_new_objects = s_class_snaps = s_toggled = s_integral = s_wraps = s_discont = 0;
+    s_frames = s_draws = s_matched = s_changed = s_cut_cbs = s_blended_cbs = s_id_pairs = s_order_pairs = s_content_pairs = s_new_objects = s_class_snaps = s_toggled = s_integral = s_wraps = s_discont = s_rot_blocks = s_rot_switch = s_split = 0;
     memset(s_cuts, 0, sizeof s_cuts);
     s_shots = s_mids = s_late = s_skipped = s_replays = 0;
     s_replay_cpu = s_replay_cpu_max = s_prep = s_L = s_replay_gpu = s_compose_gpu = 0;

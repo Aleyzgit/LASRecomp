@@ -48,6 +48,7 @@ uint32_t interp_handles(const uint64_t **out);
 void interp_replay_begin(void);
 void interp_replay_end(void);
 void interp_frame_rotate(void);           // after the present: this frame becomes the previous one
+uint64_t interp_frame_serial(void);       // counts interp_frame_rotate: which frame the replays' logs belong to
 uint64_t interp_replay_salt(void);        // (renderer_exec_frame) a different "frame" for each replay
 
 // The game thread at each present: the emulated vsync this frame belongs to (its time on the game's timeline).

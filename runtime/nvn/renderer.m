@@ -1182,10 +1182,69 @@ static bool dyn_copy(uint64_t addr, uint64_t size) {
     stat_vcopy++; stat_vcopy_bytes += size;
     return true;
 }
+// Frame interpolation: the per-frame geometry above as the frame drew it, for its replays (letsgo-recomp 0.6.0: a
+// replay's draw binds the vertex and index data frame N's same draw had). In place, a replay - encoded after the
+// frame and run later still on a busy GPU - reads whatever the game has written there for its next frames by then
+// (the ring is reused once the frame's fence passed), and its depth pre-pass and colour pass could read different
+// data. The frame copies each such range at its bind (~25 KB a frame); a replay binds the copies in bind order.
+// (The stats line "replay geometry" counts them, and those the game had already rewritten when the replay was
+// encoded - none in the beach runs; the GPU reads later still.) LARECOMP_INTERP_GEO_COPY=0: in place (research).
+typedef struct { uint64_t addr, size, off; __unsafe_unretained id<MTLBuffer> buf; } IvRec;
+static IvRec *iv_log; static uint32_t iv_n, iv_cap, iv_rp;
+static uint64_t iv_serial = ~0ull, iv_off, iv_binds, iv_differed, iv_missed;
+static NSMutableArray *iv_bufs;  // (holds the frame's chunks until the next frame's first copy)
+static __unsafe_unretained id<MTLBuffer> iv_chunk;
+#define IV_CHUNK (1u << 20)
+void renderer_interp_geo_stats(uint64_t *binds, uint64_t *differed, uint64_t *missed) {
+    *binds = iv_binds, *differed = iv_differed, *missed = iv_missed;
+    iv_binds = iv_differed = iv_missed = 0;
+}
+static bool iv_geometry(uint64_t addr, uint64_t size, id<MTLBuffer> __strong *buf, uint64_t *off) {
+    static int on = -1;
+    if (on < 0) { const char *x = ENV("LARECOMP_INTERP_GEO_COPY"); on = !x || atoi(x) != 0; }
+    if (!on || !g_interp_log || size > IV_CHUNK) return false;
+    extern int nvn_pool_flags_at(uint64_t addr);
+    if ((nvn_pool_flags_at(addr) & 0x13) != 0x12) return false;  // (static meshes: cached pools, in place)
+    if (!g_interp_replaying) {
+        if (interp_frame_serial() != iv_serial) {
+            iv_serial = interp_frame_serial();
+            iv_n = 0, iv_off = IV_CHUNK, iv_bufs = [NSMutableArray array], iv_chunk = nil;
+        }
+        uint64_t o = (iv_off + 255) & ~255ull;
+        if (!iv_chunk || o + size > IV_CHUNK) {
+            id<MTLBuffer> c = [dev newBufferWithLength:IV_CHUNK options:MTLResourceStorageModeShared];
+            [iv_bufs addObject:c];
+            iv_chunk = c, o = 0;
+        }
+        memcpy((uint8_t *)iv_chunk.contents + o, (const void *)(uintptr_t)addr, size);
+        iv_off = o + size;
+        if (iv_n == iv_cap) { iv_cap = iv_cap ? iv_cap * 2 : 1024; iv_log = realloc(iv_log, sizeof *iv_log * iv_cap); }
+        iv_log[iv_n++] = (IvRec){addr, size, o, iv_chunk};
+        return false;  // (the frame itself reads in place, as before)
+    }
+    if (interp_frame_serial() != iv_serial) { iv_missed++; return false; }
+    for (uint32_t j = iv_rp; j < iv_n && j < iv_rp + 32; j++)
+        if (iv_log[j].addr == addr && iv_log[j].size == size) {
+            iv_rp = j + 1;
+            iv_binds++;
+            if (memcmp((uint8_t *)iv_log[j].buf.contents + iv_log[j].off, (const void *)(uintptr_t)addr, size)) iv_differed++;
+            *buf = iv_log[j].buf, *off = iv_log[j].off;
+            return true;
+        }
+    iv_missed++;
+    return false;
+}
+
 static void bind_guest(id<MTLRenderCommandEncoder> e, bool vertex_stage, uint64_t addr, uint64_t size, int index) {
     if (addr >= HEAP_BASE && addr + size <= HEAP_BASE + HEAP_MAX && (addr & 3) == 0) {
         bind_note(0, addr, size);  // (LARECOMP_LOG_BINDS: the race detector still reports the rewrites; copied, they are harmless)
         snap_note_vertex_bind(addr, size);
+        id<MTLBuffer> ivb; uint64_t ivo;
+        if (iv_geometry(addr, size, &ivb, &ivo)) {
+            if (vertex_stage) [e setVertexBuffer:ivb offset:ivo atIndex:index];
+            else [e setFragmentBuffer:ivb offset:ivo atIndex:index];
+            return;
+        }
         if (!dyn_copy(addr, size)) {
             if (vertex_stage) [e setVertexBuffer:g_guest_buffer offset:addr - HEAP_BASE atIndex:index];
             else [e setFragmentBuffer:g_guest_buffer offset:addr - HEAP_BASE atIndex:index];
@@ -3689,7 +3748,10 @@ static void draw(CmdRec *r, bool indexed) {
             uint64_t ioff;
             bool in_heap = iaddr >= HEAP_BASE && iaddr + (uint64_t)count * isz <= HEAP_BASE + HEAP_MAX && (iaddr % isz) == 0;
             if (in_heap) { bind_note(1, iaddr, (uint64_t)count * isz); snap_note_vertex_bind(iaddr, (uint64_t)count * isz); }
-            if (in_heap && !dyn_copy(iaddr, (uint64_t)count * isz)) {
+            id<MTLBuffer> ivb; uint64_t ivo;
+            if (in_heap && iv_geometry(iaddr, (uint64_t)count * isz, &ivb, &ivo)) {
+                ib = ivb; ioff = ivo;
+            } else if (in_heap && !dyn_copy(iaddr, (uint64_t)count * isz)) {
                 ib = g_guest_buffer; ioff = iaddr - HEAP_BASE;
             } else {
                 ioff = ring_alloc((void *)(uintptr_t)iaddr, (uint64_t)count * isz); ib = ring;
@@ -4472,6 +4534,7 @@ void renderer_interp_replay(void) {
     bool log = g_interp_log;
     st = st_frame_begin;
     g_interp_log = true;
+    iv_rp = 0;
     interp_replay_begin();
     @autoreleasepool {
         for (uint32_t i = 0; i < n; i++) exec_list(h[i], 0);

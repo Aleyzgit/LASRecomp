@@ -1756,15 +1756,18 @@ static void ip_tick(uint64_t tp) {
     id<MTLCommandBuffer> cb = [ip_queue commandBuffer];
     id<MTLTexture> shot = nil;
     if (path[0]) {  // (drawn into an image of our own first: the window's can't be read back)
+        static int seq_div = -1;  // LARECOMP_INTERP_SEQ_DIV=<k>: sequence images at 1/k of the window's size (a 5K window's PNGs)
+        if (seq_div < 0) { const char *e = getenv("LARECOMP_INTERP_SEQ_DIV"); seq_div = e && atoi(e) > 1 ? atoi(e) : 1; }
+        NSUInteger dv = seq_n && !win_shot ? (NSUInteger)seq_div : 1;
         MTLTextureDescriptor *td = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:target.pixelFormat
-                                     width:target.width height:target.height mipmapped:NO];
+                                     width:target.width / dv height:target.height / dv mipmapped:NO];
         td.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         td.storageMode = MTLStorageModeShared;
         shot = [dev newTextureWithDescriptor:td];
         target = shot;
     }
     for (int pass = 0; pass < (shot ? 2 : 1); pass++) {
-        id<MTLTexture> dst = pass ? drawable.texture : target, from = pass ? shot : src;
+        id<MTLTexture> dst = pass ? drawable.texture : target, from = pass && shot.width == drawable.texture.width ? shot : src;
         MTLRenderPassDescriptor *rp = [MTLRenderPassDescriptor renderPassDescriptor];
         rp.colorAttachments[0].texture = dst;
         rp.colorAttachments[0].loadAction = MTLLoadActionClear;
