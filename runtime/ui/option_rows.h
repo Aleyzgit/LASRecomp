@@ -8,6 +8,8 @@
 //   opt_end();
 #pragma once
 #include <stdint.h>
+#include <string>
+#include <vector>
 
 void opt_begin(const char *id, float scale);
 void opt_section(const char *title);
@@ -33,8 +35,8 @@ bool opt_radio(const char *label, bool selected, const char *desc);
 // e.g. a seed name); true when activated
 bool opt_action(const char *label, const char *value, const char *desc, bool upper = true, bool changed = false);
 // a row that opens more (a submenu, a list on the right): a chevron on the right; true on A / click / Right. value:
-// shown left of the chevron; marked: a gold dot there (something under it was changed)
-bool opt_link(const char *label, const char *desc, const char *value = NULL, bool marked = false);
+// shown left of the chevron
+bool opt_link(const char *label, const char *desc, const char *value = NULL);
 // text: the value shown on the right (hint when empty); A / click turns the row into a text field (the on-screen
 // keyboard with a controller). True when Enter / the keyboard confirmed a change.
 #include <stddef.h>
@@ -43,10 +45,12 @@ bool opt_text(const char *label, char *buf, size_t cap, const char *hint, const 
 bool opt_text_editing(const char *label);
 // the next row is shown greyed out and can't be changed (e.g. forced by the seed)
 void opt_disable_next(void);
-// the next row is drawn as chosen (a dimmer gold border without the cursor: the list shown beside it)
+// the next row is drawn as chosen (pale orange without the cursor: the list shown beside it)
 void opt_mark_next(void);
 // the next row's value in red (a problem: e.g. the same button bound twice)
 void opt_warn_next(void);
+void opt_button_next(void);  // the next row (one with a value too, or a text row) as a button
+void opt_own_next(void);  // the next row is the player's own setting, not part of a seed: the summary leaves it out
 // rows after this sit one step in (+1) or back out (-1): options that belong to the row above
 void opt_indent(int step);
 void opt_end(void);
@@ -98,9 +102,9 @@ bool opt_in_right(void);
 // B / Esc, and Left (d-pad, stick, arrow key), pressed this frame
 bool opt_pressed_back(void);
 bool opt_pressed_left(void);
-// Rows between these are only checked, not drawn (a category's changed marker): opt_count_end returns how many enabled
-// rows differ from their default, and (hash) a hash of every row's value. Calls of the caller's own that use the last
-// item (ImGui::IsItemFocused, popups) must be skipped while opt_counting().
-void opt_count_begin(void);
-bool opt_counting(void);
-int opt_count_end(uint32_t *hash = NULL);
+// Rows between these are only read, not drawn (the Randomizer's summary): each enabled row with a value goes into out.
+// Calls of the caller's own that use the last item (ImGui::IsItemFocused, popups) must be skipped while opt_collecting().
+struct OptLine { std::string label, value; bool changed; int indent; };  // (indent: opt_indent steps)
+void opt_collect_begin(std::vector<OptLine> *out);
+bool opt_collecting(void);
+void opt_collect_end(void);

@@ -16,6 +16,7 @@
 #include "imgui_internal.h"
 #include "osk.h"
 #include "option_rows.h"
+#include "plastic.h"
 #include "seed_hash.h"
 
 extern "C" {
@@ -152,6 +153,7 @@ struct GenOpts {
     // Triforce hunt (tools/rando/triforce.py): pieces needed (0 = off, 1-50), extra pieces 0 none / 1 +25% / 2 +50%
     int tri_needed = 0, tri_extra = 0;
     bool race = false;        // race mode: the spoiler log stays shut until the credits, a seed hash on the title screen
+    bool apples = false;      // apples: Applesanity, 3 checks per apple tree (tools/rando/apple_trees.py)
 };
 static GenOpts g_opts;
 
@@ -200,7 +202,7 @@ static bool *opt_flags(GenOpts &o, int i) {  // the yes/no options, in ID order 
                  &o.boss_cutscenes, &o.spoiler, &o.decoupled, &o.pots, &o.no_buffs, &o.bushes,
                  &o.pet_rooster, &o.pet_ghost, &o.pet_marin, &o.trendsanity, &o.boss_souls, &o.hookshot_any,
                  &o.digs, &o.miniboss_souls, &o.no_start_sword, &o.no_start_shield, &o.no_start_ocarina,
-                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics};
+                 &o.tunic_upgrades, &o.shellsanity, &o.race, &o.random_cosmetics, &o.apples};
     return i < (int)(sizeof f / sizeof *f) ? f[i] : NULL;
 }
 
@@ -441,6 +443,7 @@ static void start_generation(void) {
     fprintf(f, " \"enemy-mode\": \"%s\",\n", g_opts.randomize_enemies && g_opts.enemy_mode ? "random" : "seeded");
     static const char *ks[] = {"off", "keys", "keys+nk", "all"};
     fprintf(f, " \"keysanity\": \"%s\",\n", ks[g_opts.keysanity]);
+    if (g_opts.apples) fprintf(f, " \"apples\": true,\n");  // (off: not written, seeds as before)
     static const char *rs[] = {"off", "coupled", "coupled", "decoupled"};  // (1: retired Coherent, never written)
     fprintf(f, " \"dungeon-room-shuffle\": \"%s\",\n", rs[g_opts.room_shuffle]);
     static const char *shop[] = {"off", "vanilla", "random"};
@@ -524,7 +527,7 @@ static void gen_overlay(float scale) {
         if (g_gen_done && ++done_frames == 30) snprintf(g_window_shot_request, sizeof g_window_shot_request, "%s_done.png", shots);
         test_play = done_frames == 60;
     }
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", g_gen_seed.c_str());
+    ImGui::TextColored(plastic_col(plastic_theme().title), "%s", g_gen_seed.c_str());
     ImGui::Separator();
     ImGui::Spacing();
     if (g_gen_pid) {  // progress bar with the current step and elapsed time
@@ -538,7 +541,7 @@ static void gen_overlay(float scale) {
         bool close = false;
         if (g_gen_failed) {
             ImGui::PushTextWrapPos(0);
-            ImGui::TextColored(ImVec4(1, 0.5f, 0.4f, 1), "%s", g_gen_status.c_str());
+            ImGui::TextColored(plastic_col(plastic_theme().warn), "%s", g_gen_status.c_str());
             ImGui::PopTextWrapPos();
             ImGui::Spacing();
             if (ImGui::Button("Close", ImVec2(bw, 0))) close = true;
@@ -567,7 +570,6 @@ static void gen_overlay(float scale) {
 }
 
 bool spoiler_view_draw(const std::string &seed, float scale);  // spoiler_view.mm
-extern "C" void pets_ui_draw(void);  // pets_ui.mm: call a found pet
 static std::string g_spoiler_seed;  // seed whose spoiler page is open
 
 // ---- the tab, in two columns (as the Controls tab's Configure inputs): Seeds and the seed option categories on the
@@ -586,7 +588,7 @@ enum { FOCUS_NONE, FOCUS_CAT, FOCUS_RIGHT, FOCUS_SEED, FOCUS_DELETE, FOCUS_CANCE
 static int g_focus;                // put the cursor on this row when it's drawn
 
 static void take_focus(int want) {
-    if (g_focus != want || opt_counting()) return;
+    if (g_focus != want || opt_collecting()) return;
     g_focus = FOCUS_NONE;
     opt_focus_item();
 }
@@ -612,7 +614,10 @@ static void rows_general(void) {
     opt_toggle("Treat Tunics as Upgrades", &g_opts.tunic_upgrades, false,
                "The red and blue tunics add up instead of replacing each other: the blue one always halves the damage "
                "Link takes, the red one always strengthens his attacks, and with both he has both.");
-    if (opt_toggle("Check tracker on overworld map", &g_settings.tracker, true,  // (the player's own, not part of a seed)
+    opt_toggle("No Guardian Acorns / Pieces of Power", &g_opts.no_buffs, false,
+               "Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power.");
+    opt_own_next();  // (the player's own, not part of a seed)
+    if (opt_toggle("Check tracker on overworld map", &g_settings.tracker, true,
                    "The overworld map marks the checks you have and haven't done yet."))
         settings_save();
 }
@@ -670,6 +675,7 @@ static void rows_extra_checks(void) {
                "up buried. The first dig of a tile brings its item up; grass and bushes have to be cut first. Holes stay "
                "dug, so you can see where you've been.");
     opt_toggle("Shellsanity", &g_opts.shellsanity, false, "Every hidden Secret Seashell spot holds an item from the pool.");
+    opt_toggle("Applesanity", &g_opts.apples, false, "Each apple tree holds 3 items from the pool.");
     static const char *ksn[] = {"Off", "Small keys", "Small + Nightmare", "All dungeon items"};
     opt_choice("Keysanity", &g_opts.keysanity, ksn, 4, 0,
                "Dungeon keys (and with the last choice every dungeon item) can be anywhere in the world, with logic. A "
@@ -724,8 +730,7 @@ static void rows_world(float scale) {
                    "With Houses & caves: leaving a house puts you outside a different door than the one you came in by.");
         opt_indent(-1);
         if (last) ImGui::OpenPopup("##entlast");
-        if (!opt_counting() &&
-            ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        if (!opt_collecting() && ImGui::BeginPopupModal("##entlast", NULL, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
             ImGui::TextUnformatted("With the entrance randomizer on, at least one kind of entrance must be shuffled.");
             ImGui::Spacing();
             ImGui::SetItemDefaultFocus();
@@ -751,6 +756,7 @@ static void rows_world(float scale) {
         bool on = g_settings.chaos_letters != CHAOS_LETTERS_OFF;
         opt_indent(1);
         if (!g_opts.room_shuffle) opt_disable_next();
+        opt_own_next();
         if (opt_toggle("Map tracks door connections", &on, true,
                        "Matching letters (A-A, B-B...) on the dungeon map show which doorways connect: a pair appears once "
                        "you've been through either end, and every pair of the dungeon once you have its map.")) {
@@ -796,8 +802,6 @@ static void rows_enemies(void) {
     opt_toggle("Mini-boss souls", &g_opts.miniboss_souls, false,
                "Each kind of dungeon mini-boss has a soul hidden among the items; one soul counts for every fight with "
                "that kind. Until you find it the mini-boss doesn't show up and its room's way on stays shut.");
-    opt_toggle("No Guardian Acorns / Pieces of Power", &g_opts.no_buffs, false,
-               "Defeating enemies in a row never drops a Guardian Acorn or a Piece of Power.");
 }
 
 static void rows_companions(void) {
@@ -821,7 +825,7 @@ static void rows_other(void) {
     opt_toggle("Boss cutscenes", &g_opts.boss_cutscenes, false, "Bosses' intro cutscenes play.");
     opt_toggle("Randomize music", &g_opts.randomize_music, false, "The game's music tracks are shuffled.");
     opt_toggle("Random cosmetics", &g_opts.random_cosmetics, false,
-               "The seed gets its own colors and season. Your choices in the Cosmetics tab still win.");
+               "The seed gets its own random colors. Your choices in the Cosmetics tab still win.");
     opt_toggle("Spoiler log", &g_opts.spoiler, true, "Writes where every item is, to read from the seed's Spoiler log.");
     opt_toggle("Race mode", &g_opts.race, false,
                "The spoiler log stays shut until the credits, and the title screen shows a seed hash to compare.");
@@ -840,6 +844,107 @@ static void cat_rows(int c, float scale) {
     }
 }
 
+// ---- the options picked, read-only (Generate seed under the cursor), for a last look: the new seed's name and ID, then
+// every seed option with its value, by category in the left column's order (options shut by their parent - greyed out
+// on their page - are left out; the player's own settings too). Two columns when the pane is wide enough; an entry too
+// long for its column goes on under itself, a step in. The pane scrolls (wheel, right stick: option_rows.mm).
+static void seed_summary(float scale) {
+    const PlasticTheme &pt = plastic_theme();
+    struct Item { bool head; std::string a, b; int indent; };
+    std::vector<Item> items;
+    for (int c = CAT_GENERAL; c < N_CAT; c++) {
+        std::vector<OptLine> v;
+        opt_collect_begin(&v);
+        cat_rows(c, scale);
+        opt_collect_end();
+        if (v.empty()) continue;
+        items.push_back({true, k_cat_name[c], "", 0});
+        for (const OptLine &l : v) items.push_back({false, l.label, l.value, l.indent});
+    }
+    char id[48];
+    seed_id_encode(g_opts, id, sizeof id);
+    opt_section("Your options");
+    ImGui::SetWindowFontScale(0.8f);
+    ImFont *font = ImGui::GetFont();
+    float fs = ImGui::GetFontSize(), lh = fs * 1.12f, gap = fs * 0.4f, step = fs * 0.9f;
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    // "label: value" in lines of at most w (broken between words; the lines after the first a step in): each line's
+    // start and end in the text, and where the label ends (the value is drawn in its own colour)
+    struct Line { size_t s, e; };
+    auto wrap = [&](const std::string &t, float w, std::vector<Line> *out) {
+        out->clear();
+        const char *b = t.c_str(), *p = b, *end = b + t.size();
+        while (p < end) {
+            float lw = out->empty() ? w : w - step;
+            const char *q = font->CalcWordWrapPositionA(fs / font->FontSize, p, end, lw);
+            if (q <= p) q = p + 1;  // (a word longer than the line: at least one character)
+            out->push_back({(size_t)(p - b), (size_t)(q - b)});
+            p = q;
+            while (p < end && *p == ' ') p++;
+        }
+        return (int)out->size();
+    };
+    auto draw = [&](ImVec2 at, float w, const Item &it) {
+        std::string la = it.a + ": ", t = la + it.b;
+        std::vector<Line> ls;
+        wrap(t, w, &ls);
+        for (size_t k = 0; k < ls.size(); k++) {
+            float x = at.x + (k ? step : 0), y = at.y + lh * k;
+            size_t s = ls[k].s, e = ls[k].e, m = std::min(std::max(s, la.size()), e);  // (label: s..m, value: m..e)
+            if (m > s) dl->AddText(font, fs, ImVec2(x, y), pt.text, t.c_str() + s, t.c_str() + m);
+            if (e > m) {
+                float lx = m > s ? font->CalcTextSizeA(fs, FLT_MAX, 0, t.c_str() + s, t.c_str() + m).x : 0;
+                dl->AddText(font, fs, ImVec2(x + lx, y), pt.value_changed, t.c_str() + m, t.c_str() + e);
+            }
+        }
+        return lh * ls.size();
+    };
+    ImVec2 p = ImGui::GetCursorScreenPos();
+    float W = ImGui::GetContentRegionAvail().x;
+    p.y += draw(p, W, {false, "Seed", g_opts.seed[0] ? g_opts.seed : "Random", 0});
+    p.y += draw(p, W, {false, "Seed ID", id, 0});
+    p.y += gap;
+    // two columns while a middling entry still fits on one line of one (the longer ones go on under themselves)
+    float mid_w = font->CalcTextSizeA(fs, FLT_MAX, 0, "Seashell Mansion rewards: All (50)").x + fs * 0.5f;
+    int cols = (W - fs) * 0.5f >= mid_w ? 2 : 1;
+    float cw = cols == 2 ? (W - fs) * 0.5f : W;
+    std::vector<float> hs(items.size());
+    float total = 0;
+    std::vector<Line> tmp;
+    for (size_t i = 0; i < items.size(); i++) {
+        const Item &it = items[i];
+        float iw = cw - fs * 0.5f - step * it.indent;
+        hs[i] = it.head ? lh + gap : lh * wrap(it.a + ": " + it.b, iw, &tmp);
+        total += hs[i];
+    }
+    size_t split = items.size();  // (the second column starts at a category: the most even split)
+    if (cols == 2) {
+        float acc = 0, best = total;
+        for (size_t i = 0; i < items.size(); i++) {
+            if (items[i].head && i && fmaxf(acc, total - acc) < best) best = fmaxf(acc, total - acc), split = i;
+            acc += hs[i];
+        }
+    }
+    float y0 = p.y, y = y0, x = p.x, ymax = y0;
+    for (size_t i = 0; i < items.size(); i++) {
+        if (i == split) x += cw + fs, y = y0;
+        const Item &it = items[i];
+        if (it.head) {
+            if (y > y0) y += gap;
+            std::string t = it.a;
+            for (char &c : t) c = (char)toupper((unsigned char)c);
+            dl->AddText(font, fs, ImVec2(x, y), pt.section, t.c_str());
+            y += lh;
+        } else {
+            float ix = fs * 0.5f + step * it.indent;
+            y += draw(ImVec2(x + ix, y), cw - ix, it);
+        }
+        ymax = fmaxf(ymax, y);
+    }
+    ImGui::Dummy(ImVec2(W, ymax + gap - ImGui::GetCursorScreenPos().y));
+    ImGui::SetWindowFontScale(1.0f);
+}
+
 // ---- Seeds: the seed list, or a seed's actions
 static void rows_seeds(const char *active) {
     if (!g_act_seed.empty()) {
@@ -851,7 +956,7 @@ static void rows_seeds(const char *active) {
         static char rename_buf[64];
         if (!opt_text_editing("Rename")) strlcpy(rename_buf, s.name.c_str(), sizeof rename_buf);
         if (g_confirm_delete) {
-            ImGui::TextColored(ImVec4(1, 0.72f, 0.4f, 1), "Delete this seed and its save files?");
+            ImGui::TextColored(plastic_col(plastic_theme().warn), "Delete this seed and its save files?");
             ImGui::Spacing();
             opt_warn_next();
             if (opt_action("Delete seed + saves", "", NULL)) {
@@ -866,10 +971,12 @@ static void rows_seeds(const char *active) {
         }
         if (!is_active && opt_action("Play", "", NULL)) play_seed(s.name.c_str());
         if (s.race && !s.race_done) opt_disable_next();  // (race mode: shut until the credits)
+        opt_button_next();  // (Locked: still a button, greyed out)
         if (opt_action("Spoiler log", s.race && !s.race_done ? "Locked" : "", NULL)) g_spoiler_seed = s.name;
         if (s.id.empty()) opt_disable_next();
         if (opt_action("Copy seed ID", "", NULL)) ImGui::SetClipboardText(s.id.c_str());
         if (is_active) opt_disable_next();  // (the game is reading its files)
+        opt_button_next();  // (a button like the others, the name on its right)
         if (opt_text("Rename", rename_buf, sizeof rename_buf, "", NULL)) {
             std::string to_name = clean_name(rename_buf), to = "rando/" + to_name;
             struct stat sb;
@@ -886,6 +993,7 @@ static void rows_seeds(const char *active) {
             return;
         }
         if (is_active) opt_disable_next();
+        opt_warn_next();  // (red: not to be taken for Play)
         if (opt_action("Delete", "", NULL)) g_confirm_delete = true, g_focus = FOCUS_CANCEL;
         take_focus(FOCUS_DELETE);
         return;
@@ -915,7 +1023,7 @@ static void rows_seeds(const char *active) {
 static void seed_header(const char *active) {
     for (const Seed &s : g_seeds) {
         if (s.name != g_act_seed) continue;
-        ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", s.name.c_str());
+        ImGui::TextColored(plastic_col(plastic_theme().title), "%s", s.name.c_str());
         ImGui::TextDisabled("Seed ID: %s", s.id.empty() ? "-" : s.id.c_str());
         if (s.race) ImGui::TextDisabled("Race mode. Seed hash: %s", hash_names(s.id).c_str());
         if (active && s.name == active) ImGui::TextDisabled("Playing");
@@ -984,18 +1092,9 @@ extern "C" void rando_tab_draw(float scale) {
         else g_focus = FOCUS_CAT;
     }
 
-    // which categories differ from their defaults (a dot on the row)
-    bool changed[N_CAT] = {};
-    for (int c = CAT_GENERAL; c < N_CAT; c++) {
-        opt_count_begin();
-        cat_rows(c, scale);
-        changed[c] = opt_count_end() > 0;
-    }
-
     ImGui::BeginDisabled(busy);
     // (the start screen: no game loaded, nothing playing - and the seed's patches mustn't be applied yet)
     const char *active = !g_start_screen && rando_seed_dir() ? rando_seed_dir() + 6 : NULL;
-    if (active) pets_ui_draw();  // (in game, a seed with companions: call one - above the panes)
 
     opt_begin("##rando", scale);
     opt_compact();
@@ -1003,7 +1102,7 @@ extern "C" void rando_tab_draw(float scale) {
         if (g_in_right && c == g_cat) opt_mark_next();
         char n[16];
         snprintf(n, sizeof n, "%d", (int)g_seeds.size());
-        bool open = opt_link(k_cat_name[c], NULL, c == CAT_SEEDS ? n : NULL, changed[c]);
+        bool open = opt_link(k_cat_name[c], NULL, c == CAT_SEEDS ? n : NULL);
         bool clicked = ImGui::IsItemClicked();
         if (c == g_cat) take_focus(FOCUS_CAT);
         bool pick = (opt_item_nav_focused() && g_cat != c) || open;  // (moving down the list shows each)
@@ -1043,6 +1142,7 @@ extern "C" void rando_tab_draw(float scale) {
     }
     if (opt_action("Generate seed", "", "Makes a seed with these options. It shows up under Seeds, ready to play."))
         start_generation();
+    bool summary = ImGui::IsItemHovered() || opt_item_nav_focused();  // (this row only: the right column sums up the options)
     if (!g_gen_status.empty() && !busy) {  // (e.g. a rename that failed)
         opt_disable_next();
         opt_action(g_gen_status.c_str(), "", g_gen_status.c_str(), false);
@@ -1050,15 +1150,18 @@ extern "C" void rando_tab_draw(float scale) {
 
     // ---- the right column: the chosen category's rows, the description under them
     opt_split();
-    if (g_cat == CAT_SEEDS && !g_act_seed.empty()) seed_header(active);
-    else opt_section(k_cat_name[g_cat]);
-    opt_list_begin();
-    if (g_focus == FOCUS_RIGHT) g_focus = FOCUS_NONE, opt_focus_next_row();
-    if (g_cat == CAT_SEEDS) rows_seeds(active);
-    else cat_rows(g_cat, scale);
-    opt_list_end();
+    if (summary) seed_summary(scale);
+    else {
+        if (g_cat == CAT_SEEDS && !g_act_seed.empty()) seed_header(active);
+        else opt_section(k_cat_name[g_cat]);
+        opt_list_begin();
+        if (g_focus == FOCUS_RIGHT) g_focus = FOCUS_NONE, opt_focus_next_row();
+        if (g_cat == CAT_SEEDS) rows_seeds(active);
+        else cat_rows(g_cat, scale);
+        opt_list_end();
+        opt_desc_text();
+    }
     g_in_right = opt_in_right();
-    opt_desc_text();
     opt_split_end();
     ImGui::EndDisabled();
     opts_save_if_changed();

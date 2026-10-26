@@ -18,16 +18,16 @@ extern "C" void give_item_request(int id, int count, int index);
 extern "C" bool pets_owned(int c);             // runtime/hle/pets.c
 extern "C" void pets_give(int c, bool on);
 extern "C" const char *rando_seed_dir(void);
+extern "C" const char *chaos_current_level(void);  // runtime/ui/chaos_overlay.mm
+static int current_dungeon(void);
+static int g_dungeon;  // (the Dungeon keys section's Dungeon row)
 
 extern "C" {
 #include "../hle.h"
 }
 
-// GA(LIVE_SAVE): main + 0x1CBB220. g_snap: a copy taken when the menu opens (the sections' changed dots read it)
-enum { SAVE_SIZE = 0x5EE0 };
-static uint8_t g_snap[SAVE_SIZE];
-static bool g_snap_ok, g_use_snap;
-static uint8_t *S(void) { return g_use_snap ? g_snap : (uint8_t *)(uintptr_t)GA(LIVE_SAVE); }
+// GA(LIVE_SAVE): main + 0x1CBB220
+static uint8_t *S(void) { return (uint8_t *)(uintptr_t)GA(LIVE_SAVE); }
 template <typename T> static T &F(uint32_t off) { return *(T *)(S() + off); }
 
 enum : uint32_t {
@@ -35,7 +35,10 @@ enum : uint32_t {
     NAME = 0x5388, RUPEES = 0x5540, HP = 0x5544, SHELLS = 0x5548, PIECES = 0x5550, CONTAINERS = 0x5558,
     TRADE = 0x555A, SONGS = 0x555B, UPGRADES = 0x555C, BOMBS = 0x555E, ARROWS = 0x555F, POWDER = 0x5560,
     ITEMS = 0x5568, KEYITEMS = 0x556C, SENSOR = 0x556E, FAIRIES = 0x5580, LEAVES = 0x5582,
+    GOT = 0x55E4,  // one bit per item id (Items.gsheet itemID) that AddItem sets with the item
 };
+
+static void got_item(int id) { if (id >= 0 && id < 32) F<uint32_t>(GOT) |= 1u << id; }
 
 static bool loaded(void) { return F<uint32_t>(0) == 0xE && F<uint16_t>(NAME) != 0; }
 
@@ -58,10 +61,8 @@ static void sync_header(void) {
 static char g_name[32];
 
 extern "C" void save_editor_on_open(void) {
-    g_snap_ok = false;
     if (!loaded()) return;
-    memcpy(g_snap, S(), SAVE_SIZE);
-    g_snap_ok = true;
+    if (current_dungeon() >= 0) g_dungeon = current_dungeon();
     const uint16_t *u = (const uint16_t *)(S() + NAME);
     int n = 0;
     for (int i = 0; i < 8 && u[i]; i++) {  // UTF-16 -> UTF-8 (BMP)
@@ -96,18 +97,21 @@ static void bit_set(uint32_t off, int bit, int width, bool v) {
     else F<uint32_t>(off) = (F<uint32_t>(off) & ~(1u << bit)) | ((uint32_t)v << bit);
 }
 
-struct Bit { const char *name; uint32_t off; int bit; int width; const char *desc; };
+struct Bit { const char *name; uint32_t off; int bit; int width; const char *desc; int id = -1; };  // id: AddItem's (GOT)
 static void bit_rows(const Bit *b, int n) {
     for (int i = 0; i < n; i++) {
         bool v = bit_get(b[i].off, b[i].bit, b[i].width);
-        if (opt_toggle(b[i].name, &v, false, b[i].desc)) bit_set(b[i].off, b[i].bit, b[i].width, v);
+        if (!opt_toggle(b[i].name, &v, false, b[i].desc)) continue;
+        bit_set(b[i].off, b[i].bit, b[i].width, v);
+        if (v) got_item(b[i].id);
     }
 }
 
-// Level item: "owned" bit in ITEMS plus an upgrade bit in UPGRADES.
-static void level(const char *t, int item_bit, int up_bit, const char *const names[3], const char *desc) {
+// Level item: "owned" bit in ITEMS plus an upgrade bit in UPGRADES (id: AddItem's id of level 1; level 2 is id + 1).
+static void level(const char *t, int item_bit, int up_bit, int id, const char *const names[3], const char *desc) {
     int lv = !((F<uint32_t>(ITEMS) >> item_bit) & 1) ? 0 : ((F<uint8_t>(UPGRADES) >> up_bit) & 1) ? 2 : 1;
     if (!opt_choice(t, &lv, names, 3, 0, desc)) return;
+    if (lv) got_item(id + lv - 1);
     F<uint32_t>(ITEMS) = (F<uint32_t>(ITEMS) & ~(1u << item_bit)) | ((uint32_t)(lv > 0) << item_bit);
     F<uint8_t>(UPGRADES) = (uint8_t)((F<uint8_t>(UPGRADES) & ~(1u << up_bit)) | ((uint32_t)(lv == 2) << up_bit));
 }
@@ -191,23 +195,23 @@ static void sec_equipment(void) {
     static const char *const sword[] = {"None", "Sword", "Level 2"};
     static const char *const shield[] = {"None", "Shield", "Mirror Shield"};
     static const char *const bracelet[] = {"None", "Power Bracelet", "Level 2"};
-    level("Sword", 0, 0, sword, "Link's sword. Level 2 is the Noble Sword from the Seashell Mansion.");
-    level("Shield", 1, 1, shield, "Link's shield. The Mirror Shield blocks beams and fire.");
-    level("Power Bracelet", 10, 2, bracelet, "Lifts pots and rocks. Level 2 lifts the heavy ones.");
+    level("Sword", 0, 0, 0, sword, "Link's sword. Level 2 is the Noble Sword from the Seashell Mansion.");
+    level("Shield", 1, 1, 2, shield, "Link's shield. The Mirror Shield blocks beams and fire.");
+    level("Power Bracelet", 10, 2, 13, bracelet, "Lifts pots and rocks. Level 2 lifts the heavy ones.");
     static const Bit items[] = {
-        {"Bombs", ITEMS, 2, 32, "The bombs item (bomb bag)."},
-        {"Bow", ITEMS, 3, 32, "The bow."},
-        {"Hookshot", ITEMS, 4, 32, "The Hookshot."},
-        {"Boomerang", ITEMS, 5, 32, "The Boomerang."},
-        {"Magic Rod", ITEMS, 6, 32, "The Magic Rod."},
-        {"Shovel", ITEMS, 7, 32, "The Shovel."},
-        {"Magic Powder", ITEMS, 8, 32, "Magic Powder."},
-        {"Roc's Feather", ITEMS, 9, 32, "Roc's Feather: jump."},
-        {"Pegasus Boots", ITEMS, 11, 32, "Pegasus Boots: dash."},
-        {"Ocarina", ITEMS, 12, 32, "The Ocarina. Songs are under Ocarina songs."},
-        {"Flippers", KEYITEMS, 0, 32, "Flippers: swim and dive."},
-        {"Secret Medicine", KEYITEMS, 1, 32, "Secret Medicine: revives Link once when his health runs out."},
-        {"Sleepy Toadstool", KEYITEMS, 15, 32, "The Sleepy Toadstool for the witch."},
+        {"Bombs", ITEMS, 2, 32, "The bombs item (bomb bag).", 4},
+        {"Bow", ITEMS, 3, 32, "The bow.", 5},
+        {"Hookshot", ITEMS, 4, 32, "The Hookshot.", 6},
+        {"Boomerang", ITEMS, 5, 32, "The Boomerang.", 7},
+        {"Magic Rod", ITEMS, 6, 32, "The Magic Rod.", 8},
+        {"Shovel", ITEMS, 7, 32, "The Shovel.", 9},
+        {"Magic Powder", ITEMS, 8, 32, "Magic Powder.", 11},
+        {"Roc's Feather", ITEMS, 9, 32, "Roc's Feather: jump.", 12},
+        {"Pegasus Boots", ITEMS, 11, 32, "Pegasus Boots: dash.", 15},
+        {"Ocarina", ITEMS, 12, 32, "The Ocarina. Songs are under Ocarina songs.", 16},
+        {"Flippers", KEYITEMS, 0, 32, "Flippers: swim and dive.", 20},
+        {"Secret Medicine", KEYITEMS, 1, 32, "Secret Medicine: revives Link once when his health runs out.", 21},
+        {"Sleepy Toadstool", KEYITEMS, 15, 32, "The Sleepy Toadstool for the witch.", 10},
         {"Seashell Sensor", SENSOR, 0, 8, "The Seashell Sensor: chimes near hidden Secret Seashells."},
     };
     bit_rows(items, sizeof items / sizeof items[0]);
@@ -258,6 +262,33 @@ static void sec_instruments(void) {
     bit_rows(inst, 8);
 }
 
+// Per-dungeon records (notes/save_format.md): live save + 0xE0 + 0x10 * rec, dungeon n -> rec 2(n-1), Color Dungeon
+// -> 18 (as runtime/hle/keysanity.c); +0 small keys, +1 bits: compass 0, map 1, beak 2, Nightmare Key 3.
+static const char *const k_dungeons[] = {"Tail Cave", "Bottle Grotto", "Key Cavern", "Angler's Tunnel", "Catfish's Maw",
+                                         "Face Shrine", "Eagle's Tower", "Turtle Rock", "Color Dungeon"};
+static uint32_t dungeon_rec(int d) { return 0xE0 + 0x10 * (d == 8 ? 18 : 2 * d); }
+
+static int current_dungeon(void) {  // the dungeon Link is in: Lv01TailCave..Lv08TurtleRock 0-7, Lv10ClothesDungeon 8; else -1
+    const char *lv = chaos_current_level();
+    if (!lv || strncmp(lv, "Lv", 2) || lv[2] < '0' || lv[2] > '9' || lv[3] < '0' || lv[3] > '9') return -1;
+    int n = (lv[2] - '0') * 10 + (lv[3] - '0');
+    return n >= 1 && n <= 8 ? n - 1 : n == 10 ? 8 : -1;
+}
+
+static void dungeon_rows(int d) {
+    uint32_t r = dungeon_rec(d);
+    int keys = F<uint8_t>(r);
+    if (keys > 9) keys = 9;
+    if (opt_int("Small Keys", &keys, 0, 9, 1, 0, "%d", "Small Keys held.")) F<uint8_t>(r) = (uint8_t)keys;
+    const Bit bits[] = {
+        {"Nightmare Key", r + 1, 3, 8, "Opens the boss door."},
+        {"Dungeon Map", r + 1, 1, 8, "The dungeon map."},
+        {"Compass", r + 1, 0, 8, "The compass."},
+        {"Stone Beak", r + 1, 2, 8, "Lets the owl statues give hints."},
+    };
+    bit_rows(bits, 4);
+}
+
 static void sec_keys(void) {
     static const Bit keys[] = {
         {"Tail Key", KEYITEMS, 2, 32, "Opens Tail Cave."},
@@ -266,7 +297,16 @@ static void sec_keys(void) {
         {"Face Key", KEYITEMS, 5, 32, "Opens Face Shrine."},
         {"Bird Key", KEYITEMS, 6, 32, "Opens Eagle's Tower."},
     };
+    {   // (the game's own pickup, as from a chest: in the dungeon Link is in)
+        bool in = current_dungeon() >= 0;
+        if (!in) opt_disable_next();
+        if (opt_button("Give small key", "One Small Key for the dungeon Link is in.")) give_item_request(48, 1, -1);
+        if (!in) opt_disable_next();
+        if (opt_button("Give Nightmare Key", "The Nightmare Key for the dungeon Link is in.")) give_item_request(49, 1, -1);
+    }
     bit_rows(keys, 5);
+    opt_choice("Dungeon", &g_dungeon, k_dungeons, 9, 0, "The dungeon the rows below are for.");
+    dungeon_rows(g_dungeon);
 }
 
 static void sec_trade(void) {
@@ -291,19 +331,29 @@ static void sec_companions(void) {
 
 static void sec_give(void) {
     {   // the game's own AddItem (same path as an item pickup / Inventory.AddItemByKey event)
+        enum { N_ITEMS = sizeof kItems / sizeof kItems[0] };
+        static const char *names[N_ITEMS];
+        for (int i = 0; i < N_ITEMS; i++) names[i] = kItems[i].name;
         static int item = 0, count = 1, index = -1;
-        int n = (int)(sizeof kItemNames / sizeof kItemNames[0]);
-        opt_choice("Item", &item, kItemNames, n, -1, "The item to give, through the game's own pickup.");
+        opt_choice("Item", &item, names, N_ITEMS, -1, "The item to give, through the game's own pickup.");
         opt_int("Count", &count, 1, 99, 1, 1, "%d", "How many to give.");
         opt_int("Index", &index, -1, 99, 1, -1, "%d",
                 "Which one, for items with several: Pieces of Heart, Secret Seashells, Golden Leaves etc. each have "
-                "an index.", "Any");
-        if (opt_button("Give", "Gives the item above.")) give_item_request(item, count, index);
+                "an index.\n\nFor Small Keys, Nightmare Keys, maps, compasses and Stone Beaks: the dungeon (1-8, Color "
+                "Dungeon 9). Any: the dungeon Link is in.", "Any");
+        if (opt_button("Give", "Gives the item above.")) {
+            int id = kItems[item].id, idx = index;
+            // (dungeon items: keysanity's index, 0-7 = dungeons 1-8, 9 = Color Dungeon; runtime/hle/keysanity.c)
+            bool dungeon_item = id == 44 || id == 45 || id == 47 || id == 48 || id == 49;
+            if (dungeon_item && idx >= 1 && idx <= 8) idx--;
+            else if (dungeon_item && idx > 9) idx = -1;
+            give_item_request(id, count, idx);
+        }
     }
 }
 
-// The tab, in two columns (as the Controls tab's Configure inputs): the sections on the left, a gold dot on each one
-// changed since the menu opened; the chosen section's rows on the right, the selected row's description under them.
+// The tab, in two columns (as the Controls tab's Configure inputs): the sections on the left, the chosen section's rows
+// on the right, the selected row's description under them.
 enum { SEC_QUICK, SEC_PLAYER, SEC_EQUIPMENT, SEC_AMMO, SEC_SONGS, SEC_BOTTLES, SEC_INSTRUMENTS, SEC_KEYS, SEC_TRADE,
        SEC_COMPANIONS, SEC_GIVE, N_SEC };
 static const char *const k_sec_name[N_SEC] = {"Quick", "Player", "Equipment", "Ammo", "Ocarina songs", "Bottles",
@@ -345,29 +395,12 @@ extern "C" void save_editor_draw(float scale) {
         (opt_pressed_back() || (opt_pressed_left() && !opt_focused_lr())))
         g_back_frame = frame, g_focus = FOCUS_SEC;
 
-    // which sections changed since the menu opened: their rows' values, read from the save then from the copy
-    bool changed[N_SEC] = {};
-    if (g_snap_ok)
-        for (int c = 0; c < N_SEC; c++) {
-            if (!sec_shown(c)) continue;
-            uint32_t now, before;
-            opt_count_begin();
-            k_sec_rows[c]();
-            opt_count_end(&now);
-            g_use_snap = true;
-            opt_count_begin();
-            k_sec_rows[c]();
-            opt_count_end(&before);
-            g_use_snap = false;
-            changed[c] = now != before;
-        }
-
     opt_begin("##save", scale);
     opt_compact();
     for (int c = 0; c < N_SEC; c++) {
         if (!sec_shown(c)) continue;
         if (g_in_right && c == g_sec) opt_mark_next();
-        bool open = opt_link(k_sec_name[c], NULL, NULL, changed[c]);
+        bool open = opt_link(k_sec_name[c], NULL, NULL);
         bool clicked = ImGui::IsItemClicked();
         if (c == g_sec && g_focus == FOCUS_SEC) g_focus = FOCUS_NONE, opt_focus_item();
         if ((opt_item_nav_focused() && g_sec != c) || open) g_sec = c;  // (moving down the list shows each)

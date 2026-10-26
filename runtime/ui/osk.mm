@@ -15,6 +15,7 @@
 #include "imgui_internal.h"
 #include "osk.h"
 #include "pad_nav.h"
+#include "plastic.h"
 
 static struct {
     int open;                        // a field's keyboard is up
@@ -178,7 +179,7 @@ void osk_draw(ImFont *big, float scale) {
         return;
     }
     ImGui::PushFont(big);
-    ImGui::TextColored(ImVec4(0.93f, 0.76f, 0.33f, 1), "%s", s.title);
+    ImGui::TextColored(plastic_col(plastic_theme().title), "%s", s.title);
     ImGui::PopFont();
     int max = (int)(s.size < sizeof s.text ? s.size : sizeof s.text) - 1;
     int r = cancel ? -1 : osk_keys(s.text, sizeof s.text, max, s.appearing, scale, big);
