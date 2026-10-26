@@ -450,6 +450,7 @@ static void rom_index(void) {
     if (copies) LOG("[fs] romfs: %d %s of the game code at the root, ignored\n", copies, copies == 1 ? "copy" : "copies");
     if (odd > 20) LOG("[fs] romfs: %d more files that aren't the game's\n", odd - 20);
     int missing = game_romfs_check_end(check);
+    rt_romfs_missing = missing;
     if (missing) LOG("[fs] romfs: %d of the game's files missing or changed\n", missing);
     uint64_t want = game_romfs_bytes(game_version());
     if (want && rt_romfs_bytes != want)
