@@ -146,3 +146,29 @@ int game_romfs_check_end(GameRomfsCheck *c) {
     free(c);
     return missing;
 }
+
+bool game_romfs_exefs_copy(const char *game_dir, const char *rel, uint64_t size) {
+    static const char *const names[] = {"main", "main.npdm", "rtld", "sdk", "subsdk0", "subsdk1"};
+    bool named = false;
+    for (size_t i = 0; i < sizeof names / sizeof *names; i++) named |= !strcmp(rel, names[i]);
+    if (!named || !game_dir) return false;
+    char path[1200];
+    snprintf(path, sizeof path, "%s/exefs/%s", game_dir, rel);
+    FILE *a = fopen(path, "rb");
+    snprintf(path, sizeof path, "%s/romfs/%s", game_dir, rel);
+    FILE *b = fopen(path, "rb");
+    enum { CHUNK = 1 << 16 };
+    char *x = malloc(2 * CHUNK), *y = x ? x + CHUNK : NULL;
+    bool same = a && b && x;
+    uint64_t n = 0;
+    while (same) {
+        size_t r = fread(x, 1, CHUNK, a), s = fread(y, 1, CHUNK, b);
+        same = r == s && !memcmp(x, y, r);
+        n += r;
+        if (r < CHUNK) break;
+    }
+    free(x);
+    if (a) fclose(a);
+    if (b) fclose(b);
+    return same && n == size;
+}

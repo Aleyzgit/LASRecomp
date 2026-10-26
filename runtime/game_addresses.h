@@ -58,6 +58,11 @@ bool game_romfs_check_file(GameRomfsCheck *c, const char *rel, uint64_t size);
 int game_romfs_check_end(GameRomfsCheck *c);
 // The table's hash of a file (tools/romfs_files.py hashes the same way).
 uint64_t game_romfs_hash(const char *rel, uint64_t size);
+// Some copies also have the game code's six files (exefs: main, main.npdm, rtld, sdk, subsdk0, subsdk1) at the romfs
+// root, each the same file as in exefs (issue #389: 3842 files). Nothing reads them there, so the checks skip them.
+// true: rel is one of those names at the romfs root, and <game_dir>/romfs/<rel> has size bytes, the same bytes as
+// <game_dir>/exefs/<rel>. Anything else there (another name, size or content) stays an odd file.
+bool game_romfs_exefs_copy(const char *game_dir, const char *rel, uint64_t size);
 
 #ifdef __cplusplus
 }
