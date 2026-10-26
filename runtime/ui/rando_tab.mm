@@ -36,7 +36,7 @@ static void play_seed(const char *name) {
     rt_request_reboot(RT_REBOOT_GAME);
 }
 
-struct Seed { std::string name, logic, spoiler, id; long mtime; bool race, race_done; };
+struct Seed { std::string name, spoiler, id; long mtime; bool race, race_done; };
 static bool id_is_race(const std::string &id);  // (a seed made in race mode: its ID says so)
 static std::vector<Seed> g_seeds;
 static bool g_scanned;
@@ -51,15 +51,6 @@ static std::string read_file(const std::string &p) {
     while ((n = fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
     fclose(f);
     return s;
-}
-
-static std::string json_str(const std::string &j, const char *key) {
-    std::string k = std::string("\"") + key + "\": \"";
-    size_t p = j.find(k);
-    if (p == std::string::npos) return "";
-    p += k.size();
-    size_t e = j.find('"', p);
-    return e == std::string::npos ? "" : j.substr(p, e - p);
 }
 
 // Deletes rando/<name> (the seed's game files, spoiler and its save slots).
@@ -83,8 +74,6 @@ static void scan(void) {
         Seed s;
         s.name = e->d_name;
         s.mtime = sb.st_mtime;
-        std::string js = read_file(dir + "/settings.json");
-        s.logic = json_str(js, "logic");
         s.spoiler = dir + "/spoiler.txt";
         if (stat(s.spoiler.c_str(), &sb)) s.spoiler = dir + "/spoiler_" + s.name + ".txt";  // (older seeds)
         s.id = read_file(dir + "/seed_id.txt");
@@ -110,7 +99,7 @@ static bool g_gen_done;  // finished (or failed to start): the overlay shows the
 struct GenOpts {
     char seed[64] = "";       // the seed's NAME (its folder, rando/<name>/): any label; the seed ID is separate
     uint64_t rng = 0;         // 36-bit random part of the seed ID
-    int logic = 0;            // basic advanced glitched hell none (always basic for now: no UI choice)
+    int logic = 0;            // always 0 (basic): the setting is gone, the seed ID keeps its 3-bit field
     int dungeon_items = 0;    // none stone-beak mc mcb (default: shuffled)
     int keysanity = 0;        // off / small keys anywhere / + Nightmare Keys / all dungeon items
     bool bomb_bag = false, powder_bag = false;  // shuffle-bombs / shuffle-powder
@@ -215,7 +204,8 @@ static void seed_id_encode(GenOpts &o, char *out, size_t cap) {
     Bits x;
     x.put(SEED_ID_VERSION, 4);
     x.put(o.rng, 36);
-    x.put(o.logic, 3); x.put(o.dungeon_items, 2); x.put(o.keysanity, 2); x.put(o.traps, 3); x.put(o.seashells, 3);
+    x.put(o.logic, 3);  // (retired logic level: always 0 = basic, kept so seed IDs stay the same)
+    x.put(o.dungeon_items, 2); x.put(o.keysanity, 2); x.put(o.traps, 3); x.put(o.seashells, 3);
     x.put(o.tunic, 4); x.put(o.entrances, 2); x.put(o.start_rupees, 10);
     x.put(o.room_shuffle, 2);  // (v3)
     x.put(o.shopsanity, 2);    // (v4)
@@ -898,12 +888,11 @@ static void rows_seeds(const char *active) {
         play_seed("");
     for (const Seed &s : g_seeds) {
         bool is_active = active && s.name == active;
-        std::string d = "Seed ID: " + (s.id.empty() ? std::string("-") : s.id) + "\nLogic: " +
-                        (s.logic.empty() ? std::string("-") : s.logic) +
+        std::string d = "Seed ID: " + (s.id.empty() ? std::string("-") : s.id) +
                         (s.race ? "\nRace mode. Seed hash: " + hash_names(s.id) : std::string()) +
                         "\n\nPlay it, read its spoiler log, copy its ID to share, rename or delete it. Each seed has its "
                         "own save files.";
-        if (opt_action(s.name.c_str(), is_active ? "Playing" : s.logic.c_str(), d.c_str(), false))
+        if (opt_action(s.name.c_str(), is_active ? "Playing" : "", d.c_str(), false))
             g_act_seed = s.name, g_confirm_delete = false, g_focus = FOCUS_RIGHT;
         if (g_focus == FOCUS_SEED && s.name == g_focus_seed) take_focus(FOCUS_SEED);
     }
