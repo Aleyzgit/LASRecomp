@@ -22,13 +22,13 @@ static inline long long tag_rank(const std::string &t) {
     return -1;
 }
 
-// "Beta 2" / "Beta 5 Hotfix 1" / "Beta 6" (v0.6.0) / "Beta 6.1" (v0.6.1) / "1.0.0" (with_word: "Version 1.0.0")
+// "Beta 2" / "Beta 5.1" / "Beta 6" (v0.6.0) / "Beta 6.1" (v0.6.1) / "1.0.0" (with_word: "Version 1.0.0")
 static inline std::string tag_label(const std::string &t, bool with_word) {
     int n, m, a;
     char end;
     if (sscanf(t.c_str(), "beta_%d%c", &n, &end) == 1) return "Beta " + std::to_string(n);
     if (sscanf(t.c_str(), "beta_%d.%d%c", &n, &m, &end) == 2 && m > 0)
-        return "Beta " + std::to_string(n) + " Hotfix " + std::to_string(m);
+        return "Beta " + std::to_string(n) + "." + std::to_string(m);
     if (sscanf(t.c_str(), "v%d.%d.%d%c", &a, &n, &m, &end) == 3 && a == 0 && n > 0)
         return "Beta " + std::to_string(n) + (m > 0 ? "." + std::to_string(m) : std::string());
     if (!t.compare(0, 5, "test-")) return "Test build " + t.substr(5);

@@ -89,7 +89,7 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 
 // The release tag this build is (also names the release files; Makefile / tools/bundle_macos.sh / make_dmg.sh read
 // it). Under the hood every release is a semantic version (0.<n>.<m> during the beta: .0 releases bring features, the
-// rest are fixes). Tags: beta_<n> and beta_<n>.<m> ("Beta <n> Hotfix <m>", = 0.<n>.<m>) up to Beta 5; from Beta 6
+// rest are fixes). Tags: beta_<n> and beta_<n>.<m> ("Beta <n>.<m>", = 0.<n>.<m>) up to Beta 5; from Beta 6
 // v0.<n>.<m> ("Beta <n>", "Beta <n>.<m>"); after the beta v<major>.<minor>.<patch> ("1.0.0"). A
 // test build (a pre-release for a few players to try a fix) is test-<name>: the start screen says "Test build <name>",
 // and it previews LARECOMP_TEST_OF - the update check offers that release (or a later one) as soon as it's out, so its
@@ -103,7 +103,7 @@ extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (
 // Windows 10+ ship) and offers the best one if it outranks this build (runtime/ui/update_tags.h): any v1.0.0+ above
 // every beta, betas by number, a beta's fixes releases (beta_<n>.<m>, v0.<n>.<m>) between it and the next beta, and
 // v0.<n>.<m> the same as beta_<n>.<m>; other tags (the alpha_* ones) are ignored. (Beta 5 and earlier only know
-// beta_<n>: they never offer a hotfix; builds before Beta 5 Hotfix 3 don't know v0.<n>.<m> either.) Offline / no curl /
+// beta_<n>: they never offer a hotfix; builds before Beta 5.3 don't know v0.<n>.<m> either.) Offline / no curl /
 // anything unexpected: nothing is shown.
 #define RELEASES_URL "https://api.github.com/repos/peiikai/LASRecomp/releases?per_page=100"
 #define RELEASE_PAGE "https://github.com/peiikai/LASRecomp/releases/tag/"

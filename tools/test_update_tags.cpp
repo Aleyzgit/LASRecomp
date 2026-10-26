@@ -28,7 +28,7 @@ int main(void) {
 
     const char *labels[][3] = {  // tag, label, with the word
         {"beta_5", "Beta 5", "Beta 5"},
-        {"beta_5.3", "Beta 5 Hotfix 3", "Beta 5 Hotfix 3"},
+        {"beta_5.3", "Beta 5.3", "Beta 5.3"},
         {"v0.6.0", "Beta 6", "Beta 6"},
         {"v0.6.1", "Beta 6.1", "Beta 6.1"},
         {"v0.10.2", "Beta 10.2", "Beta 10.2"},
