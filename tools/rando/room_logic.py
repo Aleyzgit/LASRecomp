@@ -51,6 +51,13 @@ MAX_TERMS = 48
 EXIT_REQ = {}  # catalog room -> frozenset of atoms leaving it needs (mini-boss souls: tools/rando/souls.py exit_req)
 
 
+# checks on a ledge that only their room's vanilla neighbour reaches (dungeon_gen.TIED / STAY keep the two together):
+# the check also needs that neighbour's cell - the way up is there (Face Shrine 08G's ramp, Key Cavern 03D's, Turtle
+# Rock 03E's), not in the check's own room
+LEDGE_VIA = {'D6-wizzrobes-ledge': 'Lv06FaceShrine_08G', 'D3-east-ledge': 'Lv03KeyCavern_03D',
+             'D8-northern-ledge': 'Lv08TurtleRock_03E'}
+
+
 # location subtypes LAS shuffles (shuffler.py: every other item location keeps its vanilla content)
 RANDOMIZED_SUBTYPES = ('chest', 'boss', 'enemy', 'drop', 'npc', 'standing', 'overworld-statue', 'dungeon-statue')
 
@@ -680,6 +687,13 @@ def apply(cat, romfs, layouts, jump_rows, logic_defs, item_defs, settings, extra
             return f'({e}) & key-D{n}:{k}'
         reach = [with_blocks(p) for p in places if cell_expr.get(p)]
         ck = [cell_keys[p] for p in places if p in cell_keys]
+        via = LEDGE_VIA.get(loc)
+        if via and reach:  # (a ledge reached from its vanilla neighbour: that room's cell too)
+            ve = [cell_expr[p] for p in rooms_at.get(via, []) if cell_expr.get(p)]
+            reach = [f'({e}) & ({" | ".join(f"({x})" for x in ve)})' for e in reach] if ve else []
+            vk = [cell_keys[p] for p in rooms_at.get(via, []) if p in cell_keys]
+            if ck and vk:
+                ck = [max(min(ck), min(vk))]
         if ck:
             k = min(ck)
             bl = lock_blocks(romfs, room)
