@@ -39,7 +39,13 @@ NOT_MOVABLE = ('Stairs', 'Downstairs', 'Upstairs', 'Warp', 'Hole', 'PlayerStart'
                'CoralTri', 'EveningCalm', 'ThunderD', 'HeartContainer', 'Owl', 'Return', 'BossDoor')
 # doorways that only work with their original neighbour (tied to their vanilla partner). Tail Cave 06A's hallway was
 # here until the catalog learnt that cells sharing a camera zone are one room (05A/06A/07A: now a fixed unit).
-PINNED = set()
+# Ledges across a room edge: a check on a raised strip that only the vanilla neighbour's ledge reaches (both rooms
+# movable: they move as a pair, the side is never sealed or jumped - chaos_free). Face Shrine 07G's chest
+# (D6-wizzrobes-ledge) sits on a strip running south into 08G, whose ramp leads up to it (user's preview-3 photo: a
+# different room below, chest out of reach). Pairs where one side stays anyway are in STAY (Key Cavern 03D, Turtle
+# Rock 03E). The audit behind these lists: notes/PLAN.md 2026-10-26.
+TIED = {('Lv06FaceShrine_07G', 'S')}
+PINNED = {x for room, s in TIED for x in ((room, s), (rooms.neighbour(room, s), rooms.OPP[s]))}
 
 
 def pinned_ok(room, s, other):
@@ -111,8 +117,15 @@ def on_map(romfs, level, c, r):
         y0 + MAP_CELL_H <= 259 + MAP_TOL
 
 
-# rooms tied to a room that stays by level-local flags: Bottle Grotto 07G's event box sets 31 / 32 for 06G's blocks
-STAY = {'Lv02BottleGrotto_07G'}
+# rooms tied to a room that stays by level-local flags: Bottle Grotto 07G's event box sets 31 / 32 for 06G's blocks.
+# Ledges whose other end stays (TIED for pairs that can move): Key Cavern 02D's east-ledge chest is reached from 03D's
+# ramp up its north edge (02D is part of a fixed unit); Turtle Rock 02E's northern-ledge chest is hookshotted from the
+# strip that 03E's ramp leads up to (02E is a fixed unit). Moved, the chest was out of reach.
+# Rooms the only possible neighbour of a room that stays (a doorway that can't jump - water channel, wide opening - and
+# that no other room matches): Catfish's Maw 04F under 03F's water channel, Angler's Tunnel 03G above 04G. Moved away
+# (another dungeon took Catfish's 04F under any room with a doorway at its slot), the round could never close.
+STAY = {'Lv02BottleGrotto_07G', 'Lv03KeyCavern_03D', 'Lv08TurtleRock_03E',
+        'Lv05CatfishsMaw_04F', 'Lv04AnglersTunnel_03G'}
 
 
 def _base_tex(romfs, level, entrance):
@@ -257,7 +270,7 @@ def plan(cat, level, entrance, seed, size=None, exit_side=None, tries=400, romfs
     def can_seal(room, s):
         if chaos:
             return chaos_side[room][s] and s not in exits.get(room, ())
-        return seal and sealable(op[room][s])
+        return seal and sealable(op[room][s]) and (room, s) not in PINNED
 
     def joined(a, b, s, home_pair):
         x, y = side_open(a, s), side_open(b, rooms.OPP[s])
@@ -488,7 +501,7 @@ CHAOS_DOORS = {'shutter', 'lock', 'cracked', 'potdoor'}  # (a jump INTO one land
 
 
 def chaos_free(cat, room, side, slot):
-    if isinstance(slot, str):
+    if isinstance(slot, str) or (room, side) in PINNED:  # (a tied side only joins its vanilla partner)
         return False
     doors = [d for d in cat[room]['doors'] if len(d) > 3 and d[0] == side and abs(d[3] - slot) <= 1]
     # a door that belonged to the old neighbour ('(mirror)') leaves a plain opening; the room's own door may still be
@@ -632,16 +645,29 @@ WARP_PADS = {0xF3}  # ObjDungeonWarp: paired warp tiles naming '<room>_Warp' sta
 GLOBAL_FLAG_BASE = 1600  # fresh event flags for generated rooms (the game uses < 1119; save bitfield = 2048 bits)
 
 
+CRYSTAL_FLAG = 9  # the level-local flag the game keeps a dungeon's crystal switch state in (FlagMap)
+
+
+def crystal_levels(cat):
+    """Levels with crystal switches in their own rooms (their uses of CRYSTAL_FLAG are the crystal state)."""
+    return {rooms.level_of(r) for r, v in cat.items() if 'ObjCrystalSw' in v.get('actors', ())}
+
+
 class FlagMap:
     """Room objects keep their state in flags: switch slot (type 1, index) = a global event flag (unique per room in
     the game: a room used twice, or played before in another dungeon, would share / inherit state), (type 0,
     index) = a level-local flag (0..254 per dungeon; rooms from different dungeons collide). Every generated
-    dungeon gets fresh numbers; objects sharing a flag in their source room keep sharing it."""
+    dungeon gets fresh numbers; objects sharing a flag in their source room keep sharing it.
+    Level-local flag 9 is the game's own: it holds the dungeon's crystal switch state (orange / blue pegs). It is never
+    handed out (a moved room's horse head with flag 9 reset the pegs on every floor change - Eagle's Tower play test;
+    clear-the-room shutters with it opened / closed with the pegs); rooms of a dungeon with crystal switches keep
+    their own uses of it (Bottle Grotto's warp-in starts)."""
 
-    def __init__(self, next_global=GLOBAL_FLAG_BASE, reserved_local=(), keep_global=()):
+    def __init__(self, next_global=GLOBAL_FLAG_BASE, reserved_local=(), keep_global=(), crystal_levels=()):
         self.g, self.l = {}, {}
         self.next_g, self.next_l = next_global, 1
-        self.reserved = set(reserved_local)  # local flags of the rooms that keep theirs (anchors)
+        self.reserved = set(reserved_local) | {CRYSTAL_FLAG}  # local flags of the rooms that keep theirs (anchors)
+        self.crystal_levels = set(crystal_levels)
         # global flags of this level's rooms that stay: a moved room sharing one (the other half of a locked door,
         # a shutter pair) keeps it - one lock, as room_logic.py counts it (a fresh flag made it two: a key short)
         self.keep = set(keep_global)
@@ -659,6 +685,8 @@ class FlagMap:
     def local(self, level, i):
         if i in (0, 255):
             return i
+        if i == CRYSTAL_FLAG and level in self.crystal_levels:
+            return i
         k = (level, i)
         if k not in self.l:
             while self.next_l in self.reserved:
@@ -668,6 +696,21 @@ class FlagMap:
             if self.next_l >= 255:
                 raise RuntimeError('out of level-local flags')
         return self.l[k]
+
+
+class _CrystalFlagOnly:
+    """The flags of a room that keeps its own (an anchor), but with its uses of CRYSTAL_FLAG renumbered: a dungeon
+    without crystal switches uses flag 9 for its own things (Catfish's Maw 05E's event box), which a crystal room
+    moved in would share."""
+
+    def __init__(self, flags):
+        self.flags = flags
+
+    def glob(self, i):
+        return i
+
+    def local(self, level, i):
+        return self.flags.local(level, i) if i == CRYSTAL_FLAG else i
 
 
 _roof_cache = {}
@@ -844,10 +887,10 @@ _grid_cache = {}
 
 
 def landing_depth(romfs, room, side, slot, min_tile):
-    """(depth, floor height): how far past the edge Link lands at a doorway (Chaos jumps) and the floor there - the
-    centre of the first tile inward from the edge,
-    along the doorway's line, that is floor - no collision, no deep water / lava / pit / crumbling floor (Turtle Rock
-    07D: lava right inside its west doorway) - starting at `min_tile` (1 = past a door of the room's own)."""
+    """(depth, floor height, lateral): how far past the edge Link lands at a doorway (Chaos jumps), the floor there and
+    how far along the edge from the doorway's centre (0, or half a tile: see below) - the first tile inward from the
+    edge, along the doorway's line, that is floor - no collision, no deep water / lava / pit / crumbling floor (Turtle
+    Rock 07D: lava right inside its west doorway) - starting at `min_tile` (1 = past a door of the room's own)."""
     import struct
     from RandomizerCore.Tools import leb
     if room not in _grid_cache:
@@ -859,26 +902,39 @@ def landing_depth(romfs, room, side, slot, min_tile):
     def tile(row, col):
         o = 0x10 * (row * 10 + col)
         return raw[o:o + 3], struct.unpack_from('<f', raw, o + 12)[0]
-    def free(i):
-        row, col = {'N': (i, along), 'S': (7 - i, along), 'W': (min(along, 7), i), 'E': (min(along, 7), 9 - i)}[side]
+    def free(i, a=along, pit_only=False):
+        row, col = {'N': (i, a), 'S': (7 - i, a), 'W': (min(a, 7), i), 'E': (min(a, 7), 9 - i)}[side]
         t, h = tile(min(row, 7), min(col, 9))
         solid = bool(t[0] & 2) and not t[2] & 8
         # bit 0: a hole under the tile - a pit, or a floor that crumbles once stood on (Turtle Rock 03G's tiles,
         # ObjDungeonCollapse...: Link landed on one inside its west doorway, it gave way and he fell - seed
         # 52YTE-YT280-5000H-4MG2E-G1000-0001V Tail Cave 07F E -> 06F W)
         hazard = (t[2] & 4 and h < -0.3) or h < -1.0 or t[0] & 1
-        return not solid and not hazard, h
+        return not hazard and (pit_only or not solid), h
+    # Link lands on the doorway's centre line (slot * 0.75, runtime/hle/doorjump.c). A two-tile doorway's centre (even
+    # slot) is the edge between tiles along-1 and along: he stands on both, and a pit in the other half (along-1)
+    # pulls him in (#383: Turtle Rock 06B's south doorway, a pit column on its left - seed WildTarin613, Catfish 04G E
+    # -> 07D S). There he lands half a tile over, on tile along's centre (the row's 10th column); with no landing on
+    # tile along at all, on tile along-1's.
+    even = not isinstance(slot, str) and slot % 2 == 0 and 0 < along < (10 if side in 'NS' else 8)
+
+    def centre(i):  # (the other half may be a wall or block: the game's collision just nudges him)
+        return not even or free(i, along - 1, True)[0]
     # never on the doorway tile itself (the game walks a Link who stands there on through the doorway - straight
     # back into the jump: DevChaos1 Color Dungeon 07H -> 08H), and only where he can walk on inward
-    for i in range(max(min_tile, 1), 5):
-        ok, h = free(i)
-        if ok and free(i + 1)[0]:
-            return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2)
-    for i in range(max(min_tile, 1), 5):
-        ok, h = free(i)
-        if ok:
-            return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2)
-    return 2.2, 0.0
+    first = max(min_tile, 1)
+    for walk_on in (True, False):
+        for i in range(first, 5):
+            ok, h = free(i)
+            if ok and (not walk_on or free(i + 1)[0]):
+                lat = 0.0 if centre(i) and (not walk_on or centre(i + 1)) else 0.75
+                return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2), lat
+    for walk_on in (True, False) if even else ():
+        for i in range(first, 5):
+            ok, h = free(i, along - 1)
+            if ok and (not walk_on or free(i + 1, along - 1)[0]):
+                return round(i * 1.5 + 0.75, 2), round(max(h, 0.0), 2), -0.75
+    return 2.2, 0.0, 0.0
 
 
 def dead_ends(cat, level, layout):
@@ -1018,8 +1074,9 @@ def _jump_row(cat, level, layout, romfs, x, y):
     # the room's own door in that doorway: arrive past it (it may still be shut)
     own = any(not d[2].endswith('(mirror)') and d[0] == y[2] and abs(d[3] - y[3]) <= 1
               for d in cat[layout[y[1]]]['doors'] if len(d) > 3)
-    depth, height = landing_depth(romfs, layout[y[1]], y[2], y[3], 1 if own else 0)
-    return (level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth, height)
+    depth, height, lateral = landing_depth(romfs, layout[y[1]], y[2], y[3], 1 if own else 0)
+    row = (level, x[1].rsplit('_', 1)[1], x[2], x[3], y[3], y[1].rsplit('_', 1)[1], y[2], depth, height)
+    return row + (lateral,) if lateral else row  # (10th column only where Link lands off the doorway's centre)
 
 
 def _madness_rows(level, layout, order, by_comp, rng, romfs, cat):
@@ -1094,7 +1151,14 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
         rng.shuffle(left)
         share = {lv: sum(1 for k in pool if k.startswith(lv + '_')) for lv in levels}
         for room in left:
-            if not all(chaos_free(cat, room, s, x[0]) for s, v in openings(cat, room).items() for x in v):
+            # a TIED pair goes in as one piece (the first room, its partner one cell over: they join physically)
+            if any(rooms.neighbour(h, hs) == room for h, hs in TIED):
+                continue  # (placed with its head)
+            group = [(room, (0, 0))] + [(rooms.neighbour(room, hs), rooms.STEP[hs]) for h, hs in TIED if h == room]
+            if any(m not in pool or m in used for m, _ in group):
+                continue
+            if not all(chaos_free(cat, m, s, x[0]) for m, _ in group for s, v in openings(cat, m).items() for x in v
+                       if (m, s) not in PINNED):
                 continue
             # the dungeon furthest below its share of the pool, then a random empty cell nobody's doorway faces
             for lv in sorted(levels, key=lambda lv: (sum(1 for v in out[lv].values() if v in pool) - share[lv],
@@ -1103,34 +1167,42 @@ def plan_all_chaos(cat, seed, romfs, levels=None, rounds=None, madness=False, se
                 # (the level's map texture archive has a budget: the leftover room's textures must fit too)
                 tex = _base_tex(romfs, lv, ENTRANCES[lv]).union(  # (as plan(): roofs and side-view passages too)
                     *(room_textures(romfs, k) for k in list(L.values()) + offgrid_rooms(romfs, cat, lv)))
-                if len(tex | room_textures(romfs, room)) > TEXTURE_BUDGET:
+                if len(tex.union(*(room_textures(romfs, m) for m, _ in group))) > TEXTURE_BUDGET:
                     continue
                 taken = {cell_pos(k) for k in L}
                 reserved = {cell_pos(n) for n in offgrid_rooms(romfs, cat, lv) if re.match(r'.*_\d\d[A-Z]$', n)}
-                free_cells = [(c, r) for c in range(COLS) for r in range(1, ROWS + 1)
-                              if (c, r) not in taken and (c, r) not in reserved and on_map(romfs, lv, c, r)]
+                free_set = {(c, r) for c in range(COLS) for r in range(1, ROWS + 1)
+                            if (c, r) not in taken and (c, r) not in reserved and on_map(romfs, lv, c, r)}
+                free_cells = sorted(free_set)
                 rng.shuffle(free_cells)
                 for c, r in free_cells:
-                    ok = True
-                    for s in 'NSWE':
-                        dc, dr = rooms.STEP[s]
-                        n = (c + dc, r + dr)
-                        if n in taken:
-                            theirs = openings(cat, L[cell_name(lv, *n)])[rooms.OPP[s]]
-                            mine = openings(cat, room)[s]
-                            if theirs and mine and [x[0] for x in mine] == [x[0] for x in theirs]:
-                                ok = False  # would join physically: keep it simple, not next to a matching doorway
-                            # a leftover never joins its neighbours: a wall across every doorway either way (an open
-                            # tile there, even another doorway's, and Link could walk on into the other room - plan()
-                            # checks this for the rooms it places: wall_behind)
-                            if (mine and not walls_off(cat, room, s, L[cell_name(lv, *n)])) or \
-                                    (theirs and not walls_off(cat, L[cell_name(lv, *n)], rooms.OPP[s], room)):
-                                ok = False
-                            if theirs and not all(chaos_free(cat, L[cell_name(lv, *n)], rooms.OPP[s], x[0]) for x in theirs):
-                                ok = False
+                    at = {m: (c + dc, r + dr) for m, (dc, dr) in group}
+                    ok = all(p in free_set for p in at.values())
+                    mine_at = {p: m for m, p in at.items()}
+                    for m, (mc, mr) in at.items() if ok else ():
+                        for s in 'NSWE':
+                            dc, dr = rooms.STEP[s]
+                            n = (mc + dc, mr + dr)
+                            if n in mine_at:
+                                continue  # (its pair partner)
+                            if n in taken:
+                                theirs = openings(cat, L[cell_name(lv, *n)])[rooms.OPP[s]]
+                                mine = openings(cat, m)[s]
+                                if theirs and mine and [x[0] for x in mine] == [x[0] for x in theirs]:
+                                    ok = False  # would join physically: keep it simple, not next to a matching doorway
+                                # a leftover never joins its neighbours: a wall across every doorway either way (an
+                                # open tile there, even another doorway's, and Link could walk on into the other room -
+                                # plan() checks this for the rooms it places: wall_behind)
+                                if (mine and not walls_off(cat, m, s, L[cell_name(lv, *n)])) or \
+                                        (theirs and not walls_off(cat, L[cell_name(lv, *n)], rooms.OPP[s], m)):
+                                    ok = False
+                                if theirs and not all(chaos_free(cat, L[cell_name(lv, *n)], rooms.OPP[s], x[0])
+                                                      for x in theirs):
+                                    ok = False
                     if ok:
-                        L[cell_name(lv, c, r)] = room
-                        used.add(room)
+                        for m, p in at.items():
+                            L[cell_name(lv, *p)] = m
+                            used.add(m)
                         break
                 else:
                     continue
@@ -1241,7 +1313,12 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
     # the wrong room / left enemies asleep)
     first_zone = max([300] + [z + 1 for z in kept_zones if z < 0x10000])
     zone_ids = {cell: first_zone + i for i, cell in enumerate(sorted(layout))}
-    flags = FlagMap(reserved_local=reserved, keep_global=kept_global)
+    flags = FlagMap(reserved_local=reserved, keep_global=kept_global, crystal_levels=crystal_levels(cat_all))
+    # crystal switches moved into a dungeon that has none: its own rooms' uses of flag 9 move out of their way
+    kept_flags = None
+    if level not in flags.crystal_levels and any('ObjCrystalSw' in cat_all.get(src, {}).get('actors', ())
+                                                 for src in layout.values()):
+        kept_flags = _CrystalFlagOnly(flags)
     cat = json.load(open(os.path.join(HERE, 'room_catalog.json')))
     if shared_flags is not None:  # several dungeons in one seed: global flags continue across them
         flags.next_g = shared_flags.next_g
@@ -1264,7 +1341,7 @@ def write(romfs, out, level, layout, entrance, own_zones=False, all_starts=False
         sibs = {(cell_pos(u)[0] - sc, cell_pos(u)[1] - sr) for u in unit} if whole else set()
         others = [(dc, dr) for dc in (-1, 0, 1) for dr in (-1, 0, 1)
                   if (dc, dr) != (0, 0) and (c0 + dc, r0 + dr) in here and (dc, dr) not in sibs]
-        _fix_room(romfs, out, cell, src, None if keep else zone_ids[cell], None if keep else flags, missing, whole,
+        _fix_room(romfs, out, cell, src, None if keep else zone_ids[cell], kept_flags if keep else flags, missing, whole,
                   corners, others)
         area, own = _source_records(romfs, src)
         r = {'name': cell, 'unit': zone_ids[cell], 'area_data': area, 'zone_data': own if own_zones else home_zone}

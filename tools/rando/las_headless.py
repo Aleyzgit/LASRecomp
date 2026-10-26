@@ -67,6 +67,8 @@ sys.modules['PySide6'] = pyside
 sys.modules['PySide6.QtCore'] = qtcore
 
 ARGS = [os.path.abspath(a) for a in sys.argv[1:4]]
+ORIG_ARGV = ARGS + sys.argv[4:]  # (a re-run with the next room layout: las_headless.main)
+SELF = os.path.abspath(__file__)  # (before the chdir below)
 sys.argv[0] = os.path.join(LAS, 'randomizer.py')  # LAS resolves its data paths from argv[0]
 sys.path.insert(0, LAS)
 os.chdir(LAS)
@@ -365,7 +367,9 @@ def main():
         extra = {name: p['room'] for name, p in pot_locs.items() if p.get('room')}
         base = (copy.deepcopy(logic_defs), copy.deepcopy(item_defs), copy.deepcopy(settings))
         layouts = jumps = None
-        for attempt in range(40):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
+        # (LARECOMP_ROOM_ATTEMPT: the first layout to try - set when a layout's item fill got stuck, see below)
+        first = int(os.environ.get('LARECOMP_ROOM_ATTEMPT', 0))
+        for attempt in range(first, 40):  # a layout whose dungeons can't be filled: the next one (same seed ID, same result)
             sub = settings['seed'] if attempt == 0 else f"{settings['seed']}~{attempt}"
             try:  # (Decoupled: Coupled with one-way doorways)
                 layouts, jumps = dungeon_gen.plan_all_chaos(cat, sub, romfs, madness=room_mode == 'decoupled',
@@ -386,6 +390,7 @@ def main():
         if layouts is None:
             raise RuntimeError('no dungeon room layout for this seed')
         room_plan = (layouts, jumps)
+        room_attempt = attempt
         if os.environ.get('LARECOMP_PLAN_ONLY'):  # (test: layouts + room logic only; =<names>: print those conditions)
             for k in os.environ['LARECOMP_PLAN_ONLY'].split(','):
                 if k in logic_defs:
@@ -458,6 +463,13 @@ def main():
     sh.give_placements.connect(lambda p: result.update(placements=p[0], randstate=p[1]))
     sh.error.connect(lambda e: errors.append(e))
     sh.start()
+    if room_plan and any('fill stuck:' in str(e) for e in errors) and room_attempt + 1 < 40:
+        # (the layout leaves too few early locations for the items - shuffler.FILL_STUCK: the next layout, in a fresh
+        # process, as if this one had been found unfillable while planning; its output and exit status are ours)
+        print(f'room layout {room_attempt}: item fill stuck - planning another', flush=True)
+        import subprocess
+        cmd = [sys.executable] + ([] if getattr(sys, 'frozen', False) else [SELF]) + ORIG_ARGV
+        sys.exit(subprocess.run(cmd, env=dict(os.environ, LARECOMP_ROOM_ATTEMPT=str(room_attempt + 1))).returncode)
     if errors or 'placements' not in result:
         for e in errors:  # (a reason the player can act on: shown by the Randomizer tab - 'error <text>' lines)
             m = re.search(r'RuntimeError: (Triforce hunt: .*)', str(e))
