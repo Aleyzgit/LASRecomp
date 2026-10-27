@@ -374,14 +374,14 @@ static void style_parchment(ImGuiStyle &s) {
     c[ImGuiCol_FrameBgHovered] = ImVec4(t.inset.x, t.inset.y * 0.99f, t.inset.z * 0.98f, 1);
     c[ImGuiCol_FrameBgActive] = ImVec4(t.inset.x * 0.99f, t.inset.y * 0.98f, t.inset.z * 0.97f, 1);
     c[ImGuiCol_CheckMark] = t.row_sel;
-    c[ImGuiCol_SliderGrab] = t.frame;
+    c[ImGuiCol_SliderGrab] = t.ring;
     c[ImGuiCol_SliderGrabActive] = t.row_sel;
     c[ImGuiCol_PlotHistogram] = c[ImGuiCol_PlotHistogramHovered] = t.row_sel;
     c[ImGuiCol_NavCursor] = clear;  // (the pieces show the cursor themselves)
-    c[ImGuiCol_Separator] = ImVec4(t.frame.x, t.frame.y, t.frame.z, 0.45f);
-    c[ImGuiCol_ScrollbarBg] = ImVec4(t.frame.x, t.frame.y, t.frame.z, 0.10f);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(t.frame_inner.x, t.frame_inner.y, t.frame_inner.z, 0.85f);
-    c[ImGuiCol_ScrollbarGrabHovered] = c[ImGuiCol_ScrollbarGrabActive] = t.frame;
+    c[ImGuiCol_Separator] = ImVec4(t.ring.x, t.ring.y, t.ring.z, 0.40f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0, 0, 0, 0.22f);  // (a dark groove; the grab in the rims' khaki gold)
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(t.ring.x, t.ring.y, t.ring.z, 0.85f);
+    c[ImGuiCol_ScrollbarGrabHovered] = c[ImGuiCol_ScrollbarGrabActive] = t.row_sel;
     c[ImGuiCol_TextSelectedBg] = ImVec4(t.row_sel.x, t.row_sel.y, t.row_sel.z, 0.35f);
     c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.10f, 0.06f, 0.02f, 0.40f);
     c[ImGuiCol_Tab] = c[ImGuiCol_TabHovered] = c[ImGuiCol_TabSelected] = clear;
@@ -902,8 +902,8 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             ImVec4 col = sel ? pt.tab_sel : lit ? pt.row_mark : pt.tab;
             if (sel && lit) col = ImVec4(col.x * 0.88f, col.y * 0.88f, col.z * 0.88f, col.w);  // (the cursor on it: deeper)
             if (!t.on) col.w *= 0.45f;
-            plastic_add(dl, ImVec2(p.x, p.y + (sel ? 0 : 2 * scale)), ImVec2(p.x + tw[k], p.y + th - 2 * scale), 10 * scale, col,
-                        PK_PILL, (sel ? 7 : 4) * scale, sel ? 1.0f : 0.55f);
+            plastic_pill(dl, ImVec2(p.x, p.y + (sel ? 0 : 2 * scale)), ImVec2(p.x + tw[k], p.y + th - 2 * scale), 10 * scale, col,
+                         (sel ? 7 : 4) * scale, sel ? 1.0f : 0.55f, scale, sel);
             ImU32 tc = sel ? pt.text_sel : t.on ? pt.text : pt.text_dim;
             ImVec2 ts(text_w[k], ImGui::GetFontSize());
             dl->AddText(ImVec2(p.x + (tw[k] - ts.x) * 0.5f, p.y + (th - ts.y) * 0.5f - (sel ? 2 : 1) * scale), tc, t.name);
