@@ -34,6 +34,7 @@ extern "C" float g_vk_scene_uv[4];
 extern "C" {
 #include "../hle.h"
 #include "../settings.h"
+#include "../menu_sfx.h"
 #include "menu.h"
 void input_reset(void);
 void save_editor_draw(float scale);  // save_editor.mm
@@ -86,6 +87,7 @@ void menu_tabs_focus(bool first_tab);
 static void set_open(bool open) {
     if (open == g_open.load()) return;
     g_open.store(open);
+    menu_sfx_play(open ? MENU_SFX_OPEN : MENU_SFX_CLOSE);
     input_reset();  // nothing held while the menu had focus leaks into the game
     bind_capture_cancel();
     if (open) {
@@ -825,6 +827,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             // had been)
             g_focus_tab = tabs[i].id, g_focus_frames = 0;
             switching = true;
+            menu_sfx_play(MENU_SFX_TAB);
         }
     }
     bool down = !any_popup && !typing && (ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown) ||
@@ -886,6 +889,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             ImGui::PushID(t.id + 2);
             bool clicked = ImGui::InvisibleButton("##tab", ImVec2(tw[k], th),
                                                   ImGuiButtonFlags_EnableNav | ImGuiButtonFlags_PressedOnClick);
+            menu_sfx_tab_item();
             ImGui::PopID();
             ImGui::PopStyleColor();
             bool focus_here = g_focus_tab == t.id || (g_focus_tab == -100 && t.id == g_tab);
@@ -1149,6 +1153,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         g_font_big = keep_big;
         ImGui::End();
         osk_draw(g_font_big, scale);  // (a text field activated with the controller)
+        menu_sfx_frame(true);
     }
 
     if (kbd) keyboard_draw(io, scale);
