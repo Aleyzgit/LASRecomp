@@ -47,6 +47,7 @@ extern "C" {
 #include "romfs_build.h"
 #include "settings.h"
 #include "input_bind.h"
+#include "menu_sfx.h"
 #include "nvn/shader_prep.h"
 bool controls_ui_took_back(void);  // ui/controls_ui.mm: B went back a step on Configure inputs
 bool rando_tab_took_back(void);   // ui/rando_tab.mm: B went back a step in the right column
@@ -1406,6 +1407,7 @@ static void prelaunch_tab(float sc) {
 extern "C" void launcher_run(const char *root) {
     g_root = root;
     g_start_screen = 1;
+    menu_sfx_set_game_dir(root);
     static bool update_checked;  // (once per launch, not again after a "Title screen" reboot)
     if (!update_checked && !getenv("LARECOMP_NO_UPDATE_CHECK")) {
         update_checked = true;
@@ -1671,6 +1673,7 @@ extern "C" void launcher_run(const char *root) {
             // controller is connected
             if (SDL_HasGamepad()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
             ImGui::NewFrame();
+            const Page frame_page = page;  // (menu_sfx_frame: B on the main page does nothing)
 
             ImVec2 ds = io.DisplaySize;
             float s = ds.y / 720.0f;  // layout scale (fonts are built for ~2x)
@@ -2181,6 +2184,7 @@ extern "C" void launcher_run(const char *root) {
             osk_draw(g_font_menu, s * 0.7f);
             if (osk_up) plastic_widgets(false), menu_style_end();
             typed_before = ui_text_busy();
+            menu_sfx_frame(frame_page != MAIN);
 
             ImGui::Render();
 #ifdef __APPLE__
