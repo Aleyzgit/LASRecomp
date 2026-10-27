@@ -36,7 +36,10 @@ MINFLAG  := $(if $(MACOS_MIN),-mmacosx-version-min=$(MACOS_MIN))
 CC       := clang $(MINFLAG) $(CROSS)
 CXX      := clang++ $(MINFLAG) $(CROSS)
 IMGUI    := third_party/imgui
-GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -Iruntime
+# -mllvm -disable-licm-promotion: LLVM's LICM pass takes minutes on the few generated files that hold one giant function (main_404 / main_406:
+# 12 and 11 minutes at -O1 on a Steam Deck, 33 and 56 s without the promotion; the rest of the files cost the same). Keep in step with GAMELIB_CFLAGS
+# in runtime/gamebuild.c (the start screen's build of the same code).
+GENFLAGS := -O1 -fno-strict-aliasing -Wno-return-type -Wno-unused-label -fvisibility=hidden -mllvm -disable-licm-promotion -Iruntime
 
 # The game code (made by `make gen` from your own game files) is its own library next to the app (runtime/gamelib.h);
 # the app itself holds none of it
