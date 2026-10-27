@@ -95,7 +95,7 @@ static void save_png(id<MTLTexture> tex, const char *path) {
 // and it previews LARECOMP_TEST_OF - the update check offers that release (or a later one) as soon as it's out, so its
 // players move to it.
 #define LARECOMP_VERSION "beta_5.4"
-#define LARECOMP_TEST_OF "beta_5.5"
+#define LARECOMP_TEST_OF "beta_5.4"
 extern "C" const char *larecomp_version(void) { return LARECOMP_VERSION; }  // (the shader caches' tag)
 
 // ------------------------------------------------------------------ update check
