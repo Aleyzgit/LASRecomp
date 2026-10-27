@@ -889,6 +889,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
             ImGui::PushID(t.id + 2);
             bool clicked = ImGui::InvisibleButton("##tab", ImVec2(tw[k], th),
                                                   ImGuiButtonFlags_EnableNav | ImGuiButtonFlags_PressedOnClick);
+            menu_sfx_tab_item();
             ImGui::PopID();
             ImGui::PopStyleColor();
             bool focus_here = g_focus_tab == t.id || (g_focus_tab == -100 && t.id == g_tab);

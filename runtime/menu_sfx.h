@@ -19,6 +19,8 @@ void menu_sfx_set_game_dir(const char *dir);
 // After an ImGui frame of the menu (its thread, before ImGui::Render): the controller's cursor moving plays the cursor
 // sound, A / Enter / a click on something the decide sound, B / Esc (back_ok) the cancel sound.
 void menu_sfx_frame(bool back_ok);
+// The item just drawn is a menu tab: a click or A on it plays the tab sound (as L / R), not decide. Each frame.
+void menu_sfx_tab_item(void);
 // Nothing played for a while: the stream pauses (menu_sfx_frame calls it).
 void menu_sfx_idle_check(void);
 // The test hook (LARECOMP_MENU_SFX_TEST=1, main.c): load the sounds now (LARECOMP_NO_AUDIO too) and log each one.

@@ -552,6 +552,17 @@ void opt_collect_end(void) { g_collect = NULL, g_indent = g_collect_indent; }
 
 // The menu's sounds this frame (menu_sfx.h): what the controller's cursor and the presses did. Value steps, greyed-out
 // rows (above), tab switches and the menu opening / closing (menu.mm) play theirs where they happen.
+static ImGuiID g_tab_ids[16];  // (the menu tabs drawn this frame)
+static int g_ntab_ids;
+extern "C" void menu_sfx_tab_item(void) {
+    if (g_ntab_ids < 16) g_tab_ids[g_ntab_ids++] = ImGui::GetItemID();
+}
+static bool is_tab(ImGuiID id) {
+    for (int i = 0; i < g_ntab_ids; i++)
+        if (g_tab_ids[i] == id) return true;
+    return false;
+}
+
 extern "C" void menu_sfx_frame(bool back_ok) {
     ImGuiContext &g = *ImGui::GetCurrentContext();
     static ImGuiContext *ctx;  // (the start screen's and the game's overlay are two)
@@ -563,10 +574,12 @@ extern "C" void menu_sfx_frame(bool back_ok) {
         if (back_ok && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight, false) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)))
             menu_sfx_play(MENU_SFX_CANCEL);
         else if (g.NavActivatePressedId || (ImGui::IsMouseClicked(0) && g.HoveredId))
-            menu_sfx_play(MENU_SFX_DECIDE);
+            menu_sfx_play(is_tab(g.NavActivatePressedId ? g.NavActivatePressedId : g.HoveredId) ? MENU_SFX_TAB
+                                                                                                : MENU_SFX_DECIDE);
         else if (g.NavCursorVisible && g.NavId && last && g.NavId != last)
             menu_sfx_play(MENU_SFX_CURSOR);
     }
     last = g.NavId;
+    g_ntab_ids = 0;
     menu_sfx_idle_check();
 }
