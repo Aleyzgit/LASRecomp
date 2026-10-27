@@ -128,7 +128,7 @@ static void ammo(const char *t, uint32_t count_off, int up_bit, int base_cap, co
 static void max_out(void) {
     F<uint16_t>(CONTAINERS) = 0x1FF;
     F<uint64_t>(PIECES) = 0xFFFFFFFFull;
-    F<uint32_t>(RUPEES) = 999;
+    F<uint32_t>(RUPEES) = 9999;
     F<uint64_t>(SHELLS) = low_bits(50);
     F<uint8_t>(LEAVES) = 0x1F;
     F<uint32_t>(ITEMS) |= 0xFFFF;
@@ -143,7 +143,7 @@ static void max_out(void) {
 // ---- the sections' rows (each its own function: the right column shows one)
 static void sec_quick(void) {
     if (opt_button("Max out everything", "Every heart, item, upgrade, song, instrument and dungeon key, full ammo, "
-                                         "999 rupees, all 50 Secret Seashells and 5 Golden Leaves.\n\n"
+                                         "9999 rupees, all 50 Secret Seashells and 5 Golden Leaves.\n\n"
                                          "The hearts on the HUD update after the next screen change."))
         max_out();
     if (opt_button("Refill hearts & ammo", "Refills health, and the bombs, arrows and Magic Powder Link owns.")) {
@@ -174,7 +174,7 @@ static void sec_player(void) {
             F<int16_t>(HP) = (int16_t)fmaxf(1, roundf(hearts * 4));
     }
     int rupees = (int)F<uint32_t>(RUPEES);
-    if (opt_int("Rupees", &rupees, 0, 999, 1, 0, "%d", "Rupees in Link's wallet (up to 999).\n\nHold left / right to go faster."))
+    if (opt_int("Rupees", &rupees, 0, 9999, 1, 0, "%d", "Rupees in Link's wallet (up to 9999).\n\nHold left / right to go faster."))
         F<uint32_t>(RUPEES) = (uint32_t)rupees;
     int shells = __builtin_popcountll(F<uint64_t>(SHELLS) & low_bits(50));
     if (opt_int("Secret Seashells", &shells, 0, 50, 1, 0, "%d / 50", "Secret Seashells collected."))
@@ -443,7 +443,7 @@ extern "C" void save_editor_frame(uint64_t frame) {
     static long test_at = -2;  // LARECOMP_SAVE_MAX_AT=<frame>: press "Max out everything" (test hook)
     if (test_at == -2) test_at = getenv("LARECOMP_SAVE_MAX_AT") ? atol(getenv("LARECOMP_SAVE_MAX_AT")) : -1;
     if (test_at >= 0 && (long)frame == test_at && loaded()) {
-        F<uint16_t>(CONTAINERS) = 0x1FF; F<uint64_t>(PIECES) = 0xFFFFFFFFull; F<uint32_t>(RUPEES) = 999;
+        F<uint16_t>(CONTAINERS) = 0x1FF; F<uint64_t>(PIECES) = 0xFFFFFFFFull; F<uint32_t>(RUPEES) = 9999;
         F<uint64_t>(SHELLS) = low_bits(50); F<uint8_t>(LEAVES) = 0x1F; F<uint32_t>(ITEMS) |= 0xFFFF; F<uint8_t>(UPGRADES) |= 0x3F;
         F<uint8_t>(BOMBS) = 60; F<uint8_t>(ARROWS) = 60; F<uint8_t>(POWDER) = 40; F<uint8_t>(SONGS) = 7;
         F<uint32_t>(KEYITEMS) |= 0x7FFF; F<uint8_t>(SENSOR) |= 1; F<int16_t>(HP) = (int16_t)max_hp();

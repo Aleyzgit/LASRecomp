@@ -60,7 +60,7 @@ extern "C" void cheats_frame(void) {
         fill_ammo(ARROWS, 3, 5, 30);
         fill_ammo(POWDER, 8, 3, 20);
     }
-    if (g_settings.cheat_rupees && F<uint32_t>(RUPEES) != 999) F<uint32_t>(RUPEES) = 999;
+    if (g_settings.cheat_rupees && F<uint32_t>(RUPEES) != 9999) F<uint32_t>(RUPEES) = 9999;
 }
 
 extern "C" void cheats_draw(float scale) {
@@ -75,7 +75,7 @@ extern "C" void cheats_draw(float scale) {
     if (opt_toggle("Infinite ammo", &g_settings.cheat_ammo, false,
                    "Bombs, arrows and Magic Powder stay full.\n\nOnly for the bags Link already owns."))
         settings_save();
-    if (opt_toggle("Infinite rupees", &g_settings.cheat_rupees, false, "Rupees stay at 999.")) settings_save();
+    if (opt_toggle("Infinite rupees", &g_settings.cheat_rupees, false, "Rupees stay at 9999.")) settings_save();
 
     opt_section("One time");
     if (opt_button("Max hearts", "Gives all 9 Heart Containers and 32 Pieces of Heart (20 hearts), then refills them.\n\n"
