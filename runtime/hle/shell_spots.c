@@ -114,6 +114,7 @@ static int load_locked(void) {
     FILE *f = fopen(path, "r");
     if (!f) return __atomic_store_n(&g_n, 0, __ATOMIC_RELEASE), 0;
     while (fgets(line, sizeof line, f) && n < MAXSPOTS) {
+        line[strcspn(line, "\r\n")] = 0;  // (Windows seeds: CRLF lines, read in binary mode)
         if (line[0] == '#') continue;
         char *col[17], *save = NULL;
         int nc = 0;
