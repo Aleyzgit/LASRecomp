@@ -1,4 +1,5 @@
 #include "settings.h"
+#include "game_font.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,7 @@ const char *const g_screen_filters[N_SCREEN_FILTERS] = {"Off", "Game Boy", "Game
 static const char *const k_screen_filter_keys[N_SCREEN_FILTERS] = {"off", "gameboy", "gameboy_color", "grayscale"};  // (else: off)
 
 Settings g_settings = {
+    .game_font = "auto",
     .aspect = ASPECT_UNLOCKED,
     .fullscreen = false,
     .volume = 1.0f,
@@ -135,13 +137,13 @@ void settings_load(void) {
     loaded = true;
     FILE *f = fopen(SETTINGS_FILE, "r");
     if (!f) return;
-    char line[256];
+    char line[512];
     bool tip_key = false, aspect_key = false;
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0;
         char key[64];
-        char val[128] = {0};
-        int fields = sscanf(line, " %63[^= ] = %127[^\n]", key, val);
+        char val[256] = {0};
+        int fields = sscanf(line, " %63[^= ] = %255[^\n]", key, val);
         if (fields < 1) continue;
         if (!strcmp(key, "rando_seed")) {
             strlcpy(g_settings.rando_seed, val, sizeof g_settings.rando_seed);
@@ -182,6 +184,9 @@ void settings_load(void) {
                                                               PROMPTS_XBOX : !strcmp(val, "playstation") ? PROMPTS_PLAYSTATION : PROMPTS_AUTO;
         else if (!strcmp(key, "menu_confirm")) g_settings.menu_confirm = !strcmp(val, "game") ? MENU_CONFIRM_GAME
                                                                                                   : MENU_CONFIRM_CONTROLLER;
+        else if (!strcmp(key, "game_font")) {
+            if (game_font_choice_valid(val)) strlcpy(g_settings.game_font, val, sizeof g_settings.game_font);
+        }
         else if (!strcmp(key, "language")) {  // ("auto" or one of the game's codes; anything else: auto)
             // (zh-CN / zh-TW: what a settings file from before this wrote; the game reads zh-Hans / zh-Hant)
             const char *v = !strcmp(val, "zh-CN") ? "zh-Hans" : !strcmp(val, "zh-TW") ? "zh-Hant" : val;
@@ -270,6 +275,7 @@ void settings_save(void) {
     fprintf(f, "prompts = %s\n", prompts[g_settings.prompts & 3]);
     fprintf(f, "menu_confirm = %s\n", g_settings.menu_confirm == MENU_CONFIRM_CONTROLLER ? "controller" : "game");
     fprintf(f, "mirror_mode = %d\n", g_settings.mirror_mode);
+    fprintf(f, "game_font = %s\n", game_font_choice_valid(g_settings.game_font) ? g_settings.game_font : "auto");
     fprintf(f, "language = %s\n", g_language_codes[g_settings.language > LANG_AUTO && g_settings.language < N_LANGUAGES
                                                      ? g_settings.language : LANG_AUTO]);
     fprintf(f, "tracker = %d\n", g_settings.tracker);

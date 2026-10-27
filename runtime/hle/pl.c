@@ -29,6 +29,16 @@
 
 #include "../hle.h"
 #include "../paths.h"
+#include "../settings.h"
+#include "../game_font.h"
+
+static pthread_mutex_t font_info_lock = PTHREAD_MUTEX_INITIALIZER;
+static char loaded_font[640];
+void game_font_loaded(char *out, size_t size) {
+    pthread_mutex_lock(&font_info_lock);
+    snprintf(out, size, "%s", loaded_font);
+    pthread_mutex_unlock(&font_info_lock);
+}
 
 // macOS and Windows have system fonts known to work well (Hiragino / Yu Gothic): the OS's fonts first, untouched.
 // Everywhere else the bundled BIZ UDPGothic serves ahead of them and every substitute gets the console's metrics.
@@ -49,10 +59,12 @@ static void put32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2]
 static uint8_t *read_file(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    *len = (size_t)ftell(f);
-    fseek(f, 0, SEEK_SET);
+    if (fseek(f, 0, SEEK_END)) { fclose(f); return NULL; }
+    long size = ftell(f);
+    if (size < 12 || size > 64 * 1024 * 1024 || fseek(f, 0, SEEK_SET)) { fclose(f); return NULL; }
+    *len = (size_t)size;
     uint8_t *p = malloc(*len + 4);
+    if (!p) { fclose(f); return NULL; }
     if (fread(p, 1, *len, f) != *len) { free(p); p = NULL; }
     fclose(f);
     return p;
@@ -93,11 +105,19 @@ static size_t bfttf_decode(uint8_t *d, size_t len) {
 static uint8_t *ttc_face0(const uint8_t *f, size_t len, size_t *out_len) {
     if (len < 16 || memcmp(f, "ttcf", 4)) return NULL;
     uint32_t o = be32(f + 12);
-    if (o + 12 > len) return NULL;
+    if (o > len || len - o < 12) return NULL;
     uint32_t nt = (uint32_t)f[o + 4] << 8 | f[o + 5];
+    if (12 + 16 * (size_t)nt > len - o) return NULL;
     size_t total = 12 + 16 * nt;
-    for (uint32_t i = 0; i < nt; i++) total += (be32(f + o + 12 + 16 * i + 12) + 3) & ~3u;
+    for (uint32_t i = 0; i < nt; i++) {
+        const uint8_t *e = f + o + 12 + 16 * i;
+        size_t off = be32(e + 8), n = be32(e + 12);
+        if (off > len || n > len - off) return NULL;
+        total += (n + 3) & ~(size_t)3;
+        if (total > 64 * 1024 * 1024) return NULL;
+    }
     uint8_t *out = calloc(1, total);
+    if (!out) return NULL;
     memcpy(out, f + o, 12);
     size_t pos = 12 + 16 * nt;
     for (uint32_t i = 0; i < nt; i++) {
@@ -117,36 +137,52 @@ static uint8_t *ttc_face0(const uint8_t *f, size_t len, size_t *out_len) {
 // Does the font map this character to a glyph? (its cmap: format 4 or 12 subtables, Unicode encodings)
 static bool font_has(const uint8_t *f, size_t len, uint32_t cp) {
     if (len < 12) return false;
-    uint32_t nt = (uint32_t)f[4] << 8 | f[5], cmap = 0, cmap_len = 0;
-    for (uint32_t i = 0; i < nt && 12 + 16 * (i + 1) <= len; i++)
-        if (!memcmp(f + 12 + 16 * i, "cmap", 4)) { cmap = be32(f + 12 + 16 * i + 8); cmap_len = be32(f + 12 + 16 * i + 12); }
-    if (!cmap || (size_t)cmap + cmap_len > len || cmap_len < 4) return false;
-    const uint8_t *c = f + cmap, *end = f + cmap + cmap_len;
-    uint32_t ns = (uint32_t)c[2] << 8 | c[3];
-    for (uint32_t i = 0; i < ns && c + 4 + 8 * (i + 1) <= end; i++) {
-        uint32_t plat = (uint32_t)c[4 + 8 * i] << 8 | c[5 + 8 * i], enc = (uint32_t)c[6 + 8 * i] << 8 | c[7 + 8 * i];
-        if (!(plat == 0 || (plat == 3 && (enc == 1 || enc == 10)))) continue;  // (Unicode subtables only)
-        const uint8_t *t = c + be32(c + 8 + 8 * i);
-        if (t + 4 > end) continue;
-        uint32_t fmt = (uint32_t)t[0] << 8 | t[1];
-        if (fmt == 4 && cp <= 0xFFFF && t + 14 <= end) {
-            uint32_t segs = ((uint32_t)t[6] << 8 | t[7]) / 2;
-            const uint8_t *ends = t + 14, *starts = ends + 2 * segs + 2, *deltas = starts + 2 * segs, *ranges = deltas + 2 * segs;
-            if (ranges + 2 * segs > end) continue;
-            for (uint32_t k = 0; k < segs; k++) {
-                uint32_t e = (uint32_t)ends[2 * k] << 8 | ends[2 * k + 1], st = (uint32_t)starts[2 * k] << 8 | starts[2 * k + 1];
-                if (cp > e) continue;
-                if (cp < st) break;
-                uint32_t ro = (uint32_t)ranges[2 * k] << 8 | ranges[2 * k + 1], d = (uint32_t)deltas[2 * k] << 8 | deltas[2 * k + 1];
-                if (!ro) return ((cp + d) & 0xFFFF) != 0;
-                const uint8_t *g = ranges + 2 * k + ro + 2 * (cp - st);
-                return g + 2 <= end && ((((uint32_t)g[0] << 8 | g[1]) + (g[0] | g[1] ? d : 0)) & 0xFFFF) != 0;
-            }
-        } else if (fmt == 12 && t + 16 <= end) {
-            uint32_t ng = be32(t + 12);
-            for (uint32_t k = 0; k < ng && t + 16 + 12 * (k + 1) <= end; k++) {
-                const uint8_t *gr = t + 16 + 12 * k;
-                if (cp >= be32(gr) && cp <= be32(gr + 4)) return be32(gr + 8) + (cp - be32(gr)) != 0;
+    unsigned nt = (unsigned)f[4] << 8 | f[5];
+    if (12 + 16 * (size_t)nt > len) return false;
+    for (unsigned i = 0; i < nt; i++) {
+        const uint8_t *e = f + 12 + 16 * i;
+        if (memcmp(e, "cmap", 4)) continue;
+        size_t off = be32(e + 8), size = be32(e + 12);
+        if (off > len || size > len - off || size < 4) return false;
+        const uint8_t *c = f + off;
+        unsigned ns = (unsigned)c[2] << 8 | c[3];
+        if (4 + 8 * (size_t)ns > size) return false;
+        for (unsigned j = 0; j < ns; j++) {
+            const uint8_t *r = c + 4 + 8 * j;
+            unsigned plat = (unsigned)r[0] << 8 | r[1], enc = (unsigned)r[2] << 8 | r[3];
+            if (!(plat == 0 || (plat == 3 && (enc == 1 || enc == 10)))) continue;
+            size_t pos = be32(r + 4);
+            if (pos > size || size - pos < 4) continue;
+            const uint8_t *t = c + pos;
+            size_t left = size - pos;
+            unsigned fmt = (unsigned)t[0] << 8 | t[1];
+            if (fmt == 4 && cp <= 0xffff && left >= 14) {
+                unsigned segs = ((unsigned)t[6] << 8 | t[7]) / 2;
+                if (16 + 8 * (size_t)segs > left) continue;
+                const uint8_t *ends = t + 14, *starts = ends + 2 * segs + 2;
+                const uint8_t *deltas = starts + 2 * segs, *ranges = deltas + 2 * segs;
+                for (unsigned k = 0; k < segs; k++) {
+                    unsigned hi = (unsigned)ends[2*k] << 8 | ends[2*k+1];
+                    unsigned lo = (unsigned)starts[2*k] << 8 | starts[2*k+1];
+                    if (cp > hi) continue;
+                    if (cp < lo) break;
+                    unsigned ro = (unsigned)ranges[2*k] << 8 | ranges[2*k+1];
+                    unsigned delta = (unsigned)deltas[2*k] << 8 | deltas[2*k+1];
+                    if (!ro) { if (((cp + delta) & 0xffff) != 0) return true; break; }
+                    size_t g = (size_t)(ranges - t) + 2*k + ro + 2*(cp - lo);
+                    if (g <= left && left - g >= 2) {
+                        unsigned glyph = (unsigned)t[g] << 8 | t[g+1];
+                        if (glyph && ((glyph + delta) & 0xffff)) return true;
+                    }
+                    break;
+                }
+            } else if (fmt == 12 && left >= 16) {
+                uint32_t ng = be32(t + 12);
+                if (ng > (left - 16) / 12) continue;
+                for (uint32_t k = 0; k < ng; k++) {
+                    const uint8_t *g = t + 16 + 12 * k;
+                    if (cp >= be32(g) && cp <= be32(g + 4) && be32(g + 8) + (cp - be32(g))) return true;
+                }
             }
         }
     }
@@ -182,6 +218,72 @@ static void match_switch_metrics(uint8_t *d, size_t len) {
     os2[76] = (uint8_t)(desc >> 8), os2[77] = (uint8_t)desc;  // usWinDescent
 }
 
+// The game needs TrueType outlines (a CFF OpenType font crashes its font engine).
+static bool font_tables_valid(const uint8_t *d, size_t len) {
+    if (len < 12 || (be32(d) != 0x00010000u && be32(d) != 0x74727565u)) return false;
+    unsigned n = (unsigned)d[4] << 8 | d[5];
+    if (12 + 16 * (size_t)n > len) return false;
+    bool glyf = false;
+    for (unsigned i = 0; i < n; i++) {
+        const uint8_t *e = d + 12 + 16 * i;
+        size_t off = be32(e + 8), size = be32(e + 12);
+        if (off > len || size > len - off) return false;
+        if (!memcmp(e, "glyf", 4)) glyf = true;
+    }
+    return glyf;
+}
+
+static void font_description(const uint8_t *d, size_t len, const char *path, char *out, size_t cap) {
+    char family[192] = "";
+    unsigned nt = (unsigned)d[4] << 8 | d[5];
+    for (unsigned i = 0; i < nt; i++) {
+        const uint8_t *e = d + 12 + 16 * i;
+        if (memcmp(e, "name", 4)) continue;
+        size_t off = be32(e + 8), size = be32(e + 12);
+        if (size < 6) break;
+        const uint8_t *t = d + off;
+        unsigned n = (unsigned)t[2] << 8 | t[3], strings = (unsigned)t[4] << 8 | t[5];
+        for (unsigned k = 0; k < n && 6 + 12 * (size_t)(k + 1) <= size; k++) {
+            const uint8_t *r = t + 6 + 12 * k;
+            unsigned platform = (unsigned)r[0] << 8 | r[1], lang = (unsigned)r[4] << 8 | r[5];
+            unsigned id = (unsigned)r[6] << 8 | r[7], bytes = (unsigned)r[8] << 8 | r[9];
+            size_t pos = strings + ((unsigned)r[10] << 8 | r[11]);
+            if (platform != 3 || id != 1 || pos > size || bytes > size - pos || (family[0] && lang != 0x409)) continue;
+            size_t used = 0;
+            for (unsigned j = 0; j + 1 < bytes && used + 4 < sizeof family; j += 2) {
+                unsigned c = (unsigned)t[pos + j] << 8 | t[pos + j + 1];
+                if (c < 32 || (c >= 0xd800 && c <= 0xdfff)) continue;
+                if (c < 0x80) family[used++] = c;
+                else if (c < 0x800) family[used++] = 0xc0 | (c >> 6), family[used++] = 0x80 | (c & 63);
+                else family[used++] = 0xe0 | (c >> 12), family[used++] = 0x80 | ((c >> 6) & 63), family[used++] = 0x80 | (c & 63);
+            }
+            family[used] = 0;
+            if (lang == 0x409 && used) break;
+        }
+        break;
+    }
+    if (!strcmp(family, "nintendo_udsg-r_std_003")) snprintf(family, sizeof family, "Morisawa UD Shin Go Regular");
+    snprintf(out, cap, "%s%s%s%s", family, family[0] ? " (" : "", path, family[0] ? ")" : "");
+    (void)len;
+}
+
+bool game_font_describe(const char *path, char *out, size_t cap) {
+    size_t len;
+    uint8_t *d = read_file(path, &len);
+    if (!d) return false;
+    size_t n = strlen(path);
+    if (n > 6 && !strcasecmp(path + n - 6, ".bfttf")) len = bfttf_decode(d, len);
+    else if (!memcmp(d, "ttcf", 4)) {
+        size_t size;
+        uint8_t *face = ttc_face0(d, len, &size);
+        free(d); d = face; len = face ? size : 0;
+    }
+    bool ok = d && font_tables_valid(d, len) && font_usable(d, len);
+    if (ok) font_description(d, len, path, out, cap);
+    free(d);
+    return ok;
+}
+
 static int load_one_checked(const char *path, Font *ft, bool check);
 static int load_one(const char *path, Font *ft) { return load_one_checked(path, ft, false); }
 static int load_one_checked(const char *path, Font *ft, bool check) {
@@ -201,6 +303,9 @@ static int load_one_checked(const char *path, Font *ft, bool check) {
         d = f0;
         len = l2;
     }
+    if (!font_tables_valid(d, len)) {
+        LOG("[pl] %s: not a supported TrueType font\n", path); free(d); return 0;
+    }
     if (!console_font && !OS_FONTS_KNOWN) match_switch_metrics(d, len);  // (a .ttf of the console's own: already so)
     if (check && !font_usable(d, len)) {
         LOG("[pl] %s: no glyph for a space or \"\u25A1\" (U+25A1) - skipped\n", path);
@@ -209,6 +314,11 @@ static int load_one_checked(const char *path, Font *ft, bool check) {
     }
     void *p = hle_alloc(len + 16);
     memcpy(p, d, len);
+    if (ft == &fonts[F_STD]) {
+        pthread_mutex_lock(&font_info_lock);
+        font_description(d, len, path, loaded_font, sizeof loaded_font);
+        pthread_mutex_unlock(&font_info_lock);
+    }
     free(d);
     ft->addr = (uint64_t)p;
     ft->size = len;
@@ -217,7 +327,12 @@ static int load_one_checked(const char *path, Font *ft, bool check) {
 }
 
 static int g_fonts_loaded;
-RT_ON_RESET(pl_reset) { g_fonts_loaded = 0; memset(fonts, 0, sizeof fonts); }  // (they were in the HLE heap)
+RT_ON_RESET(pl_reset) {
+    g_fonts_loaded = 0; memset(fonts, 0, sizeof fonts);
+    pthread_mutex_lock(&font_info_lock);
+    loaded_font[0] = 0;
+    pthread_mutex_unlock(&font_info_lock);
+}  // (they were in the HLE heap)
 
 static void load_fonts(void) {
     if (g_fonts_loaded) return;
@@ -289,15 +404,26 @@ static void load_fonts(void) {
         } else
             fclose(f);
     }
-    char bundled[1100];
+    char bundled[1100], selected[300] = "";
+    bool system = !strcmp(g_settings.game_font, "system");
+    if (game_font_choice_valid(g_settings.game_font) && strcmp(g_settings.game_font, "auto") && !system) {
+        snprintf(selected, sizeof selected, "fonts/%s", g_settings.game_font);
+        char description[640];
+        if (!game_font_describe(selected, description, sizeof description)) {
+            LOG("[pl] selected text font %s missing or unusable; using Automatic\n", selected);
+            selected[0] = 0;
+        }
+    }
     for (int t = 0; t < N_FONT_TYPES; t++) {
         if (env && !load_one(env, &fonts[t])) {
             LOG("[pl] LARECOMP_FONT %s: not a font the game can use, using the normal fonts\n", env);
             env = NULL;
         }
+        if (!fonts[t].addr && selected[0] && t != F_EXT) load_one_checked(selected, &fonts[t], true);
         for (size_t i = 0; !fonts[t].addr && chains[t][i]; i++) {
             const char *f = chains[t][i];
-            bool own = strncmp(f, "fonts/", 6) == 0;  // (the console's own files: as they are)
+            bool own = strncmp(f, "fonts/", 6) == 0;
+            if (system && own && t != F_EXT) continue;  // (the console's own files: as they are)
             // Standard in Chinese / Korean, once the console's own files are passed: that language's system font
             if (t == F_STD && std_native && !own && i && strncmp(chains[t][i - 1], "fonts/", 6) == 0) {
                 for (size_t k = 0; !fonts[t].addr && std_native[k]; k++)

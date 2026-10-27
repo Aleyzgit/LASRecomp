@@ -60,6 +60,12 @@ int main(int argc, char **argv) {
         settings_save();
         return 0;
     }
+    if (argc == 3 && !strcmp(argv[1], "game-font")) {
+        settings_load();
+        assert(!strcmp(g_settings.game_font, argv[2]));
+        settings_save();
+        return 0;
+    }
     assert(argc == 3);
     settings_load();
     assert(!g_settings.upscaler_auto);

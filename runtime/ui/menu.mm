@@ -14,6 +14,7 @@
 
 #include "imgui.h"
 #include "option_rows.h"
+#include "game_font_ui.h"
 #include "imgui_internal.h"  // (NavCursorVisible)
 #include "osk.h"
 #include "pad_nav.h"
@@ -470,6 +471,9 @@ static void tab_display(void) {
         g_want_fullscreen_apply.store(true);
     }
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
+
+    opt_section("Text");
+    game_font_row();
 
     opt_section("Rendering");
     // display order -> RES_* (the ini / enum order predates the menu order)

@@ -11,7 +11,7 @@ with tempfile.TemporaryDirectory() as directory:
     directory = Path(directory)
     exe = directory / ('settings-test.exe' if os.name == 'nt' else 'settings-test')
     subprocess.run(shlex.split(os.environ.get('CC', 'clang')) +
-                   ['-std=gnu11', '-Iruntime', 'runtime/settings.c', 'runtime/cosmetic_colour.c', 'tools/test_settings.c', '-o', str(exe), '-lm'],
+                   ['-std=gnu11', '-Iruntime', 'runtime/settings.c', 'runtime/cosmetic_colour.c', 'runtime/game_font.c', 'tools/test_settings.c', '-o', str(exe), '-lm'],
                    cwd=ROOT, check=True)
     cases = [(setting, {}, code) for setting, code in
              [('zh-CN', 'zh-Hans'), ('zh-TW', 'zh-Hant'), ('zh-Hans', 'zh-Hans'),
@@ -80,4 +80,16 @@ with tempfile.TemporaryDirectory() as directory:
         saved = ini.read_text()
         assert (f'rando_options = {value}\n' in saved) if value else 'rando_options' not in saved, saved
         count += 1
+    for newline in ['\n', '\r\n']:
+        for choice, expected in [('auto', 'auto'), ('system', 'system'), ('custom.ttf', 'custom.ttf'),
+                                 ('font with spaces.TTC', 'font with spaces.TTC'),
+                                 ('nintendo_udsgr_std_003.ttf', 'nintendo_udsgr_std_003.ttf'),
+                                 ('x' * 180 + '.ttf', 'x' * 180 + '.ttf'),
+                                 ('../outside.ttf', 'auto'), ('C:/outside.ttf', 'auto'), ('bad.otf', 'auto')]:
+            ini = directory / 'test.ini'
+            ini.write_bytes((f'game_font = {choice}' + newline).encode())
+            subprocess.run([str(exe), 'game-font', expected],
+                           env=dict(os.environ, LARECOMP_SETTINGS=str(ini)), check=True, capture_output=True)
+            assert f'game_font = {expected}\n' in ini.read_text()
+            count += 1
     print(f'{count} parser, locale, upscaler / resolution default and roundtrip cases passed (LF/CRLF, empty/nonempty seeds)')

@@ -67,7 +67,9 @@ jobs:
           clang -O2 -pthread tools/test_condvar.c -o build/test-condvar
           build/test-condvar
       - name: Settings regression tests
-        run: python3 tools/test_settings.py
+        run: |
+          python3 tools/test_settings.py
+          python3 tools/test_game_font.py
       - name: Game-files delete guard (links, outside the data folder)
         run: DEPS="$HOME/sdl3" python3 tools/test_delete_guard.py
       - name: Data folder move (cut off at every step)
@@ -147,7 +149,9 @@ jobs:
           clang -O2 -pthread tools/test_condvar.c -o build/test-condvar
           build/test-condvar
       - name: Settings regression tests
-        run: python3 tools/test_settings.py
+        run: |
+          python3 tools/test_settings.py
+          python3 tools/test_game_font.py
       - name: Game-files delete guard (links, outside the data folder)
         run: python3 tools/test_delete_guard.py
       - name: Data folder move (cut off at every step)
@@ -223,6 +227,10 @@ jobs:
           python3 tools/test_windows_processes.py
       - name: Save I/O regression tests
         run: python3 tools/test_save.py
+      - name: Settings and game font selection
+        run: |
+          python3 tools/test_settings.py
+          python3 tools/test_game_font.py
       - name: Game-files delete guard (junctions, outside the data folder)
         run: python3 tools/test_delete_guard.py
       - name: Data folder move (cut off at every step)
