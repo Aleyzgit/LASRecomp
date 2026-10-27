@@ -201,6 +201,7 @@ without touching the installed game, your game files or your saves.
 - **[@gtf-dot](https://github.com/gtf-dot)** - the game-text font on Linux (#330)
 - **[@cfcosta](https://github.com/cfcosta)** - full speed on Linux AMD handhelds like the Steam Deck and ROG Ally (#392)
 - **[@gsel001](https://github.com/gsel001)** - a check in CI that the Mac app starts (#420)
+- **[@wimw85](https://github.com/wimw85)** - much faster game code setup on the Steam Deck and other PCs (#434)
 
 Thanks also to everyone who reports issues and tests builds. Your logs and screenshots find most of the bugs.
 
