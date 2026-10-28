@@ -61,7 +61,7 @@ typedef struct {
     // cheats (runtime/ui/cheats.mm), applied every frame while a save is loaded
     bool cheat_hearts;   // health kept full
     bool cheat_ammo;     // bombs / arrows / magic powder kept full (for the bags Link owns)
-    bool cheat_rupees;   // rupees kept at 999
+    bool cheat_rupees;   // rupees kept at 9999
     bool cheat_hookshot; // hookshot latches onto any surface (Gameplay tab; runtime/hle/hookshot.c; seeds made with it: always)
     bool no_buff_drops;  // no Guardian Acorns / Pieces of Power (Gameplay tab; runtime/hle/qol.c; seeds made with it: always)
     // difficulty (runtime/ui/difficulty.mm)
